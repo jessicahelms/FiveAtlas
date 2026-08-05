@@ -6,6 +6,7 @@ imagecodecs        # decodes the JPEG2000 tiles in the morphology OME-TIFF
 python-multipart
 tifffile
 zarr<3
+numcodecs<0.16    # 0.16 dropped numcodecs.blosc.cbuffer_sizes, which zarr 2.x imports
 shapely
 rasterio
 numpy
