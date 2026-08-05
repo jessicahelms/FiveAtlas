@@ -80,15 +80,40 @@ BUILT="$DIST_DIR/FiveAtlas.app"
 [[ -d "$BUILT" ]] || { echo "FiveAtlas.app was not produced" >&2; exit 1; }
 
 # 3. sign --------------------------------------------------------------------
-# Ad-hoc (-) signing is not a trust signature -- Gatekeeper still warns -- but on
-# Apple Silicon an *unsigned* binary will not execute at all, so this is not
-# optional. Set CODESIGN_ID to a "Developer ID Application: ..." identity to
-# produce something colleagues can open without the quarantine dance.
+# On Apple Silicon an unsigned binary will not execute at all -- but PyInstaller
+# has ALREADY ad-hoc signed every Mach-O it produced, so there is nothing to do
+# in the default case.
+#
+# Do NOT "just re-sign to be safe" with `codesign --force --deep --sign -`: on a
+# PyInstaller bundle that clobbers the per-binary signatures PyInstaller made,
+# and the kernel then SIGKILLs the app the moment it loads. It fails silently
+# too -- `codesign --verify` still passes, because the signature is structurally
+# valid, it just no longer matches what the loader wants. That mistake cost this
+# build one CI round; the app packaged fine and died instantly on launch.
+#
+# Set CODESIGN_ID to a "Developer ID Application: ..." identity to produce
+# something colleagues can open without the quarantine dance. Even then, no
+# --deep: it is deprecated, and the inner code is already signed.
 echo "[3/5] signing..."
-SIGN_ID="${CODESIGN_ID:--}"
-codesign --force --deep --sign "$SIGN_ID" --timestamp=none "$BUILT" 2>/dev/null || \
-    codesign --force --deep --sign - "$BUILT"
-codesign --verify --deep --strict "$BUILT" && echo "      signed with: $SIGN_ID"
+if [[ -n "${CODESIGN_ID:-}" ]]; then
+    codesign --force --sign "$CODESIGN_ID" --options runtime --timestamp "$BUILT"
+    echo "      signed with: $CODESIGN_ID"
+else
+    echo "      leaving PyInstaller's ad-hoc signature alone"
+fi
+codesign --verify --strict "$BUILT" && echo "      signature verifies"
+# Verifying is not the same as running. Actually launch it -- a bundle that the
+# kernel refuses shows up here as a non-zero exit within a second or two.
+if "$BUILT/Contents/MacOS/FiveAtlas" --pick nonsense-mode >/dev/null 2>&1; then
+    echo "      launches OK"
+else
+    rc=$?
+    # --pick with a bad mode exits 0 after printing an empty line; anything else,
+    # and particularly 137 (SIGKILL), means the bundle itself will not load.
+    [[ $rc -eq 137 || $rc -eq 9 ]] && {
+        echo "app is SIGKILLed on launch -- signature is broken" >&2; exit 1; }
+    echo "      launch check returned $rc (non-fatal)"
+fi
 
 STAGED="$RELEASE/FiveAtlas.app"
 rm -rf "$STAGED"
