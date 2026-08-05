@@ -99,6 +99,18 @@ jobs:
           set +e
           APP="$HOME/Library/Caches/FiveAtlas_build/release/FiveAtlas.app"
           OUT="$RUNNER_TEMP/app-stdout.txt"
+
+          # Workflow logs need admin rights to download via the API, but check-run
+          # ANNOTATIONS are public. So the diagnostics go out as ::error:: lines,
+          # which means they can be read straight from the API when this fails.
+          # Newlines have to be percent-encoded to survive a workflow command.
+          annotate() {
+            local title="$1" body
+            body=$(head -c 4000 "$2" 2>/dev/null | python3 -c \
+              "import sys;print(sys.stdin.read().replace('%','%25').replace('\r','%0D').replace('\n','%0A'))")
+            [ -n "$body" ] && echo "::error title=${title}::${body}"
+          }
+
           "$APP/Contents/MacOS/FiveAtlas" >"$OUT" 2>&1 &
           PID=$!
           for i in $(seq 1 45); do
@@ -108,25 +120,32 @@ jobs:
               kill $PID 2>/dev/null
               exit 0
             fi
-            # If the process is already gone, stop waiting and report why.
             if ! kill -0 $PID 2>/dev/null; then
               wait $PID; rc=$?
-              echo "::error::app exited after ${i}s with code $rc"
-              [ $rc -eq 137 ] && echo "::error::137 = SIGKILL, the bundle's signature is rejected by the kernel"
+              echo "::error title=exit::app exited after ${i}s with code $rc"
+              [ $rc -eq 137 ] && echo "::error title=sigkill::137 = SIGKILL, the kernel is rejecting the bundle signature"
               break
             fi
             sleep 1
           done
-          echo "===== app stdout/stderr ====="
-          cat "$OUT" 2>/dev/null
-          echo "===== FiveAtlas.log ====="
-          cat "$HOME/Library/Application Support/FiveAtlas/FiveAtlas.log" 2>/dev/null
-          echo "===== what is listening ====="
-          lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | head -20
-          echo "===== bundle ====="
-          ls -la "$APP/Contents/MacOS/" | head
-          codesign -dv --verbose=2 "$APP" 2>&1 | head -20
-          kill $PID 2>/dev/null
+
+          # Still alive but not serving is the interesting case: dump where it got to.
+          kill -0 $PID 2>/dev/null && echo "::error title=state::process $PID still alive but never answered /api/health"
+          sample $PID 2 -f "$RUNNER_TEMP/sample.txt" >/dev/null 2>&1
+          lsof -nP -iTCP -sTCP:LISTEN >"$RUNNER_TEMP/listening.txt" 2>/dev/null
+          cp "$HOME/Library/Application Support/FiveAtlas/FiveAtlas.log" "$RUNNER_TEMP/fiveatlas.log" 2>/dev/null
+
+          echo "===== app stdout/stderr ====="; cat "$OUT" 2>/dev/null
+          echo "===== FiveAtlas.log =====";     cat "$RUNNER_TEMP/fiveatlas.log" 2>/dev/null
+          echo "===== listening =====";         cat "$RUNNER_TEMP/listening.txt" 2>/dev/null
+          echo "===== stack sample =====";      head -60 "$RUNNER_TEMP/sample.txt" 2>/dev/null
+
+          annotate "app-stdout" "$OUT"
+          annotate "fiveatlas-log" "$RUNNER_TEMP/fiveatlas.log"
+          annotate "listening" "$RUNNER_TEMP/listening.txt"
+          annotate "stack-sample" "$RUNNER_TEMP/sample.txt"
+
+          kill -9 $PID 2>/dev/null
           exit 1
 
       # if: always() -- the whole point is to get the .dmg and the logs out even
@@ -140,6 +159,9 @@ jobs:
             ~/Library/Caches/FiveAtlas_build/release/*.zip
             ~/Library/Caches/FiveAtlas_build/release/README.txt
             ${{ runner.temp }}/app-stdout.txt
+            ${{ runner.temp }}/fiveatlas.log
+            ${{ runner.temp }}/listening.txt
+            ${{ runner.temp }}/sample.txt
           if-no-files-found: warn
 
       # Only publish a Release from a build that actually ran. A .dmg that fails
