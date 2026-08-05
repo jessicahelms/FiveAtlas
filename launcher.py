@@ -110,6 +110,13 @@ def _run_picker_mode() -> bool:
         return False
     import nativedialog
     kind = sys.argv[2]
+    # Anything that is not "folder" used to fall through to the *file* picker,
+    # so a typo silently opened a modal dialog and blocked until someone closed
+    # it -- which on a headless machine is never. Refuse instead.
+    if kind not in ("folder", "file"):
+        print(f"[picker] unknown kind {kind!r}; expected 'folder' or 'file'",
+              file=sys.stderr)
+        return True
     initial = sys.argv[3] if len(sys.argv) > 3 else None
     title = "Select dataset folder" if kind == "folder" else "Select a GeoJSON region file"
     try:
