@@ -128,6 +128,14 @@ else
         echo "  137/9 = SIGKILL: the kernel is rejecting the bundle's signature" >&2
     echo "---- app output ----" >&2
     cat "$LAUNCH_LOG" >&2 2>/dev/null || true
+    # Under Actions, also emit it as a check-run annotation: workflow logs need
+    # admin rights to fetch through the API, but annotations are public, so this
+    # is the only copy of the error readable from outside the browser.
+    if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+        body=$(head -c 4000 "$LAUNCH_LOG" 2>/dev/null | python3 -c \
+          "import sys;print(sys.stdin.read().replace('%','%25').replace('\r','%0D').replace('\n','%0A'))")
+        echo "::error title=launch-check (exit $rc)::${body}"
+    fi
     exit 1
 fi
 
