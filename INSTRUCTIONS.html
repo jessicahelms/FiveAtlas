@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FiveAtlas — Instructions</title>
+<style>*,*::before,*::after{box-sizing:border-box}body{margin:0}</style>
+</head>
+<body>
+<style>
+  :root { color-scheme: light; }
+  body {
+    background: #ffffff;
+    color: #000000;
+    font-family: "Segoe UI", Calibri, Arial, sans-serif;
+    font-size: 11pt;
+    line-height: 1.5;
+    margin: 0 auto;
+    padding: 2.5rem 1.5rem 4rem;
+    max-width: 44rem;
+  }
+  p.title { font-weight: 700; margin: 0 0 1.5rem; }
+  ol { margin: 0; padding-left: 1.6rem; }
+  li { margin-bottom: 0.9rem; }
+  li:last-child { margin-bottom: 0; }
+
+  @media print {
+    body { padding: 0; font-size: 10.5pt; max-width: none; }
+    @page { margin: 18mm 16mm; }
+    li { break-inside: avoid; }
+  }
+</style>
+
+<p class="title">FiveAtlas — Instructions</p>
+
+<ol>
+  <li>All you need to do is extract the zip file, then in the extracted folder, you will see the FiveAtlas.exe file. Double click, and it will start running! The first time you run it, you might get a Windows error saying that it does not trust this app. Just press “More info” and then “Run anyway.”</li>
+
+  <li>To load in data, press Open Folder, and click on the folder that contains the morphology_focus folder, morphology.ome.tiff, transcripts.zarr.zip, etc. All of these files should already be in one folder based on how Xenium exports their data. If there is a .geojson file in that folder, it will load in automatically. If you want to load in a different one, you can scroll down on the sidebar and press “Load regions file”. This may take a few seconds, and if it does not pop up, look at your task bar for a new tab!</li>
+
+  <li>If you are ever unsure about how to use certain features, there are instructions that pop up after you click on a feature.</li>
+
+  <li>All of your regions are listed in the sidebar. Click one to select it. Right click a region, either in the list or on the image, to rename it, change its colour, or delete it. If a name appears twice with “part 1/2” beside it, that is one region made of two separate pieces, and anything you do applies to both.</li>
+
+  <li>Edit points reshapes a region by hand. Select the region, then drag the points along its outline. Tick Proportional editing underneath and the nearby points will follow the one you are dragging, and you can scroll your mouse wheel while dragging to change how much of the outline comes with it.</li>
+
+  <li>Edit shared borders works on the line between two regions. Click two regions that touch and you can drag the border between them, and both sides update together so you never open up a gap.</li>
+
+  <li>Pick two or more regions and press Share borders to tidy up all the boundaries at once: small gaps get filled, overlaps get removed, and every pair ends up with one shared edge. Merge into one instead combines everything you picked into a single region.</li>
+
+  <li>Once you have shared borders, a Resample points slider appears. Drag it from fine to coarse and the points on the border change as you go, then press Apply to keep them or Cancel to put the old ones back. This is useful when a border has far more points on it than you can work with.</li>
+
+  <li>Split a region cuts one region into two. Select the region, then draw a line all the way across it on the image, clicking for each point, and right click (or press Enter) to finish. Press Esc to throw the line away and start again.</li>
+
+  <li>Add a new region lets you draw one from scratch. Trace the outline on the image the same way, clicking for each point, then right click or Enter to finish and Esc to cancel. Whatever you draw over is taken out of the region underneath.</li>
+
+  <li>Fix a gap is for empty spaces left behind between regions. Click inside one and it will be outlined in red, then press Dissolve to hand it to the regions around it, or New region to turn it into a region of its own.</li>
+
+  <li>Snap neighbors is for after you have moved a region by hand. It makes the neighbouring regions line up with the one you changed, filling in anywhere it moved away from and giving up anywhere it moved into.</li>
+
+  <li>Undo is Ctrl+Z and redo is Ctrl+Y, and they work for everything above.</li>
+
+  <li>Press Save whenever you want to keep your progress. Your original files are never changed, and every save keeps a dated copy so you can always go back to an earlier one.</li>
+
+  <li>Check geometry will tell you if anything is wrong with your outlines, and offers to repair the ones it can fix on its own.</li>
+
+  <li>When you are done, press Export. Merged gives you one .geojson with every region in it, and Separate gives you a zip with one file per region.</li>
+</ol>
+
+</body>
+</html>

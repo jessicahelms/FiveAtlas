@@ -1,0 +1,125 @@
+# Build the macOS FiveAtlas app on GitHub's Mac runners.
+#
+# This exists so you can ship a Mac build without owning a Mac: PyInstaller
+# cannot cross-compile, so the app has to be built on the OS *and* the CPU
+# architecture it will run on. The matrix covers both:
+#   macos-14 -> Apple Silicon (arm64)   -- what almost every Mac bought since 2021 is
+#   macos-13 -> Intel (x86_64)          -- drop this job once nobody is on an Intel Mac
+#
+# Run it from the Actions tab ("Run workflow"), or push a tag like v0.2.0.
+# The .dmg and .zip come out as downloadable build artifacts; a tag push also
+# attaches them to a GitHub Release, which is the link you send colleagues.
+name: Build FiveAtlas (macOS)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version string baked into the app and filenames"
+        required: false
+        default: "0.1.0"
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write        # needed to attach the .dmg to a Release on a tag push
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            arch: arm64
+          - runner: macos-13
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # 3.11, not the 3.9 the Windows venv uses: 3.9 is past end-of-life and
+      # several of these packages no longer publish macOS arm64 wheels for it,
+      # which would mean compiling GEOS and the imagecodecs stack from source.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend deps
+        working-directory: frontend
+        run: npm ci
+
+      # requirements.txt is the pinned set (backend/requirements.txt is the loose
+      # one, and it lists rasterio, which nothing imports -- it would drag in
+      # GDAL for nothing).
+      - name: Install backend deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${{ inputs.version || '0.1.0' }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build
+        run: |
+          chmod +x build_release_mac.sh
+          ./build_release_mac.sh --version "${{ steps.ver.outputs.value }}"
+
+      # Proves the bundle actually starts and serves the UI on this runner --
+      # a missing hidden import or codec dylib fails here rather than on a
+      # colleague's laptop. ATLAS_NO_BROWSER keeps it from opening Safari.
+      - name: Smoke-test the built app
+        env:
+          ATLAS_NO_BROWSER: "1"
+          ATLAS_PORT: "8051"
+        run: |
+          APP="$HOME/Library/Caches/FiveAtlas_build/release/FiveAtlas.app"
+          "$APP/Contents/MacOS/FiveAtlas" &
+          PID=$!
+          for i in $(seq 1 45); do
+            if curl -fsS "http://127.0.0.1:8051/api/health" >/dev/null 2>&1; then
+              echo "health OK after ${i}s"
+              curl -fsS "http://127.0.0.1:8051/" | head -c 200; echo
+              kill $PID 2>/dev/null || true
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "app did not answer /api/health within 45s" >&2
+          echo "---- log ----"
+          cat "$HOME/Library/Application Support/FiveAtlas/FiveAtlas.log" 2>/dev/null || true
+          kill $PID 2>/dev/null || true
+          exit 1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FiveAtlas-macos-${{ matrix.arch }}
+          path: |
+            ~/Library/Caches/FiveAtlas_build/release/*.dmg
+            ~/Library/Caches/FiveAtlas_build/release/*.zip
+            ~/Library/Caches/FiveAtlas_build/release/README.txt
+          if-no-files-found: error
+
+      - name: Attach to release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ~/Library/Caches/FiveAtlas_build/release/*.dmg
+            ~/Library/Caches/FiveAtlas_build/release/*.zip

@@ -1,0 +1,1627 @@
+import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
+import Viewer, { regionRgb, rgbToPacked } from './Viewer';
+import Sidebar from './Sidebar';
+import ChannelPanel from './ChannelPanel';
+import DatasetBar from './DatasetBar';
+import * as api from './api';
+
+const MOVE_EDITS = new Set([
+  'addPosition', 'removePosition', 'movePosition', 'finishMovePosition',
+  'translating', 'translated', 'rotating', 'rotated', 'scaling', 'scaled',
+]);
+// edit types that should land in the undo history (not every mid-drag frame)
+const COMMIT_EDITS = new Set(['finishMovePosition', 'addPosition', 'removePosition',
+  'translated', 'rotated', 'scaled']);
+
+const DEFAULT_LAYERS = {
+  showDapi: true, showGenes: true, showRegions: true, geneOpacity: 1, stainOpacity: 1,
+};
+
+const GENE_PALETTE = [
+  [255, 64, 64], [80, 220, 80], [90, 130, 255], [255, 215, 60],
+  [255, 110, 245], [70, 235, 225], [255, 150, 60], [180, 120, 255],
+];
+
+// polyline length, for picking the main arc when a pair shares several
+function polyLen(pts) {
+  let s = 0;
+  for (let i = 1; i < pts.length; i++) {
+    s += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
+  }
+  return s;
+}
+
+function normalizeBorderArcs(arcs) {
+  return (arcs || [])
+    .filter((arc) => arc && arc.length >= 2)
+    .map((arc) => arc.map((p) => [+p[0], +p[1]]))
+    .sort((a, b) => polyLen(b) - polyLen(a));
+}
+
+function pointDist(a, b) {
+  if (!a || !b) return Infinity;
+  return Math.hypot(a[0] - b[0], a[1] - b[1]);
+}
+
+function midpointSample(pts) {
+  return pts && pts.length ? pts[Math.floor((pts.length - 1) / 2)] : null;
+}
+
+function arcMatchDistance(candidate, target) {
+  if (!candidate || !target || candidate.length < 2 || target.length < 2) return Infinity;
+  const c0 = candidate[0];
+  const c1 = candidate[candidate.length - 1];
+  const t0 = target[0];
+  const t1 = target[target.length - 1];
+  const endpoints = Math.min(
+    pointDist(c0, t0) + pointDist(c1, t1),
+    pointDist(c0, t1) + pointDist(c1, t0),
+  );
+  return endpoints + pointDist(midpointSample(candidate), midpointSample(target));
+}
+
+function closestArcIndex(arcs, target) {
+  if (!arcs || !arcs.length) return 0;
+  let best = 0;
+  let bestDist = Infinity;
+  arcs.forEach((arc, i) => {
+    const d = arcMatchDistance(arc, target);
+    if (d < bestDist) { best = i; bestDist = d; }
+  });
+  return best;
+}
+
+function borderArcsFc(arcs) {
+  return {
+    type: 'FeatureCollection',
+    features: (arcs || []).map((arc, i) => ({ type: 'Feature', properties: { _border: true, _segment: i },
+      geometry: { type: 'LineString', coordinates: arc.map((p) => [+p[0], +p[1]]) } })),
+  };
+}
+
+function copyArcCoords(coords) {
+  return coords && coords.length ? coords.map((p) => [+p[0], +p[1]]) : null;
+}
+
+function arcChanged(a, b, eps = 0.25) {
+  if (!a || !b || a.length !== b.length) return true;
+  for (let i = 0; i < a.length; i++) {
+    if (pointDist(a[i], b[i]) > eps) return true;
+  }
+  return false;
+}
+
+function closestPointOnSegment(pt, a, b) {
+  const dx = b[0] - a[0];
+  const dy = b[1] - a[1];
+  const len2 = dx * dx + dy * dy;
+  if (!len2) return { point: [a[0], a[1]], t: 0, dist: pointDist(pt, a) };
+  const raw = ((pt[0] - a[0]) * dx + (pt[1] - a[1]) * dy) / len2;
+  const t = Math.max(0, Math.min(1, raw));
+  const point = [a[0] + dx * t, a[1] + dy * t];
+  return { point, t, dist: pointDist(pt, point) };
+}
+
+function insertPointOnArc(arc, pt, minSpacing = 2) {
+  if (!arc || arc.length < 2 || !pt) return { arc, inserted: false };
+  let best = null;
+  for (let i = 0; i < arc.length - 1; i++) {
+    const cand = closestPointOnSegment(pt, arc[i], arc[i + 1]);
+    if (!best || cand.dist < best.dist) best = { ...cand, index: i };
+  }
+  if (!best) return { arc, inserted: false };
+  const a = arc[best.index];
+  const b = arc[best.index + 1];
+  if (pointDist(best.point, a) < minSpacing || pointDist(best.point, b) < minSpacing) {
+    return { arc, inserted: false, nearExisting: true };
+  }
+  const next = arc.map((p) => [p[0], p[1]]);
+  next.splice(best.index + 1, 0, best.point);
+  return { arc: next, inserted: true, index: best.index + 1 };
+}
+
+function closestArcToPointIndex(arcs, pt) {
+  if (!arcs || !arcs.length || !pt) return 0;
+  let best = 0;
+  let bestDist = Infinity;
+  arcs.forEach((arc, i) => {
+    for (let j = 0; j < arc.length - 1; j++) {
+      const cand = closestPointOnSegment(pt, arc[j], arc[j + 1]);
+      if (cand.dist < bestDist) { best = i; bestDist = cand.dist; }
+    }
+  });
+  return best;
+}
+
+function featureName(feature, idProp = 'name') {
+  const props = (feature && feature.properties) || {};
+  const value = props[idProp] ?? props.name;
+  return value == null ? '' : String(value);
+}
+
+function featureByName(fc, name, idProp = 'name') {
+  return fc && fc.features && fc.features.find((f) => featureName(f, idProp) === String(name));
+}
+
+function hasMovedGeometryDelta(before, after, moved, idProp = 'name') {
+  if (!before || !after || !moved || !moved.length) return false;
+  return moved.some((name) => {
+    const bf = featureByName(before, name, idProp);
+    const af = featureByName(after, name, idProp);
+    if (!bf || !af) return Boolean(bf || af);
+    return JSON.stringify(bf.geometry) !== JSON.stringify(af.geometry);
+  });
+}
+
+function findSnapBaseline(preferred, after, moved, history, idProp = 'name') {
+  if (hasMovedGeometryDelta(preferred, after, moved, idProp)) return preferred;
+  for (let i = (history || []).length - 2; i >= 0; i--) {
+    if (hasMovedGeometryDelta(history[i], after, moved, idProp)) return history[i];
+  }
+  return preferred;
+}
+
+function renameFeatureProperties(feature, idProp, nextProps) {
+  const current = (feature && feature.properties) || {};
+  const props = { ...current, ...(nextProps || {}) };
+  const oldName = featureName(feature, idProp);
+  const rawName = props[idProp] ?? props.name;
+  const newName = String(rawName == null ? '' : rawName).trim();
+  if (!newName) throw new Error('Region name cannot be blank.');
+  props[idProp] = newName;
+  if (Object.prototype.hasOwnProperty.call(props, 'name')) props.name = newName;
+  if (props.classification && typeof props.classification === 'object' && !Array.isArray(props.classification)) {
+    props.classification = { ...props.classification, name: newName };
+  }
+  return { props, oldName, newName };
+}
+
+// FastAPI reports our refusal reasons as {"detail": "..."} inside the body text.
+// Pull the reason out so the user sees "no gap there", not "422: {"detail":...}".
+function apiDetail(e) {
+  const msg = String(e).replace(/^Error:\s*/, '').replace(/^\d+:\s*/, '');
+  try {
+    const parsed = JSON.parse(msg);
+    return parsed.detail || msg;
+  } catch {
+    return msg;
+  }
+}
+
+function formatGapPx(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 'a measurable gap';
+  const places = n < 10 ? 1 : 0;
+  return `${n.toFixed(places)} px`;
+}
+
+/* ==== vertex-count control DISABLED (paused per request) ====
+// ---- client-side vertex-count control (arrow keys) ----
+// Densify by splitting the longest edges (shape-preserving: new points lie on the
+// existing outline, so the polygon is geometrically identical). Coarsen with
+// Douglas-Peucker (keeps corners). Never redistributes, so shared-border bridging
+// still works after adding points.
+const samePt = (a, b) => a[0] === b[0] && a[1] === b[1];
+
+function densifyRing(coords, n) {
+  if (!coords || coords.length < 4) return coords;
+  const closed = samePt(coords[0], coords[coords.length - 1]);
+  const pts = closed ? coords.slice(0, -1) : coords.slice();
+  let guard = 0;
+  while (pts.length < n && guard++ < 100000) {
+    let li = 0, ld = -1;
+    for (let i = 0; i < pts.length; i++) {
+      const a = pts[i], b = pts[(i + 1) % pts.length];
+      const d = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      if (d > ld) { ld = d; li = i; }
+    }
+    const a = pts[li], b = pts[(li + 1) % pts.length];
+    pts.splice(li + 1, 0, [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]);
+  }
+  pts.push(pts[0].slice());
+  return pts;
+}
+function perpDist(p, a, b) {
+  const dx = b[0] - a[0], dy = b[1] - a[1];
+  const L = Math.hypot(dx, dy) || 1;
+  return Math.abs((p[0] - a[0]) * dy - (p[1] - a[1]) * dx) / L;
+}
+function rdp(pts, eps) {
+  if (pts.length < 3) return pts.slice();
+  let dmax = 0, idx = 0;
+  const a = pts[0], b = pts[pts.length - 1];
+  for (let i = 1; i < pts.length - 1; i++) {
+    const d = perpDist(pts[i], a, b);
+    if (d > dmax) { dmax = d; idx = i; }
+  }
+  if (dmax > eps) {
+    return rdp(pts.slice(0, idx + 1), eps).slice(0, -1).concat(rdp(pts.slice(idx), eps));
+  }
+  return [a, b];
+}
+function simplifyRing(coords, n) {
+  if (!coords || coords.length < 6) return coords;
+  const closed = samePt(coords[0], coords[coords.length - 1]);
+  const pts = closed ? coords.slice(0, -1) : coords.slice();
+  if (pts.length <= n) return coords;
+  // split the ring at pts[0] and its farthest vertex, RDP both arcs; binary-search eps
+  let fi = 1, fd = -1;
+  for (let i = 1; i < pts.length; i++) {
+    const d = Math.hypot(pts[i][0] - pts[0][0], pts[i][1] - pts[0][1]);
+    if (d > fd) { fd = d; fi = i; }
+  }
+  const arc1 = pts.slice(0, fi + 1);
+  const arc2 = pts.slice(fi).concat([pts[0]]);
+  const simp = (eps) => rdp(arc1, eps).slice(0, -1).concat(rdp(arc2, eps).slice(0, -1));
+  let lo = 0, hi = (fd || 1000) * 2, best = pts;
+  for (let it = 0; it < 24; it++) {
+    const mid = (lo + hi) / 2;
+    const s = simp(mid);
+    if (s.length > n) lo = mid; else { hi = mid; best = s; }
+  }
+  if (best.length < 4) return coords;   // refuse to collapse
+  const out = best.slice();
+  out.push(out[0].slice());
+  return out;
+}
+function ringCount(coords) { return coords && coords.length ? coords.length - 1 : 0; }
+function resampleRingTo(coords, n) {
+  const cur = ringCount(coords);
+  if (n > cur) return densifyRing(coords, n);
+  if (n < cur) return simplifyRing(coords, n);
+  return coords;
+}
+function exteriorCount(geom) {
+  if (!geom) return 0;
+  const polys = geom.type === 'MultiPolygon' ? geom.coordinates : [geom.coordinates];
+  return polys.reduce((s, p) => s + Math.max(0, (p[0] ? p[0].length - 1 : 0)), 0);
+}
+function resampleGeom(geom, n) {
+  const one = (poly) => poly.map((ring, ri) => resampleRingTo(ring, ri === 0 ? n : Math.max(6, Math.round(n / 2))));
+  if (geom.type === 'MultiPolygon') return { type: 'MultiPolygon', coordinates: geom.coordinates.map(one) };
+  return { type: 'Polygon', coordinates: one(geom.coordinates) };
+}
+==== end disabled vertex-count control ==== */
+
+// ---- proportional editing ----
+function smoothInfluence(t) {
+  const x = 1 - t;
+  return x * x * (3 - 2 * x);
+}
+
+function resolveRing(geom, posIdx) {
+  if (!geom || !posIdx) return null;
+  if (geom.type === 'Polygon') return { ring: geom.coordinates[posIdx[0]], vIdx: posIdx[1] };
+  if (geom.type === 'MultiPolygon') return { ring: geom.coordinates[posIdx[0]][posIdx[1]], vIdx: posIdx[2] };
+  return null;
+}
+function setRing(geom, posIdx, newRing) {
+  if (geom.type === 'Polygon') {
+    return { type: 'Polygon', coordinates: geom.coordinates.map((r, i) => (i === posIdx[0] ? newRing : r)) };
+  }
+  if (geom.type === 'MultiPolygon') {
+    return { type: 'MultiPolygon', coordinates: geom.coordinates.map((poly, i) => (i === posIdx[0]
+      ? poly.map((r, j) => (j === posIdx[1] ? newRing : r)) : poly)) };
+  }
+  return geom;
+}
+// nearest vertex of a (Multi)Polygon geometry to a point -> its ring + path
+function nearestVertex(geom, pt) {
+  let bd = Infinity, posIdx = null, ring = null, vIdx = -1;
+  const scan = (r, prefix) => {
+    for (let i = 0; i < r.length; i++) {
+      const d = Math.hypot(r[i][0] - pt[0], r[i][1] - pt[1]);
+      if (d < bd) { bd = d; posIdx = [...prefix, i]; ring = r; vIdx = i; }
+    }
+  };
+  if (!geom) return null;
+  if (geom.type === 'Polygon') geom.coordinates.forEach((r, ri) => scan(r, [ri]));
+  else if (geom.type === 'MultiPolygon') geom.coordinates.forEach((poly, pi) => poly.forEach((r, ri) => scan(r, [pi, ri])));
+  return posIdx ? { posIdx, ring, vIdx, dist: bd } : null;
+}
+
+// offset nearby vertices by distance from the dragged point, within radius R
+function computeRing(base, o, delta, R) {
+  const n = base.length;
+  const closed = n > 1 && base[0][0] === base[n - 1][0] && base[0][1] === base[n - 1][1];
+  const out = base.map((p) => {
+    const d = Math.hypot(p[0] - o[0], p[1] - o[1]);
+    const w = d >= R ? 0 : smoothInfluence(d / R);
+    return [p[0] + delta[0] * w, p[1] + delta[1] * w];
+  });
+  if (closed) out[n - 1] = out[0].slice();
+  return out;
+}
+
+export default function App() {
+  const [datasets, setDatasets] = useState([]);
+  const [dsId, setDsId] = useState(null);
+  const [sources, setSources] = useState(null);
+  const [dsBusy, setDsBusy] = useState(false);
+
+  const [info, setInfo] = useState(null);
+  const [fc, setFc] = useState(null);
+  const [baseline, setBaseline] = useState(null);
+  const idProp = (info && info.idProp) || 'name';
+  const [selected, setSelected] = useState([]);
+  const [mode, setMode] = useState('view');       // 'view' | 'modify' | 'border'
+  const [moved, setMoved] = useState(() => new Set());
+  // shared-border editing: an ordered set of picked regions + the draggable arc
+  const [borderPicks, setBorderPicks] = useState([]);
+  const [borderArc, setBorderArc] = useState(null);   // FC with one LineString
+  const [borderSegments, setBorderSegments] = useState([]);
+  const [borderSegmentIndex, setBorderSegmentIndex] = useState(0);
+  const [borderMsg, setBorderMsg] = useState(null);
+  const [borderShared, setBorderShared] = useState(false);   // true after a Share/tile -> hide the Share/Merge buttons (fine-tune phase)
+  // split: a line the user draws across one region to cut it in two
+  const [splitDraw, setSplitDraw] = useState({ type: 'FeatureCollection', features: [] });
+  const [splitMsg, setSplitMsg] = useState(null);
+  // dissolve: click a leftover void -> preview it, then hand it to its neighbours
+  const [gapFind, setGapFind] = useState(null);   // { gap, area, kind, regions, fc }
+  const [gapMsg, setGapMsg] = useState(null);
+  // draw: an outline the user traces to create a brand-new region
+  const [drawPoly, setDrawPoly] = useState({ type: 'FeatureCollection', features: [] });
+  const [drawMsg, setDrawMsg] = useState(null);
+  // resample: thin the shared border after Share borders
+  const [resampleTol, setResampleTol] = useState(150);
+  const [resample, setResample] = useState(null);   // { counts, fc, tol }
+  const resampleTimer = useRef(null);
+  const resampleUndoRef = useRef(null);   // handles as they were before previewing
+  const [snapInfo, setSnapInfo] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+
+  // undo/redo: snapshots of fc. Refs are the source of truth; histTick re-renders.
+  const historyRef = useRef([]);
+  const histIdxRef = useRef(-1);
+  const [histTick, setHistTick] = useState(0);
+  // const resampleRef = useRef(null);   // vertex-count control disabled (paused)
+
+  // proportional editing (drag one point, nearby points follow within a radius)
+  const [propEdit, setPropEdit] = useState(false);
+  const [propRadius, setPropRadius] = useState(400);
+  const [propRing, setPropRing] = useState(null);   // {center, radius} drawn while dragging
+  // right-click a region -> rename it
+  const [regionMenu, setRegionMenu] = useState(null);   // {index, name, x, y}
+  const [menuView, setMenuView] = useState('menu');     // 'menu' | 'rename' | 'delete'
+  const [renameDraft, setRenameDraft] = useState('');
+  // geometry check / blocked export
+  const [geomReport, setGeomReport] = useState(null);   // {problems, counts, mode, title}
+  const pedRef = useRef({ active: false });   // frozen base ring during a vertex drag
+  const fcRef = useRef(fc);
+  fcRef.current = fc;
+  const propRadiusRef = useRef(propRadius);
+  propRadiusRef.current = propRadius;
+  const borderArcRef = useRef(borderArc);
+  borderArcRef.current = borderArc;
+  const borderSegmentsRef = useRef(borderSegments);
+  borderSegmentsRef.current = borderSegments;
+  const dragStartArcRef = useRef(null);    // current shown arc captured at this drag's start, not a persistent original
+  const pendingBridgeRef = useRef(null);   // full-border FC from a pick; applied only on the first edit
+
+  const currentBorderArcCoords = useCallback((segmentIndex = borderSegmentIndex) => {
+    const features = borderArcRef.current && borderArcRef.current.features;
+    const safeIndex = Math.max(0, Math.min(segmentIndex || 0, (features || []).length - 1));
+    const cur = features && features[safeIndex] && features[safeIndex].geometry.coordinates;
+    return copyArcCoords(cur);
+  }, [borderSegmentIndex]);
+
+  const stableBorderArcCoords = useCallback((segmentIndex = borderSegmentIndex) => {
+    const segments = borderSegmentsRef.current || [];
+    const safeIndex = Math.max(0, Math.min(segmentIndex || 0, Math.max(segments.length - 1, 0)));
+    return copyArcCoords(segments[safeIndex]) || currentBorderArcCoords(safeIndex);
+  }, [borderSegmentIndex, currentBorderArcCoords]);
+
+  const replaceVisibleBorderArc = useCallback((coords, segmentIndex = borderSegmentIndex) => {
+    const arc = copyArcCoords(coords);
+    if (!arc) return false;
+    const safeIndex = Math.max(0, segmentIndex || 0);
+    setBorderArc((prev) => {
+      const features = prev && prev.features && prev.features.length
+        ? prev.features.slice()
+        : borderArcsFc(borderSegments.length ? borderSegments : [arc]).features;
+      features[safeIndex] = { type: 'Feature', properties: { _border: true, _segment: safeIndex },
+        geometry: { type: 'LineString', coordinates: arc } };
+      return { type: 'FeatureCollection', features };
+    });
+    setBorderSegments((prev) => (prev.length
+      ? prev.map((seg, i) => (i === safeIndex ? arc : seg))
+      : [arc]));
+    return true;
+  }, [borderSegmentIndex, borderSegments]);
+
+  // genes (composite bitmap)
+  const [geneInfo, setGeneInfo] = useState(null);
+  const [channels, setChannels] = useState(null);
+  const [geneBitmap, setGeneBitmap] = useState(null);
+  const [geneBounds, setGeneBounds] = useState(null);
+  // stains (morphology_focus, full-res tiled)
+  const [stainInfo, setStainInfo] = useState(null);
+  const [stainChannels, setStainChannels] = useState(null);
+
+  const [layers, setLayers] = useState(DEFAULT_LAYERS);
+
+  // ---- undo/redo history ----
+  const record = useCallback((nextFc) => {
+    const base = historyRef.current.slice(0, histIdxRef.current + 1);
+    base.push(nextFc);
+    while (base.length > 200) base.shift();
+    historyRef.current = base;
+    histIdxRef.current = base.length - 1;
+    setHistTick((t) => t + 1);
+  }, []);
+  const commit = useCallback((nextFc) => { fcRef.current = nextFc; setFc(nextFc); record(nextFc); }, [record]);
+  const initHistory = useCallback((fc0) => {
+    historyRef.current = [fc0];
+    histIdxRef.current = 0;
+    setHistTick((t) => t + 1);
+  }, []);
+  const undo = useCallback(() => {
+    if (histIdxRef.current <= 0) return;
+    histIdxRef.current -= 1;
+    const prevFc = historyRef.current[histIdxRef.current];
+    fcRef.current = prevFc;
+    setFc(prevFc);
+    setBorderArc(null); setHistTick((t) => t + 1);
+  }, []);
+  const redo = useCallback(() => {
+    if (histIdxRef.current >= historyRef.current.length - 1) return;
+    histIdxRef.current += 1;
+    const nextFc = historyRef.current[histIdxRef.current];
+    fcRef.current = nextFc;
+    setFc(nextFc);
+    setBorderArc(null); setHistTick((t) => t + 1);
+  }, []);
+  const canUndo = histIdxRef.current > 0;
+  const canRedo = histIdxRef.current < historyRef.current.length - 1;
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const list = await api.listDatasets();
+        setDatasets(list);
+        setDsId((cur) => cur || (list[0] && list[0].id) || null);
+      } catch (e) { /* ignore */ }
+    })();
+  }, []);
+
+  useEffect(() => {
+    if (!dsId) return;
+    let cancel = false;
+    (async () => {
+      setInfo(null); setFc(null); setError(null);
+      setGeneInfo(null); setChannels(null); setGeneBitmap(null); setGeneBounds(null);
+      setStainInfo(null); setStainChannels(null);
+      try {
+        const i = await api.getInfo(dsId);
+        if (cancel) return;
+        let r = { type: 'FeatureCollection', features: [] };
+        try { r = await api.getRegions(dsId); } catch (e) { /* none */ }
+        let s = null;
+        try { s = await api.getSources(dsId); } catch (e) { /* optional */ }
+        if (cancel) return;
+        fcRef.current = r;
+        setInfo(i); setFc(r); setBaseline(r); setSources(s); initHistory(r);
+        setSelected([]); setMoved(new Set()); setSnapInfo(null); setMode('view');
+        setBorderPicks([]); setBorderArc(null); setBorderSegments([]); setBorderSegmentIndex(0); setBorderMsg(null);
+        try {
+          const g = await api.getGenes(dsId);
+          if (!cancel && g && g.defaults) {
+            setGeneInfo(g); setGeneBounds(g.bounds);
+            setChannels(g.defaults.map((c) => ({
+              gene: c.gene, color: c.color, min: c.min, max: c.max,
+              dataMax: c.dataMax, visible: true,
+            })));
+          }
+        } catch (e) { /* no genes */ }
+        try {
+          const st = await api.getStains(dsId);
+          if (!cancel && st && st.channels && st.channels.length) {
+            setStainInfo(st);
+            setStainChannels(st.channels.map((c) => ({
+              index: c.index, name: c.name, color: c.color,
+              min: 0, max: 1000, dataMax: 65535, visible: true, contrastLoaded: false,
+            })));
+            setLayers((l) => ({ ...l, showDapi: false })); // stains include DAPI
+            st.channels.forEach((c) => loadStainContrast(c.index));
+          }
+        } catch (e) { /* no stains */ }
+      } catch (e) { if (!cancel) setError(String(e)); }
+    })();
+    return () => { cancel = true; };
+  }, [dsId]);
+
+  // debounced gene composite
+  useEffect(() => {
+    if (!channels) return;
+    let cancel = false;
+    const t = setTimeout(async () => {
+      try { const bmp = await api.compositeBitmap(dsId, channels); if (!cancel) setGeneBitmap(bmp); }
+      catch (e) { /* ignore */ }
+    }, 120);
+    return () => { cancel = true; clearTimeout(t); };
+  }, [channels, dsId]);
+
+  const loadStainContrast = useCallback(async (idx, tries = 0) => {
+    try {
+      const c = await api.stainContrast(dsId, idx);
+      if (!c) { if (tries < 12) setTimeout(() => loadStainContrast(idx, tries + 1), 5000); return; }
+      setStainChannels((chs) => chs && chs.map((ch) => (ch.index === idx
+        ? { ...ch, min: c.min, max: c.max, dataMax: c.dataMax, contrastLoaded: true } : ch)));
+    } catch (e) { /* ignore */ }
+  }, [dsId]);
+
+  const loadOpened = useCallback(async (path) => {
+    setDsBusy(true); setError(null);
+    try {
+      const res = await api.openDataset(path);
+      setDatasets(await api.listDatasets());
+      setDsId(res.id);
+    } catch (e) { setError(String(e)); } finally { setDsBusy(false); }
+  }, []);
+
+  const openFolder = useCallback(async () => {
+    setDsBusy(true); setError(null);
+    try {
+      const { path } = await api.browseFolder();
+      if (path) {
+        const res = await api.openDataset(path);
+        setDatasets(await api.listDatasets());
+        setDsId(res.id);
+      }
+    } catch (e) { setError(String(e)); } finally { setDsBusy(false); }
+  }, []);
+
+  // Proportional editing: the library moved ONE vertex; re-derive every vertex in
+  // that ring from the frozen pre-drag base, limited by the radius.
+  const applyProportional = useCallback((updatedData, editContext, editType) => {
+    const fi = editContext.featureIndexes[0];
+    const posIdx = editContext.positionIndexes;
+    const feat = updatedData.features[fi];
+    if (!feat || !posIdx) return updatedData;
+    const cur = resolveRing(feat.geometry, posIdx);
+    if (!cur || !cur.ring) return updatedData;
+    const newPos = cur.ring[cur.vIdx];
+    const ped = pedRef.current;
+    const key = fi + ':' + posIdx.join(',');
+    if (!ped.active || ped.key !== key) {              // drag start -> freeze base
+      const baseFeat = fcRef.current && fcRef.current.features[fi];
+      const br = baseFeat && resolveRing(baseFeat.geometry, posIdx);
+      if (!br || !br.ring) return updatedData;
+      ped.active = true; ped.kind = 'region'; ped.key = key; ped.fi = fi; ped.posIdx = posIdx;
+      ped.baseRing = br.ring.map((p) => [p[0], p[1]]);
+      ped.origPos = ped.baseRing[br.vIdx].slice();
+    }
+    ped.lastDelta = [newPos[0] - ped.origPos[0], newPos[1] - ped.origPos[1]];
+    setPropRing({ center: ped.origPos.slice(), radius: Math.max(1, propRadius) });
+    const out = computeRing(ped.baseRing, ped.origPos, ped.lastDelta, Math.max(1, propRadius));
+    const newGeom = setRing(feat.geometry, posIdx, out);
+    const feats = updatedData.features.map((f, i) => (i === fi ? { ...f, geometry: newGeom } : f));
+    if (editType === 'finishMovePosition') ped.active = false;
+    return { ...updatedData, features: feats };
+  }, [propRadius]);
+
+  const onEdit = useCallback(({ updatedData, editType, editContext }) => {
+    let data = updatedData;
+    if (propEdit && (editType === 'movePosition' || editType === 'finishMovePosition')
+        && editContext && editContext.featureIndexes && editContext.positionIndexes) {
+      data = applyProportional(updatedData, editContext, editType);
+    }
+    fcRef.current = data;
+    setFc(data);                              // live (every drag frame)
+    if (MOVE_EDITS.has(editType)) {
+      const idxs = (editContext && editContext.featureIndexes) || selected;
+      setMoved((prev) => {
+        const nn = new Set(prev);
+        idxs.forEach((i) => {
+          const f = data.features[i];
+          const nm = featureName(f, idProp);
+          if (nm) nn.add(nm);
+        });
+        return nn;
+      });
+    }
+    if (COMMIT_EDITS.has(editType)) record(data);   // one undo step per edit
+  }, [selected, record, propEdit, applyProportional, idProp]);
+
+  // re-apply proportional movement with a new radius mid-drag
+  const recomputeProportional = useCallback((radius) => {
+    const ped = pedRef.current;
+    if (!ped.active || !ped.baseRing || !ped.lastDelta) return;
+    setPropRing({ center: ped.origPos.slice(), radius: Math.max(1, radius) });
+    const out = computeRing(ped.baseRing, ped.origPos, ped.lastDelta, Math.max(1, radius));
+    if (ped.kind === 'border') {   // reshape the shared-border arc live (regions rebuild on release)
+      // pin the endpoints so the segment stays anchored to the two regions' outlines
+      out[0] = ped.baseRing[0].slice();
+      out[out.length - 1] = ped.baseRing[ped.baseRing.length - 1].slice();
+      const seg = Math.max(0, ped.seg || 0);
+      // rewrite ONLY the dragged segment — the other interrupted segments stay on screen
+      setBorderArc((prev) => {
+        const features = prev && prev.features && prev.features.length ? prev.features.slice() : [];
+        features[seg] = { type: 'Feature', properties: { _border: true, _segment: seg },
+          geometry: { type: 'LineString', coordinates: out } };
+        return { type: 'FeatureCollection', features };
+      });
+      return;
+    }
+    if (!fcRef.current) return;
+    const feat = fcRef.current.features[ped.fi];
+    if (!feat) return;
+    const newGeom = setRing(feat.geometry, ped.posIdx, out);
+    const feats = fcRef.current.features.map((f, i) => (i === ped.fi ? { ...f, geometry: newGeom } : f));
+    const nextFc = { ...fcRef.current, features: feats };
+    fcRef.current = nextFc;
+    setFc(nextFc);
+  }, []);
+
+  // scroll wheel resizes the proportional radius WHILE a vertex is being dragged
+  // (otherwise the wheel zooms the map as usual)
+  useEffect(() => {
+    const el = document.querySelector('.canvas-wrap');
+    if (!el) return undefined;
+    const onWheel = (e) => {
+      if (!propEdit || !pedRef.current.active) return;
+      e.preventDefault(); e.stopPropagation();
+      const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+      const nr = Math.max(10, Math.min(8000, Math.round(propRadiusRef.current * factor)));
+      setPropRadius(nr);
+      recomputeProportional(nr);
+    };
+    el.addEventListener('wheel', onWheel, { passive: false, capture: true });
+    return () => el.removeEventListener('wheel', onWheel, { capture: true });
+  }, [propEdit, recomputeProportional]);
+
+  const setProportionalEditing = useCallback((enabled) => {
+    setPropEdit(Boolean(enabled));
+    if (!enabled) { pedRef.current.active = false; setPropRing(null); }
+  }, []);
+
+
+  // Arm on GRAB (mouse-down on a vertex handle) so the wheel resizes the radius
+  // immediately, rather than only after the first move. Base geometry is frozen on
+  // the first actual move; before that, the wheel just resizes the ring.
+  const onGrabVertex = useCallback((layerId, featureIndex = 0) => {
+    const isBorder = layerId && String(layerId).includes('border-edit');
+    // Capture the current visible segment for this one drag, so move-border only
+    // swaps the sliver swept by this gesture.
+    if (isBorder) {
+      const safeIndex = Math.max(0, featureIndex || 0);
+      setBorderSegmentIndex(safeIndex);
+      dragStartArcRef.current = stableBorderArcCoords(safeIndex);
+    }
+    if (!propEdit) return;
+    const ped = pedRef.current;
+    ped.active = true;
+    ped.kind = isBorder ? 'border' : 'region';
+    ped.seg = isBorder ? Math.max(0, featureIndex || 0) : 0;
+    ped.key = null; ped.bkey = null;    // force the base to re-freeze on the first move
+  }, [propEdit, stableBorderArcCoords]);
+  const onReleaseDrag = useCallback(() => {
+    pedRef.current.active = false;
+    setPropRing(null);      // the falloff circle only shows while a point is held
+  }, []);
+
+  const clearBorder = useCallback(() => {
+    setBorderPicks([]); setBorderArc(null); setBorderMsg(null); setBorderShared(false);
+    setBorderSegments([]); setBorderSegmentIndex(0);
+    dragStartArcRef.current = null;
+    pendingBridgeRef.current = null;
+  }, []);
+  const clearSplit = useCallback(() => {
+    setSplitDraw({ type: 'FeatureCollection', features: [] }); setSplitMsg(null);
+  }, []);
+  const clearGap = useCallback(() => { setGapFind(null); setGapMsg(null); }, []);
+  const clearDraw = useCallback(() => {
+    setDrawPoly({ type: 'FeatureCollection', features: [] }); setDrawMsg(null);
+  }, []);
+
+  const onToggleModify = useCallback(() => {
+    setMode((m) => (m === 'modify' ? 'view' : 'modify'));
+    clearBorder(); clearSplit(); clearGap(); clearDraw();
+  }, [clearBorder, clearSplit, clearGap, clearDraw]);
+
+  const onToggleBorder = useCallback(() => {
+    setMode((m) => (m === 'border' ? 'view' : 'border'));
+    setSelected([]); clearBorder(); clearSplit(); clearGap(); clearDraw();
+  }, [clearBorder, clearSplit, clearGap, clearDraw]);
+
+  const onToggleSplit = useCallback(() => {
+    setMode((m) => (m === 'split' ? 'view' : 'split'));
+    clearBorder(); clearSplit(); clearGap(); clearDraw();
+  }, [clearBorder, clearSplit, clearGap, clearDraw]);
+
+  const onToggleDissolve = useCallback(() => {
+    setMode((m) => (m === 'dissolve' ? 'view' : 'dissolve'));
+    setSelected([]); clearBorder(); clearSplit(); clearGap(); clearDraw();
+  }, [clearBorder, clearSplit, clearGap, clearDraw]);
+
+  const onToggleDraw = useCallback(() => {
+    setMode((m) => (m === 'draw' ? 'view' : 'draw'));
+    setSelected([]); clearBorder(); clearSplit(); clearGap(); clearDraw();
+  }, [clearBorder, clearSplit, clearGap, clearDraw]);
+
+  // Border mode: clicking a region toggles it in the pick set. Exactly two picks
+  // -> fetch (and if needed bridge) their shared border as a draggable arc.
+  const pickBorderRegion = useCallback(async (nm) => {
+    if (!nm) return;
+    if (borderPicks.length === 2 && borderArcRef.current && borderPicks.includes(nm)) {
+      setBorderMsg('Shared border stays selected - drag it, or Clear to pick another pair.');
+      return;
+    }
+    setBorderShared(false);              // changing the pick set -> back to build phase
+    pendingBridgeRef.current = null;
+    dragStartArcRef.current = null;
+    const has = borderPicks.includes(nm);
+    const next = has ? borderPicks.filter((x) => x !== nm) : [...borderPicks, nm];
+    setBorderPicks(next);
+    setBorderArc(null); setBorderSegments([]); setBorderSegmentIndex(0);
+    if (next.length === 2) {
+      setBorderMsg('finding shared border…');
+      try {
+        // CHEAP detection (a slice of one region's outline) -- no partition, so
+        // picking stays snappy. If the outlines are merely near each other, prompt
+        // the user to Share borders before exposing a draggable shared edge.
+        const res = await api.sharedBorder(dsId, next[0], next[1], fc, { bridge: false });
+        const arcs = normalizeBorderArcs(res && res.arcs);
+        if (!arcs.length) {
+          setBorderArc(null);
+          const gap = formatGapPx(res && res.gapPx);
+          setBorderMsg(res && res.touching === false
+            ? `"${next[0]}" and "${next[1]}" are ${gap} apart - click Share borders first to tile the gap.`
+            : `"${next[0]}" and "${next[1]}" aren't adjacent - no shared border to edit.`);
+          return;
+        }
+        if (res && res.touching === false) {
+          const gap = formatGapPx(res.gapPx);
+          setBorderArc(null);
+          setBorderMsg(`"${next[0]}" and "${next[1]}" are ${gap} apart - click Share borders first to make a shared edge, then drag it to fine-tune.`);
+          return;
+        }
+        setBorderSegments(arcs); setBorderSegmentIndex(0); setBorderArc(borderArcsFc(arcs));
+        const gapNote = res && Number(res.gapPx) > 0 ? ` (${formatGapPx(res.gapPx)} tolerance gap)` : '';
+        const segNote = arcs.length > 1 ? ` ${arcs.length} interrupted segments shown.` : '';
+        setBorderMsg(`Shared border detected${gapNote} - drag it to edit; both regions rebuild on release.${segNote}`);
+      } catch (e) { setBorderMsg(String(e)); }
+    } else if (next.length < 2) {
+      setBorderSegments([]); setBorderSegmentIndex(0);
+      setBorderMsg(next.length === 1
+        ? 'Click another region to share a border — or keep picking to tile several.'
+        : null);
+    } else {
+      setBorderSegments([]); setBorderSegmentIndex(0);
+      setBorderMsg(`${next.length} regions picked — “Share borders” tiles them all; unpick to 2 to drag one border.`);
+    }
+  }, [borderPicks, dsId, fc, commit]);
+
+  const applyMoveBorder = useCallback(async (coords, dragStart, segmentIndex = borderSegmentIndex) => {
+    if (borderPicks.length !== 2 || !coords || coords.length < 2) return;
+    const nextCoords = copyArcCoords(coords);
+    const startCoords = copyArcCoords(dragStart);
+    if (startCoords && !arcChanged(startCoords, nextCoords)) {
+      dragStartArcRef.current = null;
+      setBorderMsg('No border move detected - drag a point to edit, or Clear to pick another pair.');
+      return;
+    }
+    const [a, b] = borderPicks;
+    const workingFc = fcRef.current;
+    if (!workingFc) return;
+    setBusy(true); setError(null);
+    try {
+      // `dragStart` is the arc at the start of this gesture, so partial edits
+      // work without anchoring future drags to an older border.
+      const res = await api.moveBorder(dsId, workingFc, a, b, nextCoords, startCoords);
+      commit(res);
+      let segmentNote = '';
+      let refreshed = false;
+      try {
+        const sb = await api.sharedBorder(dsId, a, b, res, { bridge: false });
+        const arcs = normalizeBorderArcs(sb && sb.arcs);
+        if (arcs.length) {
+          const nextIndex = closestArcIndex(arcs, nextCoords);
+          setBorderSegments(arcs);
+          setBorderSegmentIndex(nextIndex);
+          setBorderArc(borderArcsFc(arcs));
+          segmentNote = arcs.length > 1 ? ` ${arcs.length} interrupted segments refreshed.` : '';
+          refreshed = true;
+        }
+      } catch (refreshErr) { /* keep the drawn arc if the canonical refresh fails */ }
+      if (!refreshed) {
+        const nextSegments = borderSegments.length
+          ? borderSegments.map((seg, i) => (i === segmentIndex ? nextCoords : seg))
+          : [nextCoords];
+        setBorderSegments(nextSegments);
+        setBorderArc(borderArcsFc(nextSegments));
+      }
+      setMoved((prev) => { const n = new Set(prev); n.add(a); n.add(b); return n; });
+      const segNote = segmentNote || (borderSegments.length > 1 ? ` ${borderSegments.length} interrupted segments shown.` : '');
+      setBorderMsg(`Border moved ✓.${segNote} Drag again, or Clear to pick another pair.`);
+    } catch (e) {
+      setBorderMsg(`Couldn't move border: ${String(e).replace(/^Error:\s*/, '')}`);
+    } finally { setBusy(false); dragStartArcRef.current = null; }
+  }, [dsId, borderPicks, borderSegmentIndex, borderSegments, commit]);
+
+  const onAddBorderPoint = useCallback((pt, featureIndex = null) => {
+    const segmentIndex = Number.isInteger(featureIndex)
+      ? Math.max(0, featureIndex)
+      : closestArcToPointIndex(borderSegments, pt);
+    const cur = currentBorderArcCoords(segmentIndex);
+    const res = insertPointOnArc(cur, pt);
+    if (!res.inserted) {
+      setBorderMsg(res.nearExisting
+        ? 'There is already a point there - drag it to move the border.'
+        : 'Right-click the red border to add a point.');
+      return;
+    }
+    setBorderSegmentIndex(segmentIndex);
+    replaceVisibleBorderArc(res.arc, segmentIndex);
+    dragStartArcRef.current = null;
+    setBorderMsg(`Point added (${res.arc.length} points). Drag it to move the shared border.`);
+  }, [borderSegments, currentBorderArcCoords, replaceVisibleBorderArc]);
+
+  const onBorderEdit = useCallback(({ updatedData, editType, editContext, featureIndexes }) => {
+    let data = updatedData;
+    const segmentIndex = Math.max(0,
+      (editContext && editContext.featureIndexes && editContext.featureIndexes[0])
+      ?? (featureIndexes && featureIndexes[0])
+      ?? borderSegmentIndex);
+    if (editType === 'removePosition') {
+      dragStartArcRef.current = null;
+      setBorderMsg('Point clicks are protected - drag points to move, or right-click the red border to add one.');
+      return;
+    }
+    if (editType === 'addPosition') {
+      if (!dragStartArcRef.current) dragStartArcRef.current = stableBorderArcCoords(segmentIndex);
+      setBorderSegmentIndex(segmentIndex);
+      const f = data.features[segmentIndex];
+      const coords = f && f.geometry && f.geometry.coordinates;
+      if (coords) replaceVisibleBorderArc(coords, segmentIndex);
+      setBorderMsg(`Point added (${coords ? coords.length : 0} points). Drag it to move the shared border.`);
+      return;
+    }
+    if ((editType === 'movePosition' || editType === 'finishMovePosition') && !dragStartArcRef.current) {
+      dragStartArcRef.current = stableBorderArcCoords(segmentIndex);
+    }
+    // proportional editing on the shared-border arc: nearby arc vertices follow
+    if (propEdit && (editType === 'movePosition' || editType === 'finishMovePosition')
+        && editContext && editContext.positionIndexes && updatedData.features[segmentIndex]) {
+      const coords = updatedData.features[segmentIndex].geometry.coordinates;
+      const vi = editContext.positionIndexes[editContext.positionIndexes.length - 1];
+      const newPos = coords[vi];
+      const ped = pedRef.current;
+      if (newPos && (!ped.active || ped.kind !== 'border' || ped.bkey !== vi)) {   // freeze base
+        const base = borderArcRef.current && borderArcRef.current.features[segmentIndex]
+          && borderArcRef.current.features[segmentIndex].geometry.coordinates;
+        if (base && base[vi]) {
+          ped.active = true; ped.kind = 'border'; ped.bkey = vi; ped.seg = segmentIndex;
+          ped.baseRing = base.map((p) => [p[0], p[1]]);
+          ped.origPos = ped.baseRing[vi].slice();
+        }
+      }
+      if (newPos && ped.kind === 'border' && ped.baseRing && ped.origPos) {
+        ped.lastDelta = [newPos[0] - ped.origPos[0], newPos[1] - ped.origPos[1]];
+        setPropRing({ center: ped.origPos.slice(), radius: Math.max(1, propRadius) });
+        const out = computeRing(ped.baseRing, ped.origPos, ped.lastDelta, Math.max(1, propRadius));
+        // pin the arc endpoints so the border stays anchored to the two regions' outlines
+        out[0] = ped.baseRing[0].slice();
+        out[out.length - 1] = ped.baseRing[ped.baseRing.length - 1].slice();
+        const features = updatedData.features.slice();
+        features[segmentIndex] = { type: 'Feature', properties: { _border: true, _segment: segmentIndex },
+          geometry: { type: 'LineString', coordinates: out } };
+        data = { type: 'FeatureCollection', features };
+      }
+    }
+    const dragStartArc = dragStartArcRef.current || stableBorderArcCoords(segmentIndex);
+    setBorderSegmentIndex(segmentIndex);
+    setBorderArc(data);
+    if (editType === 'finishMovePosition' || editType === 'addPosition' || editType === 'removePosition') {
+      pedRef.current.active = false;
+      const f = data.features[segmentIndex];
+      if (f && f.geometry && f.geometry.coordinates) applyMoveBorder(f.geometry.coordinates, dragStartArc, segmentIndex);
+    }
+  }, [propEdit, propRadius, applyMoveBorder, currentBorderArcCoords, replaceVisibleBorderArc, stableBorderArcCoords, borderSegmentIndex]);
+
+  const doShareBorders = useCallback(async () => {
+    if (borderPicks.length < 2) return;
+    setBusy(true); setError(null);
+    try {
+      const res = await api.partitionRegions(dsId, borderPicks, fc);
+      let newFc = { type: 'FeatureCollection', features: res.features };
+
+      // Sharing leaves a Voronoi-dense, unevenly spaced border, so even it out
+      // straight away rather than making the user reach for the slider. The
+      // slider is still there to go coarser or finer afterwards.
+      let repointed = null;
+      try {
+        const rs = await api.resampleRegions(dsId, borderPicks, newFc, resampleTol);
+        if (rs && rs.features && rs.handles) {
+          newFc = { type: 'FeatureCollection', features: rs.features };
+          repointed = rs;
+        }
+      } catch (e) { /* keep the un-resampled result rather than failing the share */ }
+
+      commit(newFc); setBaseline(newFc);
+      setMoved((prev) => { const n = new Set(prev); borderPicks.forEach((x) => n.add(x)); return n; });
+      setBorderShared(true);          // done sharing -> hide Share/Merge (fine-tune phase)
+      if (borderPicks.length === 2) {
+        // now they share a border -> offer it for dragging
+        let arced = false;
+        let segmentCount = 0;
+        // the resample already told us the arcs; only ask again if it didn't run
+        let arcs = repointed ? normalizeBorderArcs(repointed.arcPoints) : [];
+        if (!arcs.length) {
+          try {
+            const sb = await api.sharedBorder(dsId, borderPicks[0], borderPicks[1], newFc, { bridge: false });
+            arcs = normalizeBorderArcs(sb.arcs);
+          } catch (e) { /* ignore */ }
+        }
+        if (arcs.length) {
+          setBorderSegments(arcs); setBorderSegmentIndex(0); setBorderArc(borderArcsFc(arcs));
+          arced = true; segmentCount = arcs.length;
+        }
+        const spread = repointed && repointed.handles
+          ? ` Points evened out, ${repointed.handles.before} → ${repointed.handles.after}.`
+          : '';
+        setBorderMsg(arced
+          ? `Joined ${borderPicks[0]} & ${borderPicks[1]} ✓ —${spread} drag the border to fine-tune.${segmentCount > 1 ? ` ${segmentCount} interrupted segments shown.` : ''}`
+          : `Joined ${borderPicks[0]} & ${borderPicks[1]} ✓.${spread}`);
+      } else {
+        setBorderArc(null); setBorderSegments([]); setBorderSegmentIndex(0);
+        setBorderMsg(`Shared borders across ${borderPicks.length} regions ✓ (${(res.borders || []).length} borders). Save / Export when done.`);
+      }
+    } catch (e) {
+      setBorderMsg(`Share failed: ${String(e).replace(/^Error:\s*/, '')}`);
+    } finally { setBusy(false); }
+  }, [dsId, fc, borderPicks, commit, resampleTol]);
+
+  // Preview a resample: the backend returns both the counts and the resulting FC,
+  // so Apply commits what was already computed. Debounced -- the slider fires a
+  // lot and each call is real geometry work.
+  const previewResample = useCallback((tolValue) => {
+    setResampleTol(tolValue);
+    // remember the handles as they are now, so Cancel can put them back
+    if (!resampleUndoRef.current) {
+      resampleUndoRef.current = {
+        segments: borderSegmentsRef.current, arc: borderArcRef.current,
+      };
+    }
+    if (resampleTimer.current) clearTimeout(resampleTimer.current);
+    resampleTimer.current = setTimeout(async () => {
+      if (borderPicks.length < 2 || !fcRef.current) return;
+      const source = resample && resample.baseFc ? resample.baseFc : fcRef.current;
+      setBusy(true);
+      try {
+        const res = await api.resampleRegions(dsId, borderPicks, source, tolValue);
+        // Draw the previewed handles straight away -- the whole point is to see
+        // the density change while dragging the slider, not after Apply.
+        const arcs = normalizeBorderArcs(res.arcPoints);
+        if (arcs.length) {
+          setBorderSegments(arcs); setBorderSegmentIndex(0); setBorderArc(borderArcsFc(arcs));
+        }
+        setResample({ counts: res.counts, tol: res.tol, handles: res.handles,
+                      baseFc: source,
+                      fc: { type: 'FeatureCollection', features: res.features } });
+      } catch (e) {
+        setBorderMsg(apiDetail(e));
+      } finally { setBusy(false); }
+    }, 300);
+  }, [dsId, borderPicks, resample]);
+
+  const cancelResample = useCallback(() => {
+    const undo = resampleUndoRef.current;
+    if (undo) {
+      if (undo.segments) setBorderSegments(undo.segments);
+      if (undo.arc) setBorderArc(undo.arc);
+      setBorderSegmentIndex(0);
+    }
+    resampleUndoRef.current = null;
+    setResample(null);
+  }, []);
+
+  const applyResample = useCallback(() => {
+    if (!resample || !resample.fc) return;
+    // the handles on screen are already the previewed ones, so this just makes
+    // the geometry behind them permanent (and undoable)
+    commit(resample.fc); setBaseline(resample.fc);
+    setMoved((prev) => { const n = new Set(prev); borderPicks.forEach((x) => n.add(x)); return n; });
+    const kept = resample.handles ? resample.handles.after : null;
+    resampleUndoRef.current = null;
+    setResample(null);
+    setBorderMsg(kept != null
+      ? `Resampled — ${kept} drag points on the border.`
+      : 'Resampled.');
+  }, [resample, borderPicks, commit]);
+
+  const doMerge = useCallback(async () => {
+    if (borderPicks.length < 2) return;
+    setBusy(true); setError(null);
+    try {
+      const res = await api.mergeRegions(dsId, borderPicks, fc);
+      const newFc = { type: 'FeatureCollection', features: res.features };
+      commit(newFc); setBaseline(newFc);
+      setBorderPicks([]); setBorderArc(null);
+      setBorderMsg(`Merged ${borderPicks.length} regions into “${res.name}” ✓`);
+    } catch (e) {
+      setBorderMsg(`Merge failed: ${String(e).replace(/^Error:\s*/, '')}`);
+    } finally { setBusy(false); }
+  }, [dsId, fc, borderPicks, commit]);
+
+  const onClickFeature = useCallback((idx, obj) => {
+    const t = obj && obj.geometry && obj.geometry.type;
+    if (idx == null || idx < 0 || !(t === 'Polygon' || t === 'MultiPolygon')) return;
+    if (mode === 'border') { pickBorderRegion(featureName(obj, idProp)); return; }
+    setSelected([idx]);
+  }, [mode, pickBorderRegion, idProp]);
+
+  const updateRegionProperties = useCallback((featureIndex, nextProps) => {
+    const currentFc = fcRef.current;
+    if (!currentFc || !currentFc.features || !currentFc.features[featureIndex]) return false;
+    setError(null);
+    try {
+      const feature = currentFc.features[featureIndex];
+      const { props, oldName, newName } = renameFeatureProperties(feature, idProp, nextProps);
+      const duplicate = currentFc.features.some((f, i) => i !== featureIndex && featureName(f, idProp) === newName);
+      if (duplicate) throw new Error(`Another region is already named "${newName}".`);
+
+      const features = currentFc.features.map((f, i) => (i === featureIndex ? { ...f, properties: props } : f));
+      const nextFc = { ...currentFc, features };
+      commit(nextFc);
+      setSelected([featureIndex]);
+
+      setBaseline((prev) => {
+        if (!prev || !prev.features || !prev.features[featureIndex]) return prev;
+        const baseFeature = prev.features[featureIndex];
+        let baseProps = props;
+        try {
+          baseProps = renameFeatureProperties(baseFeature, idProp, props).props;
+        } catch (e) { /* keep the edited props */ }
+        return { ...prev, features: prev.features.map((f, i) => (i === featureIndex ? { ...f, properties: baseProps } : f)) };
+      });
+
+      if (oldName !== newName) {
+        setMoved((prev) => {
+          const next = new Set(prev);
+          if (next.delete(oldName)) next.add(newName);
+          return next;
+        });
+        setBorderPicks((prev) => prev.map((nm) => (nm === oldName ? newName : nm)));
+      }
+      return true;
+    } catch (e) {
+      setError(String(e).replace(/^Error:\s*/, ''));
+      return false;
+    }
+  }, [commit, idProp]);
+
+  // ---- right-click a region (on the image or in the list) -> Rename / Delete ----
+  const openRegionMenu = useCallback((m) => {
+    if (!m || m.index == null || m.index < 0) return;
+    setRegionMenu(m);
+    setMenuView('menu');
+    setRenameDraft(m.name || '');
+    setSelected([m.index]);
+  }, []);
+  const closeRegionMenu = useCallback(() => { setRegionMenu(null); setMenuView('menu'); }, []);
+  const applyRename = useCallback(() => {
+    if (!regionMenu) { closeRegionMenu(); return; }
+    const next = String(renameDraft == null ? '' : renameDraft).trim();
+    if (!next || next === regionMenu.name) { closeRegionMenu(); return; }
+    updateRegionProperties(regionMenu.index, { [idProp]: next });
+    closeRegionMenu();
+  }, [regionMenu, renameDraft, idProp, updateRegionProperties, closeRegionMenu]);
+
+  // Colour lives in classification.colorRGB (QuPath's own packed-int convention),
+  // so an edited colour survives export straight back into their pipeline.
+  const setRegionColour = useCallback((featureIndex, hex) => {
+    const cur = fcRef.current;
+    const feat = cur && cur.features && cur.features[featureIndex];
+    if (!feat) return;
+    const rgb = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+    const cls = (feat.properties || {}).classification;
+    updateRegionProperties(featureIndex, {
+      classification: { ...(typeof cls === 'object' && cls ? cls : {}),
+                        name: featureName(feat, idProp), colorRGB: rgbToPacked(rgb) },
+    });
+  }, [updateRegionProperties, idProp]);
+
+  const clearRegionColour = useCallback((featureIndex) => {
+    const cur = fcRef.current;
+    const feat = cur && cur.features && cur.features[featureIndex];
+    if (!feat) return;
+    const cls = (feat.properties || {}).classification;
+    const next = { ...(typeof cls === 'object' && cls ? cls : {}) };
+    delete next.colorRGB;                      // back to the name-derived hue
+    updateRegionProperties(featureIndex, {
+      classification: { ...next, name: featureName(feat, idProp) },
+    });
+  }, [updateRegionProperties, idProp]);
+
+  // Delete just drops the feature. The hole it leaves is a normal gap, so Fix a
+  // gap will find it if you want the neighbours to take the ground back.
+  const deleteRegion = useCallback((featureIndex) => {
+    const cur = fcRef.current;
+    if (!cur || !cur.features || !cur.features[featureIndex]) return;
+    const nm = featureName(cur.features[featureIndex], idProp);
+    const next = { ...cur, features: cur.features.filter((_, i) => i !== featureIndex) };
+    commit(next);
+    // keep the snap baseline aligned -- match by name, not index
+    setBaseline((prev) => ((prev && prev.features)
+      ? { ...prev, features: prev.features.filter((f) => featureName(f, idProp) !== nm) }
+      : prev));
+    setSelected([]);
+    setMoved((prev) => { const n = new Set(prev); n.delete(nm); return n; });
+    setBorderPicks((prev) => prev.filter((x) => x !== nm));
+    setSnapInfo((s) => ({ ...(s || {}), saved: `deleted “${nm}” — Ctrl+Z undoes it` }));
+  }, [commit, idProp]);
+
+  // Escape, or a click anywhere outside it, dismisses the menu
+  useEffect(() => {
+    if (!regionMenu) return undefined;
+    const onKey = (e) => { if (e.key === 'Escape') closeRegionMenu(); };
+    const onDown = (e) => {
+      if (e.target && e.target.closest && e.target.closest('.ctxmenu')) return;
+      closeRegionMenu();
+    };
+    window.addEventListener('keydown', onKey);
+    window.addEventListener('pointerdown', onDown, true);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('pointerdown', onDown, true);
+    };
+  }, [regionMenu, closeRegionMenu]);
+
+  // ---- arrow-key vertex density on the single selected region ----
+  const selectedName = (selected.length === 1 && fc && fc.features[selected[0]])
+    ? featureName(fc.features[selected[0]], idProp) : null;
+  // vertex-count control disabled (paused):
+  // useEffect(() => {
+  //   if (selectedName == null) { resampleRef.current = null; return; }
+  //   const f = fc && fc.features.find((ff) => (ff.properties || {}).name === selectedName);
+  //   if (f) resampleRef.current = { name: selectedName, base: f.geometry, n: exteriorCount(f.geometry) };
+  //   // eslint-disable-next-line react-hooks/exhaustive-deps
+  // }, [selectedName]);
+
+  const applySplit = useCallback(async (coords) => {
+    if (!selectedName) { setSplitMsg('Pick the region to split first — click one in the list.'); return; }
+    setBusy(true); setError(null);
+    try {
+      const res = await api.splitRegion(dsId, selectedName, fc, coords);
+      const newFc = { type: 'FeatureCollection', features: res.features };
+      commit(newFc); setBaseline(newFc);
+      setMoved((prev) => { const n = new Set(prev); res.names.forEach((x) => n.add(x)); return n; });
+      setSelected([]);
+      setSplitMsg(`Split into “${res.names[0]}” and “${res.names[1]}” ✓ — draw again, or leave Split.`);
+    } catch (e) {
+      setSplitMsg(`Split failed: ${String(e).replace(/^Error:\s*/, '')}`);
+    } finally { setBusy(false); }
+  }, [dsId, fc, selectedName, commit]);
+
+  const onSplitEdit = useCallback(({ updatedData, editType }) => {
+    if (editType === 'addFeature') {
+      const f = updatedData.features[updatedData.features.length - 1];
+      const coords = f && f.geometry && f.geometry.coordinates;
+      setSplitDraw({ type: 'FeatureCollection', features: [] });     // clear the drawn line
+      if (coords && coords.length >= 2) applySplit(coords);
+    } else {
+      setSplitDraw(updatedData);                                     // in-progress line
+    }
+  }, [applySplit]);
+
+  // Dissolve mode: click a leftover void -> the backend locates that void and
+  // returns both its outline (previewed in red) and the already-filled FC, so
+  // "Dissolve" commits without recomputing.
+  const onPickGap = useCallback(async (coord) => {
+    if (!coord || !fc) return;
+    setBusy(true); setError(null); setGapFind(null);
+    setGapMsg('looking for a gap there…');
+    try {
+      const res = await api.dissolveGap(dsId, fc, [coord[0], coord[1]]);
+      setGapFind({
+        gap: res.gap, area: res.area, kind: res.kind, regions: res.regions,
+        point: [coord[0], coord[1]],     // kept so "New region" can reuse the click
+        fc: { type: 'FeatureCollection', features: res.features },
+      });
+      const who = (res.regions || []).join(' + ') || 'its neighbour';
+      setGapMsg(`Gap found — ${Math.round(res.area).toLocaleString()} px². Dissolve it into ${who}, or make it a new region.`);
+    } catch (e) {
+      setGapMsg(apiDetail(e));
+    } finally { setBusy(false); }
+  }, [dsId, fc]);
+
+  // Same clicked gap, second option: keep it as its own region instead of
+  // handing it to the neighbours. The gap outline is reused exactly, so the new
+  // region abuts them with no fresh hairline.
+  const applyFillGap = useCallback(async () => {
+    if (!gapFind || !fc) return;
+    setBusy(true); setError(null);
+    try {
+      const res = await api.fillGap(dsId, fc, gapFind.point);
+      const newFc = { type: 'FeatureCollection', features: res.features };
+      commit(newFc); setBaseline(newFc);
+      setMoved((prev) => { const n = new Set(prev); n.add(res.name); return n; });
+      setGapFind(null);
+      setGapMsg(`Gap became “${res.name}” ✓ — right-click it to rename.`);
+    } catch (e) {
+      setGapMsg(apiDetail(e));
+    } finally { setBusy(false); }
+  }, [dsId, fc, gapFind, commit]);
+
+  const applyDissolve = useCallback(() => {
+    if (!gapFind || !gapFind.fc) return;
+    commit(gapFind.fc); setBaseline(gapFind.fc);
+    setMoved((prev) => {
+      const n = new Set(prev);
+      (gapFind.regions || []).forEach((x) => n.add(x));
+      return n;
+    });
+    const who = (gapFind.regions || []).join(' + ');
+    setGapFind(null);
+    setGapMsg(`Gap dissolved into ${who} ✓ — click another gap, or leave Dissolve.`);
+  }, [gapFind, commit]);
+
+  // Draw mode: trace an outline, and it becomes a new region. Any region the
+  // outline covers cedes that ground, so the file stays a clean partition.
+  const applyAddRegion = useCallback(async (coords) => {
+    if (!coords || coords.length < 3 || !fc) return;
+    setBusy(true); setError(null);
+    setDrawMsg('creating…');
+    try {
+      const res = await api.addRegion(dsId, fc, coords);
+      const newFc = { type: 'FeatureCollection', features: res.features };
+      commit(newFc); setBaseline(newFc);
+      setMoved((prev) => {
+        const n = new Set(prev);
+        n.add(res.name);
+        (res.ceded || []).forEach((x) => n.add(x));
+        return n;
+      });
+      const took = (res.ceded || []).length
+        ? ` — ${res.ceded.join(', ')} gave up the overlap`
+        : '';
+      setDrawMsg(`Created “${res.name}” (${Math.round(res.area).toLocaleString()} px²)${took}. Right-click it to rename.`);
+    } catch (e) {
+      setDrawMsg(apiDetail(e));
+    } finally { setBusy(false); }
+  }, [dsId, fc, commit]);
+
+  const onDrawEdit = useCallback(({ updatedData, editType }) => {
+    if (editType === 'addFeature') {
+      const f = updatedData.features[updatedData.features.length - 1];
+      const ring = f && f.geometry && f.geometry.coordinates && f.geometry.coordinates[0];
+      setDrawPoly({ type: 'FeatureCollection', features: [] });   // clear the sketch
+      if (ring && ring.length >= 3) applyAddRegion(ring);
+    } else {
+      setDrawPoly(updatedData);                                   // in-progress outline
+    }
+  }, [applyAddRegion]);
+
+  const bumpPoints = () => {};   // vertex-count control disabled (paused)
+  /* was:
+  const bumpPoints = useCallback((dir) => {
+    const rs = resampleRef.current;
+    if (!rs || !fc) return;
+    const step = Math.max(3, Math.round(rs.n * 0.2));
+    const n = Math.max(6, rs.n + dir * step);
+    if (n === rs.n) return;
+    const idx = fc.features.findIndex((f) => (f.properties || {}).name === rs.name);
+    if (idx < 0) return;
+    const geom = resampleGeom(rs.base, n);
+    const next = { ...fc, features: fc.features.map((f, i) => (i === idx ? { ...f, geometry: geom } : f)) };
+    rs.n = n;
+    commit(next);
+    setMoved((prev) => { const s = new Set(prev); s.add(rs.name); return s; });
+  }, [fc, commit]);
+  */
+
+  // keyboard: undo/redo + arrow-key point density
+  useEffect(() => {
+    const onKey = (e) => {
+      const tag = (e.target && e.target.tagName) || '';
+      if (/INPUT|TEXTAREA|SELECT/.test(tag) || (e.target && e.target.isContentEditable)) return;
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z')) {
+        e.preventDefault(); if (e.shiftKey) redo(); else undo(); return;
+      }
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || e.key === 'Y')) { e.preventDefault(); redo(); return; }
+      // vertex-count control disabled (arrow keys removed)
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [undo, redo]);
+
+  const onChannelChange = useCallback((i, patch) => {
+    setChannels((chs) => chs.map((c, j) => (j === i ? { ...c, ...patch } : c)));
+  }, []);
+
+  const onAddGene = useCallback(async (name) => {
+    if (!name) return;
+    const c = await api.geneContrast(dsId, name);
+    setChannels((chs) => {
+      if (chs.some((ch) => ch.gene === name)) return chs;
+      return [...chs, {
+        gene: name, color: GENE_PALETTE[chs.length % GENE_PALETTE.length],
+        min: c ? c.min : 0, max: c ? c.max : 1, dataMax: c ? c.dataMax : 1, visible: true,
+      }];
+    });
+  }, [dsId]);
+
+  const onRemoveGene = useCallback((name) => {
+    setChannels((chs) => chs.filter((c) => c.gene !== name));
+  }, []);
+
+  const onStainChange = useCallback((i, patch) => {
+    setStainChannels((chs) => chs.map((c, j) => (j === i ? { ...c, ...patch } : c)));
+    if (patch.visible === true) {
+      const ch = stainChannels[i];
+      if (ch && !ch.contrastLoaded) loadStainContrast(ch.index);
+    }
+  }, [stainChannels, loadStainContrast]);
+
+  const onLayerChange = useCallback((patch) => setLayers((l) => ({ ...l, ...patch })), []);
+
+  const doSnap = useCallback(async () => {
+    if (!fc || !baseline) return;
+    const movedList = [...moved];
+    const snapBaseline = findSnapBaseline(baseline, fc, movedList, historyRef.current, idProp);
+    if (!hasMovedGeometryDelta(snapBaseline, fc, movedList, idProp)) {
+      setSnapInfo({ movers: movedList, notes: ['No unsnapped geometry changes were detected.'] });
+      return;
+    }
+    setBusy(true); setError(null);
+    try {
+      const res = await api.snap(dsId, snapBaseline, fc, movedList);
+      const clean = { type: 'FeatureCollection', features: res.features };
+      commit(clean); setBaseline(clean); setMoved(new Set());
+      setSnapInfo({ movers: res._movers, notes: res._notes });
+    } catch (e) { setError(String(e)); } finally { setBusy(false); }
+  }, [dsId, fc, baseline, moved, commit, idProp]);
+
+  const doSave = useCallback(async () => {
+    setBusy(true); setError(null);
+    try {
+      const r = await api.saveRegions(dsId, fc);
+      const stamped = r.version ? String(r.version).split(/[\\/]/).pop() : null;
+      setSnapInfo((s) => ({
+        ...(s || {}),
+        saved: stamped
+          ? `saved — snapshot ${stamped} (${r.versions} kept, nothing overwritten)`
+          : r.saved,
+      }));
+    } catch (e) { setError(String(e)); } finally { setBusy(false); }
+  }, [dsId, fc]);
+
+  const doRestoreOriginal = useCallback(async () => {
+    setBusy(true); setError(null);
+    try {
+      const res = await api.restoreOriginal(dsId);
+      const newFc = { type: 'FeatureCollection', features: res.features };
+      commit(newFc); setBaseline(newFc);
+      setSelected([]); setMoved(new Set()); setMode('view');
+      clearBorder(); clearSplit(); clearGap(); clearDraw();
+      const kept = res.backup ? String(res.backup).split(/[\\/]/).pop() : null;
+      setSnapInfo({ saved: `restored the original (${res.count} regions)`
+        + (kept ? ` — your previous work is kept as ${kept}` : '') });
+    } catch (e) {
+      setError(apiDetail(e));
+    } finally { setBusy(false); }
+  }, [dsId, commit, clearBorder, clearSplit, clearGap, clearDraw]);
+
+  const doReset = useCallback(async () => {
+    setBusy(true); setError(null);
+    try {
+      const r = await api.getRegions(dsId);
+      setFc(r); setBaseline(r); initHistory(r);
+      setMoved(new Set()); setSelected([]);
+      setSnapInfo(null); setMode('view'); clearBorder();
+    } catch (e) { setError(String(e)); } finally { setBusy(false); }
+  }, [dsId, clearBorder, initHistory]);
+
+  const loadRegionsFromFile = useCallback(async () => {
+    setBusy(true); setError(null);
+    try {
+      const { path } = await api.browseFile();
+      if (!path) return;
+      const r = await api.loadRegionsFile(dsId, path);
+      setFc(r); setBaseline(r); initHistory(r);
+      setMoved(new Set()); setSelected([]); setSnapInfo(null); setMode('view'); clearBorder();
+    } catch (e) { setError(String(e)); } finally { setBusy(false); }
+  }, [dsId, clearBorder, initHistory]);
+
+  // Export refuses to write broken geometry. On a block we surface the problem
+  // list and let the user Repair, force it through, or go fix it by hand.
+  const doExport = useCallback(async (exportMode, { force = false } = {}) => {
+    setBusy(true); setError(null);
+    try {
+      const name = await api.exportRegions(dsId, exportMode, fcRef.current || fc, { force });
+      setGeomReport(null);
+      setSnapInfo((s) => ({ ...(s || {}), saved: `exported ${name}` }));
+    } catch (e) {
+      if (e instanceof api.GeometryError) {
+        setGeomReport({ problems: e.problems, counts: e.counts, mode: exportMode,
+                        title: 'Export blocked — fix these first' });
+      } else {
+        setError(String(e));
+      }
+    } finally { setBusy(false); }
+  }, [dsId, fc]);
+
+  const doValidate = useCallback(async () => {
+    setBusy(true); setError(null);
+    try {
+      const res = await api.validateRegions(dsId, fcRef.current || fc);
+      setGeomReport({
+        problems: res.problems, counts: res.counts, mode: null,
+        title: res.ok
+          ? (res.problems.length ? 'No errors — some things to look at' : 'Geometry is clean ✓')
+          : 'Geometry errors found',
+      });
+    } catch (e) { setError(String(e)); } finally { setBusy(false); }
+  }, [dsId, fc]);
+
+  const doRepair = useCallback(async () => {
+    setBusy(true); setError(null);
+    try {
+      const res = await api.repairRegions(dsId, fcRef.current || fc);
+      const newFc = { type: 'FeatureCollection', features: res.features };
+      commit(newFc);
+      const fixed = res.fixed || [];
+      setGeomReport(null);
+      setSnapInfo((s) => ({ ...(s || {}),
+        saved: fixed.length ? `repaired ${fixed.length}: ${fixed.join(', ')}` : 'nothing needed repairing' }));
+      if (fixed.length) setMoved((prev) => { const n = new Set(prev); fixed.forEach((x) => n.add(x)); return n; });
+    } catch (e) { setError(String(e)); } finally { setBusy(false); }
+  }, [dsId, fc, commit]);
+
+  // vertex-count control disabled (paused): pointCount removed
+  const pointCount = null;
+  const movedList = useMemo(() => [...moved], [moved]);
+  const snapBaseline = useMemo(
+    () => findSnapBaseline(baseline, fc, movedList, historyRef.current, idProp),
+    [baseline, fc, movedList, histTick, idProp],
+  );
+  const canSnap = hasMovedGeometryDelta(snapBaseline, fc, movedList, idProp);
+
+  return (
+    <div className="root">
+      <DatasetBar
+        datasets={datasets} activeId={dsId} onSelect={setDsId}
+        onOpenFolder={openFolder} onOpenPath={loadOpened} busy={dsBusy}
+      />
+      <div className="app">
+        {!dsId && <div className="empty">No dataset loaded. Click <b>📂 Open folder…</b> above to load a Xenium folder.</div>}
+        {dsId && error && !info && <div className="fatal">Error: {error}</div>}
+        {dsId && !error && (!info || !fc) && <div className="loading">Loading dataset…</div>}
+        {dsId && info && fc && (
+          <>
+            <aside className="sidebar">
+              <Sidebar
+                info={info} fc={fc} sources={sources} selected={selected}
+                onRegionMenu={openRegionMenu}
+                onSelectName={(nm) => {
+                  if (mode === 'border') { pickBorderRegion(nm); return; }
+                  const i = fc.features.findIndex((f) => featureName(f, idProp) === nm);
+                  if (i >= 0) setSelected([i]);
+                }}
+                mode={mode}
+                onToggleModify={onToggleModify}
+                onToggleBorder={onToggleBorder}
+                onToggleSplit={onToggleSplit}
+                onToggleDissolve={onToggleDissolve}
+                onToggleDraw={onToggleDraw}
+                borderPicks={borderPicks} borderMsg={borderMsg} borderShared={borderShared}
+                onClearBorder={clearBorder} onShareBorders={doShareBorders}
+                onMerge={doMerge} splitMsg={splitMsg}
+                resample={resample} resampleTol={resampleTol}
+                onResampleTol={previewResample} onApplyResample={applyResample}
+                onCancelResample={cancelResample}
+                gapFind={gapFind} gapMsg={gapMsg} drawMsg={drawMsg}
+                onDissolve={applyDissolve} onFillGap={applyFillGap} onClearGap={clearGap}
+                selectedName={selectedName}
+                moved={moved} canSnap={canSnap} onSnap={doSnap} onSave={doSave} onReset={doReset}
+                onUndo={undo} onRedo={redo} canUndo={canUndo} canRedo={canRedo}
+                propEdit={propEdit} propRadius={propRadius}
+                onPropEditChange={setProportionalEditing}
+                geomReport={geomReport} onValidate={doValidate} onRepair={doRepair}
+                onDismissReport={() => setGeomReport(null)}
+                onForceExport={(m) => doExport(m, { force: true })}
+                onRestoreOriginal={doRestoreOriginal}
+                onLoadFile={loadRegionsFromFile} onExport={doExport}
+                snapInfo={snapInfo} busy={busy} error={error}
+              />
+              <ChannelPanel
+                geneInfo={geneInfo} channels={channels} onChannelChange={onChannelChange}
+                geneList={geneInfo ? geneInfo.genes : null}
+                onAddGene={onAddGene} onRemoveGene={onRemoveGene}
+                stainInfo={stainInfo} stainChannels={stainChannels} onStainChange={onStainChange}
+                layers={layers} onLayerChange={onLayerChange}
+              />
+            </aside>
+            <div className="canvas-wrap">
+              <Viewer
+                key={dsId} dsId={dsId} info={info} fc={fc} mode={mode} idProp={idProp}
+                selectedIndexes={selected} onEdit={onEdit} onClickFeature={onClickFeature}
+                borderPicks={borderPicks}
+                borderArc={borderArc} onBorderEdit={onBorderEdit}
+                onAddBorderPoint={onAddBorderPoint}
+                splitDraw={splitDraw} onSplitEdit={onSplitEdit}
+                drawPoly={drawPoly} onDrawEdit={onDrawEdit}
+                gapPreview={gapFind && gapFind.gap} onPickGap={onPickGap}
+                propRing={propRing} onRegionMenu={openRegionMenu}
+                onGrabVertex={onGrabVertex} onReleaseDrag={onReleaseDrag}
+                geneBitmap={geneBitmap} geneBounds={geneBounds}
+                stainInfo={stainInfo} stainChannels={stainChannels}
+                layers={layers}
+              />
+            </div>
+          </>
+        )}
+      </div>
+
+      {regionMenu && (
+        <div className="ctxmenu" style={{ left: regionMenu.x, top: regionMenu.y }}>
+          <div className="ctx-title">{regionMenu.name || '(unnamed)'}</div>
+
+          {menuView === 'menu' && (
+            <>
+              <button className="ctx-item" onClick={() => setMenuView('rename')}>Rename</button>
+              <button className="ctx-item" onClick={() => setMenuView('colour')}>Colour…</button>
+              <button className="ctx-item danger" onClick={() => setMenuView('delete')}>Delete</button>
+            </>
+          )}
+
+          {menuView === 'colour' && (() => {
+            const feat = fc && fc.features && fc.features[regionMenu.index];
+            const [r, g, b] = feat ? regionRgb(feat, idProp) : [128, 128, 128];
+            const hex = '#' + [r, g, b].map((v) => v.toString(16).padStart(2, '0')).join('');
+            const custom = !!((feat && feat.properties && feat.properties.classification || {}).colorRGB != null);
+            return (
+              <>
+                <div className="ctx-row">
+                  <input
+                    type="color"
+                    value={hex}
+                    onChange={(e) => setRegionColour(regionMenu.index, e.target.value)}
+                  />
+                  <span className="ctx-note">{custom ? 'custom' : 'from the name'}</span>
+                </div>
+                <div className="row">
+                  {custom && (
+                    <button className="btn sm" onClick={() => clearRegionColour(regionMenu.index)}>
+                      Auto
+                    </button>
+                  )}
+                  <button className="btn sm" onClick={closeRegionMenu}>Done</button>
+                </div>
+              </>
+            );
+          })()}
+
+          {menuView === 'rename' && (
+            <input
+              className="ctx-input"
+              autoFocus
+              value={renameDraft}
+              onChange={(e) => setRenameDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') { e.preventDefault(); applyRename(); }
+                if (e.key === 'Escape') { e.preventDefault(); closeRegionMenu(); }
+              }}
+              onBlur={applyRename}
+            />
+          )}
+
+          {menuView === 'delete' && (
+            <>
+              <div className="ctx-note">Delete this region? Ctrl+Z undoes it.</div>
+              <div className="row">
+                <button className="btn sm danger"
+                  onClick={() => { deleteRegion(regionMenu.index); closeRegionMenu(); }}>
+                  Delete
+                </button>
+                <button className="btn sm" onClick={() => setMenuView('menu')}>Cancel</button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
