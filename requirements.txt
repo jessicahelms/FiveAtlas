@@ -6,6 +6,13 @@ shapely==2.0.7
 tifffile==2024.8.30
 imagecodecs==2024.12.30
 zarr==2.18.2
+# numcodecs is zarr's dependency, not ours, but it has to be pinned here: zarr
+# 2.18.2 asks only for numcodecs>=0.10, and numcodecs 0.16 dropped the blosc
+# symbol (cbuffer_sizes) that zarr 2.x imports at module scope. Leave it
+# unpinned and a fresh install resolves the newest numcodecs, after which
+# `import zarr` raises ImportError and the whole app fails to start. 0.12.1 is
+# the version the working Windows environment has.
+numcodecs==0.12.1
 numpy==2.0.2
 pillow==11.3.0
 python-multipart==0.0.20
