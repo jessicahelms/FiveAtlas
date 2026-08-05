@@ -84,42 +84,77 @@ jobs:
       # Proves the bundle actually starts and serves the UI on this runner --
       # a missing hidden import or codec dylib fails here rather than on a
       # colleague's laptop. ATLAS_NO_BROWSER keeps it from opening Safari.
+      #
+      # continue-on-error: the .dmg is already built and signed by this point, so
+      # a runtime problem should still hand you a downloadable artifact plus the
+      # diagnostics to fix it -- not throw the build away. The job is still
+      # marked failed by the "Fail if smoke test failed" step at the end.
       - name: Smoke-test the built app
+        id: smoke
+        continue-on-error: true
         env:
           ATLAS_NO_BROWSER: "1"
           ATLAS_PORT: "8051"
         run: |
+          set +e
           APP="$HOME/Library/Caches/FiveAtlas_build/release/FiveAtlas.app"
-          "$APP/Contents/MacOS/FiveAtlas" &
+          OUT="$RUNNER_TEMP/app-stdout.txt"
+          "$APP/Contents/MacOS/FiveAtlas" >"$OUT" 2>&1 &
           PID=$!
           for i in $(seq 1 45); do
             if curl -fsS "http://127.0.0.1:8051/api/health" >/dev/null 2>&1; then
               echo "health OK after ${i}s"
               curl -fsS "http://127.0.0.1:8051/" | head -c 200; echo
-              kill $PID 2>/dev/null || true
+              kill $PID 2>/dev/null
               exit 0
+            fi
+            # If the process is already gone, stop waiting and report why.
+            if ! kill -0 $PID 2>/dev/null; then
+              wait $PID; rc=$?
+              echo "::error::app exited after ${i}s with code $rc"
+              [ $rc -eq 137 ] && echo "::error::137 = SIGKILL, the bundle's signature is rejected by the kernel"
+              break
             fi
             sleep 1
           done
-          echo "app did not answer /api/health within 45s" >&2
-          echo "---- log ----"
-          cat "$HOME/Library/Application Support/FiveAtlas/FiveAtlas.log" 2>/dev/null || true
-          kill $PID 2>/dev/null || true
+          echo "===== app stdout/stderr ====="
+          cat "$OUT" 2>/dev/null
+          echo "===== FiveAtlas.log ====="
+          cat "$HOME/Library/Application Support/FiveAtlas/FiveAtlas.log" 2>/dev/null
+          echo "===== what is listening ====="
+          lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | head -20
+          echo "===== bundle ====="
+          ls -la "$APP/Contents/MacOS/" | head
+          codesign -dv --verbose=2 "$APP" 2>&1 | head -20
+          kill $PID 2>/dev/null
           exit 1
 
+      # if: always() -- the whole point is to get the .dmg and the logs out even
+      # when the app misbehaves.
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: FiveAtlas-macos-${{ matrix.arch }}
           path: |
             ~/Library/Caches/FiveAtlas_build/release/*.dmg
             ~/Library/Caches/FiveAtlas_build/release/*.zip
             ~/Library/Caches/FiveAtlas_build/release/README.txt
-          if-no-files-found: error
+            ${{ runner.temp }}/app-stdout.txt
+          if-no-files-found: warn
 
+      # Only publish a Release from a build that actually ran. A .dmg that fails
+      # its own smoke test should not become the download people are handed.
       - name: Attach to release
-        if: github.ref_type == 'tag'
+        if: github.ref_type == 'tag' && steps.smoke.outcome == 'success'
         uses: softprops/action-gh-release@v2
         with:
           files: |
             ~/Library/Caches/FiveAtlas_build/release/*.dmg
             ~/Library/Caches/FiveAtlas_build/release/*.zip
+
+      - name: Fail if smoke test failed
+        if: steps.smoke.outcome != 'success'
+        run: |
+          echo "The app was built and uploaded as an artifact, but it did not"
+          echo "answer /api/health. See the smoke-test step above for the reason."
+          exit 1
