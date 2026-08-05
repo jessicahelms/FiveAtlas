@@ -90,8 +90,18 @@ def _start_logging(workdir: Path):
 
 def _alert(message: str):
     """Surface a fatal error where a GUI-launched app has no console to print to.
-    No-op on Windows, where the console window is already showing the traceback."""
+    No-op on Windows, where the console window is already showing the traceback.
+
+    A modal alert is a trap on any machine with nobody in front of it: the dialog
+    waits forever, the process stays alive holding it, and from the outside the
+    app looks like it started and then hung. So it is skipped whenever we are
+    clearly running unattended, and capped at a few seconds even when we are not.
+    ATLAS_NO_BROWSER is the same flag the smoke tests and CI already set to mean
+    "no one is watching this".
+    """
     if sys.platform != "darwin":
+        return
+    if os.environ.get("ATLAS_NO_BROWSER") or os.environ.get("CI"):
         return
     try:
         import subprocess
@@ -99,7 +109,7 @@ def _alert(message: str):
         subprocess.run(
             ["osascript", "-e",
              f'display alert "FiveAtlas could not start" message "{body}" as critical'],
-            timeout=120)
+            timeout=15)
     except Exception:
         pass
 
