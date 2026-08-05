@@ -53,7 +53,8 @@ fi
 WORK="$OUT_ROOT/work"
 DIST_DIR="$OUT_ROOT/dist"
 RELEASE="$OUT_ROOT/release"
-mkdir -p "$OUT_ROOT" "$WORK" "$DIST_DIR" "$RELEASE"
+SCRATCH="$OUT_ROOT/temp"        # launch-check log + throwaway workdir
+mkdir -p "$OUT_ROOT" "$WORK" "$DIST_DIR" "$RELEASE" "$SCRATCH"
 
 echo "== FiveAtlas $VERSION (macOS $ARCH) =="
 echo "   build output -> $OUT_ROOT"
@@ -102,17 +103,32 @@ else
     echo "      leaving PyInstaller's ad-hoc signature alone"
 fi
 codesign --verify --strict "$BUILT" && echo "      signature verifies"
-# Verifying is not the same as running. Actually launch it -- a bundle that the
-# kernel refuses shows up here as a non-zero exit within a second or two.
-if "$BUILT/Contents/MacOS/FiveAtlas" --pick nonsense-mode >/dev/null 2>&1; then
+
+# Verifying is not the same as running: a bundle whose inner signatures have been
+# clobbered verifies fine and is SIGKILLed the moment the kernel loads it. So
+# actually start the thing and see whether it is still alive a few seconds later.
+#
+# Start it as the server, NOT with `--pick`: --pick opens a real modal file
+# dialog, which on a machine with nobody to answer it blocks for the picker's
+# full timeout. That mistake hung a CI build until the job timed out.
+echo "      launch check..."
+LAUNCH_LOG="$SCRATCH/launch-check.log"
+ATLAS_NO_BROWSER=1 ATLAS_PORT=8062 ATLAS_WORKDIR="$SCRATCH/launch-check-workdir" \
+    "$BUILT/Contents/MacOS/FiveAtlas" >"$LAUNCH_LOG" 2>&1 &
+LPID=$!
+sleep 6
+if kill -0 "$LPID" 2>/dev/null; then
     echo "      launches OK"
+    kill "$LPID" 2>/dev/null || true
+    wait "$LPID" 2>/dev/null || true
 else
-    rc=$?
-    # --pick with a bad mode exits 0 after printing an empty line; anything else,
-    # and particularly 137 (SIGKILL), means the bundle itself will not load.
-    [[ $rc -eq 137 || $rc -eq 9 ]] && {
-        echo "app is SIGKILLed on launch -- signature is broken" >&2; exit 1; }
-    echo "      launch check returned $rc (non-fatal)"
+    rc=0; wait "$LPID" || rc=$?
+    echo "the app exits immediately (code $rc) -- it will not run for anyone" >&2
+    [[ $rc -eq 137 || $rc -eq 9 ]] && \
+        echo "  137/9 = SIGKILL: the kernel is rejecting the bundle's signature" >&2
+    echo "---- app output ----" >&2
+    cat "$LAUNCH_LOG" >&2 2>/dev/null || true
+    exit 1
 fi
 
 STAGED="$RELEASE/FiveAtlas.app"
