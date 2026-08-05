@@ -1,0 +1,11 @@
+# FiveAtlas - backend dependencies
+# (starlette is pulled in by fastapi; tkinter ships with Python)
+fastapi==0.128.8
+uvicorn==0.39.0
+shapely==2.0.7
+tifffile==2024.8.30
+imagecodecs==2024.12.30
+zarr==2.18.2
+numpy==2.0.2
+pillow==11.3.0
+python-multipart==0.0.20

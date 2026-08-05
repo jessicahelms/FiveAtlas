@@ -1,0 +1,5 @@
+# The repo is cloned with core.autocrlf=true on the Windows machines, which would
+# hand a Mac or Linux checkout CRLF line endings. A shell script with CRLF fails
+# at the shebang -- "bad interpreter: /usr/bin/env bash^M: no such file or
+# directory" -- so pin these to LF regardless of the cloning machine's settings.
+*.sh text eol=lf

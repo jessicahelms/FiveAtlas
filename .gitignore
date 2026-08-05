@@ -1,0 +1,15 @@
+backend/workdir/
+**/__pycache__/
+*.pyc
+frontend/node_modules/
+frontend/dist/
+.DS_Store
+
+# PyInstaller output. These are build products, not sources, and they are large
+# -- release/ alone is ~230 MB, so `git add atlas_editor` without this would try
+# to commit a few hundred MB of bundled DLLs.
+dist/
+build/
+work/
+release/
+*.dmg

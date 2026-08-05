@@ -1,0 +1,12 @@
+# Backend deps. Reuses the repo .venv, which already has tifffile / shapely /
+# rasterio / numpy / zarr / pillow working (that's why we reuse it).
+fastapi
+uvicorn[standard]
+imagecodecs        # decodes the JPEG2000 tiles in the morphology OME-TIFF
+python-multipart
+tifffile
+zarr<3
+shapely
+rasterio
+numpy
+pillow
