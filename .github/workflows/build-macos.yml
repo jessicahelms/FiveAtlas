@@ -33,8 +33,19 @@ jobs:
         include:
           - runner: macos-14
             arch: arm64
-          - runner: macos-13
-            arch: x86_64
+          # Intel (macos-13) is deliberately NOT built.
+          #
+          # It never once started across seven runs -- that runner pool is
+          # exhausted -- and because a queued job holds a slot against the
+          # account's macOS concurrency limit, the seven zombies it left behind
+          # went on to starve the arm64 job, which then failed with "not acquired
+          # by Runner of type hosted". So the Intel job was not merely useless,
+          # it was the thing breaking the build that mattered.
+          #
+          # Every Mac sold since 2021 is Apple Silicon. If an Intel build is ever
+          # genuinely needed, add `- runner: macos-13 / arch: x86_64` back, but
+          # expect to babysit it -- and cancel it if it queues, rather than
+          # leaving it to clog the pool.
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
 
