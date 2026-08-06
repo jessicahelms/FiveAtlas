@@ -74,6 +74,8 @@ fi
 echo "[2/5] running PyInstaller (a few minutes)..."
 # A running copy holds its files open and confuses the rebuild.
 pkill -f "FiveAtlas.app/Contents/MacOS/FiveAtlas" 2>/dev/null || true
+# The spec reads this, so CFBundleVersion matches the .dmg filename and the tag.
+export FIVEATLAS_VERSION="$VERSION"
 ( cd "$APP" && "$PY" -m PyInstaller --noconfirm --clean \
       --workpath "$WORK" --distpath "$DIST_DIR" FiveAtlas.spec )
 

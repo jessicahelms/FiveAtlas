@@ -62,6 +62,9 @@ $oldTemp, $oldTmp = $env:TEMP, $env:TMP
 try {
     # PyInstaller's scratch also has to stay off C:
     $env:TEMP = $Scratch; $env:TMP = $Scratch
+    # The spec reads this, so the version baked into the build is the one asked
+    # for here rather than a literal in the spec that silently goes stale.
+    $env:FIVEATLAS_VERSION = $Version
     & $Venv -m PyInstaller --noconfirm --clean `
         --workpath $Work --distpath $DistDir FiveAtlas.spec
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed" }
