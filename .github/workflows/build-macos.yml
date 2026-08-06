@@ -148,6 +148,17 @@ jobs:
           kill -9 $PID 2>/dev/null
           exit 1
 
+      # v0.1.5 shipped an app that opened browser tabs faster than the user could
+      # force-quit it. The trigger was never reproduced, so launcher.py carries a
+      # circuit breaker; this asserts the bound still holds on the real bundle.
+      - name: Tab-storm regression check
+        id: storm
+        continue-on-error: true
+        run: |
+          chmod +x tests/tab_storm_check.sh
+          ./tests/tab_storm_check.sh \
+            "$HOME/Library/Caches/FiveAtlas_build/release/FiveAtlas.app/Contents/MacOS/FiveAtlas"
+
       # if: always() -- the whole point is to get the .dmg and the logs out even
       # when the app misbehaves.
       - uses: actions/upload-artifact@v4
@@ -167,16 +178,17 @@ jobs:
       # Only publish a Release from a build that actually ran. A .dmg that fails
       # its own smoke test should not become the download people are handed.
       - name: Attach to release
-        if: github.ref_type == 'tag' && steps.smoke.outcome == 'success'
+        if: github.ref_type == 'tag' && steps.smoke.outcome == 'success' && steps.storm.outcome == 'success'
         uses: softprops/action-gh-release@v2
         with:
           files: |
             ~/Library/Caches/FiveAtlas_build/release/*.dmg
             ~/Library/Caches/FiveAtlas_build/release/*.zip
 
-      - name: Fail if smoke test failed
-        if: steps.smoke.outcome != 'success'
+      - name: Fail if any check failed
+        if: steps.smoke.outcome != 'success' || steps.storm.outcome != 'success'
         run: |
-          echo "The app was built and uploaded as an artifact, but it did not"
-          echo "answer /api/health. See the smoke-test step above for the reason."
+          echo "smoke: ${{ steps.smoke.outcome }}   tab-storm: ${{ steps.storm.outcome }}"
+          echo "The app was built and uploaded as an artifact, but a check failed."
+          echo "See the step above for the reason."
           exit 1

@@ -115,11 +115,24 @@ def _alert(message: str):
 
 
 def _run_picker_mode() -> bool:
-    """Handle `--pick <folder|file> [initial]` and return True if we did."""
-    if len(sys.argv) < 3 or sys.argv[1] != "--pick":
+    """Handle a picker request and return True if this process was one.
+
+    Two channels, because getting this wrong is expensive: miss the request and
+    the process falls through to main(), starting a second server and opening
+    another browser tab. argv is the primary one; the environment is the backstop
+    for a windowed macOS .app, where argv is the least reliable part of the
+    bootloader. See app._picker_cmd, which sets both.
+    """
+    if len(sys.argv) >= 3 and sys.argv[1] == "--pick":
+        kind = sys.argv[2]
+        initial = sys.argv[3] if len(sys.argv) > 3 else None
+    elif os.environ.get("ATLAS_PICK_KIND"):
+        kind = os.environ["ATLAS_PICK_KIND"]
+        initial = os.environ.get("ATLAS_PICK_INITIAL") or None
+    else:
         return False
+
     import nativedialog
-    kind = sys.argv[2]
     # Anything that is not "folder" used to fall through to the *file* picker,
     # so a typo silently opened a modal dialog and blocked until someone closed
     # it -- which on a headless machine is never. Refuse instead.
@@ -127,7 +140,6 @@ def _run_picker_mode() -> bool:
         print(f"[picker] unknown kind {kind!r}; expected 'folder' or 'file'",
               file=sys.stderr)
         return True
-    initial = sys.argv[3] if len(sys.argv) > 3 else None
     title = "Select dataset folder" if kind == "folder" else "Select a GeoJSON region file"
     try:
         print(nativedialog.pick(kind, initial or None, title))
@@ -172,8 +184,75 @@ def _open_when_up(url: str, timeout: float = 30.0):
         pass
 
 
+def _already_running(port: int) -> bool:
+    """True if a FiveAtlas is already serving on this port.
+
+    Second line of defence against the tab storm: even if something does manage
+    to start us twice, the second one hands the browser to the instance that is
+    already up instead of racing it for a port and opening another tab.
+    """
+    import json
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=1.0) as r:
+            return bool(json.loads(r.read().decode()).get("ok"))
+    except Exception:
+        return False
+
+
+def _claim_browser_open(workdir: Path, window: float = 60.0, burst: int = 3) -> bool:
+    """Cross-process circuit breaker on opening the browser.
+
+    A backstop, not a fix for any particular cause. Whatever makes the app start
+    more than once -- a relaunch loop, an impatient double-click, some quirk of
+    how a .app gets launched -- the cost must never be an unbounded pile of
+    browser tabs. That failure mode is genuinely awful: it outruns force-quit,
+    because by the time you have killed one process the next tab is already open,
+    and you cannot reach the UI to stop it.
+
+    Deliberately NOT a flat cooldown. Quitting and relaunching within a few
+    seconds is a perfectly normal thing to do, and on macOS the app has no
+    console, so a suppressed tab means the user sees nothing happen at all.
+    Instead: allow the first few opens in a window, then trip. A human never
+    relaunches four times in a minute; a spawn loop does it in under a second.
+
+    Fails open. An app that never shows itself is worse than one extra tab.
+    """
+    stamp = workdir / ".browser-opens"
+    now = time.time()
+    started, count = now, 0
+    try:
+        if stamp.exists():
+            parts = stamp.read_text(encoding="utf-8").split()
+            if len(parts) == 2:
+                started, count = float(parts[0]), int(parts[1])
+                if now - started > window:          # old burst, start a fresh one
+                    started, count = now, 0
+    except Exception:
+        started, count = now, 0
+
+    if count >= burst:
+        print(f"[browser] {count} launches in {int(now - started)}s -- not opening "
+              f"another tab. Open the address above by hand if you need it.",
+              file=sys.stderr)
+        return False
+
+    try:
+        stamp.write_text(f"{started} {count + 1}", encoding="utf-8")
+    except Exception:
+        pass
+    return True
+
+
 def main():
     if _run_picker_mode():
+        return
+
+    # A process spawned as a helper must never become a server, even if it failed
+    # to parse what kind of helper it was meant to be.
+    if os.environ.get("ATLAS_CHILD"):
+        print("[picker] helper process with no recognised picker mode; exiting",
+              file=sys.stderr)
         return
 
     import uvicorn
@@ -183,6 +262,22 @@ def main():
     # missing codec dylib, say) still lands in the log rather than nowhere.
     _start_logging(config.WORKDIR)
 
+    preferred = int(os.environ.get("ATLAS_PORT", "8050"))
+
+    # If a FiveAtlas is already up, hand the browser to it and get out of the
+    # way. Starting a second server would give the user two half-states over the
+    # same workdir, and -- much worse -- a second browser tab every time.
+    if _already_running(preferred):
+        url = f"http://127.0.0.1:{preferred}"
+        print(f"FiveAtlas is already running at {url} -- opening that instead.")
+        if not os.environ.get("ATLAS_NO_BROWSER") and \
+                _claim_browser_open(config.WORKDIR):
+            try:
+                webbrowser.open(url)
+            except Exception:
+                pass
+        return
+
     try:
         import app as backend
     except Exception as e:
@@ -190,7 +285,7 @@ def main():
         _alert(f"{type(e).__name__}: {e}\n\nSee {config.WORKDIR / 'FiveAtlas.log'}")
         raise
 
-    port = _free_port(int(os.environ.get("ATLAS_PORT", "8050")))
+    port = _free_port(preferred)
     url = f"http://127.0.0.1:{port}"
 
     # There is no console window to close on macOS -- say how to stop it there.
@@ -205,8 +300,10 @@ def main():
     print(f"  {stop}")
     print("=" * 62)
 
-    if not os.environ.get("ATLAS_NO_BROWSER"):
+    if not os.environ.get("ATLAS_NO_BROWSER") and _claim_browser_open(config.WORKDIR):
         threading.Thread(target=_open_when_up, args=(url,), daemon=True).start()
+    else:
+        print("  (not opening a browser -- go to the address above)")
     try:
         uvicorn.run(backend.app, host="127.0.0.1", port=port, log_level="warning")
     except Exception as e:
@@ -216,4 +313,18 @@ def main():
 
 
 if __name__ == "__main__":
+    # MUST be the first thing that runs, before any other import or side effect.
+    #
+    # A frozen app has no importable __main__ module, so when anything spawns a
+    # process (macOS and Windows both default to "spawn", not fork) the child
+    # re-executes THIS FILE from the top instead of resuming inside the worker.
+    # Without freeze_support() that child then runs main() itself: another
+    # server, another browser tab, and another round of spawning. It compounds
+    # -- the observed failure was an unstoppable storm of browser tabs that
+    # outran force-quit, because every process killed had already started more.
+    #
+    # freeze_support() makes the child recognise itself as a worker and return
+    # instead. On a non-frozen run it is a documented no-op.
+    import multiprocessing
+    multiprocessing.freeze_support()
     main()
