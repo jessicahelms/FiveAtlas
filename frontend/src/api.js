@@ -225,8 +225,14 @@ export async function exportRegions(ds, mode, fc, { force = false } = {}) {
   const name = m ? m[1] : (mode === 'separate' ? 'regions_separate.zip' : 'regions_merged.geojson');
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
-  a.href = url; a.download = name; document.body.appendChild(a); a.click();
-  a.remove(); URL.revokeObjectURL(url);
+  a.href = url; a.download = name; a.rel = 'noopener';
+  document.body.appendChild(a); a.click(); a.remove();
+  // Do NOT revoke synchronously. Chrome has consumed the blob by the time click()
+  // returns; Safari starts the download asynchronously, so revoking on the next
+  // line pulls the blob out from under it. Safari is also inconsistent about
+  // honouring `download` on a blob: URL -- when it doesn't, it NAVIGATES to the
+  // blob instead, which opens a tab. Hold the URL for a minute, then release it.
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
   return name;
 }
 

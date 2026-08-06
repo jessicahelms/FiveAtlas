@@ -15,6 +15,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import os
 import re
 import subprocess
 import sys
@@ -129,18 +130,35 @@ def _last_folder():
     return ""
 
 
-def _picker_argv(kind: str) -> list:
-    """Frozen, sys.executable IS this app and nativedialog.py is not a file on
-    disk, so we re-launch ourselves with --pick instead of running the script."""
+def _picker_cmd(kind: str):
+    """(argv, env) for spawning the picker.
+
+    Frozen, sys.executable IS this app and nativedialog.py is not a file on disk,
+    so we re-launch ourselves with --pick instead of running the script. That
+    makes the arguments load-bearing: a child that does not see `--pick` falls
+    through to main() and starts a SECOND SERVER with its own browser tab, held
+    open for the subprocess timeout. A windowed macOS .app bootloader is the
+    least trustworthy place to bet on argv surviving, so the same instruction
+    goes through the environment as well, and ATLAS_CHILD marks the process as a
+    helper that must never serve no matter what it does or does not parse.
+    """
+    initial = _last_folder()
+    env = dict(os.environ)
+    env["ATLAS_CHILD"] = "1"
+    env["ATLAS_PICK_KIND"] = kind
+    env["ATLAS_PICK_INITIAL"] = initial
     if config.FROZEN:
-        return [sys.executable, "--pick", kind, _last_folder()]
-    return [sys.executable, _DIALOG_SCRIPT, kind, _last_folder()]
+        return [sys.executable, "--pick", kind, initial], env
+    return [sys.executable, _DIALOG_SCRIPT, kind, initial], env
 
 
 def _run_picker(kind: str) -> str:
     """Spawn the picker in its own process so a modal dialog never blocks uvicorn."""
+    if kind not in ("folder", "file"):
+        raise HTTPException(400, f"bad picker kind {kind!r}")
+    argv, env = _picker_cmd(kind)
     try:
-        res = subprocess.run(_picker_argv(kind), capture_output=True, text=True, timeout=600)
+        res = subprocess.run(argv, capture_output=True, text=True, timeout=600, env=env)
     except Exception as e:
         raise HTTPException(500, f"browse failed: {e}")
     lines = [ln for ln in (res.stdout or "").splitlines() if ln.strip()]
