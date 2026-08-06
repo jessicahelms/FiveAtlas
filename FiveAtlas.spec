@@ -15,6 +15,7 @@ build unless every wheel is universal2 (imagecodecs is not). Build on the arch
 you are shipping to -- an arm64 Mac produces an Apple Silicon app, an Intel Mac
 or a macos-13 CI runner produces an Intel one.
 """
+import os
 import sys
 from pathlib import Path
 
@@ -25,7 +26,13 @@ BACKEND = APP_DIR / "backend"
 DIST_UI = APP_DIR / "frontend" / "dist"
 
 MACOS = sys.platform == "darwin"
-VERSION = "0.1.0"
+
+# The build scripts pass the version in, so the number baked into the .app is
+# always the one on the filename and the git tag. It used to be a literal here,
+# which drifted: the spec said 0.1.0 while backend/config.py said 0.4.1, so a
+# download could be labelled with one version while stamping a different one
+# into the provenance of every region file it edited.
+VERSION = os.environ.get("FIVEATLAS_VERSION", "0.0.0-dev")
 
 if not (DIST_UI / "index.html").exists():
     raise SystemExit(
@@ -35,10 +42,22 @@ if not (DIST_UI / "index.html").exists():
 
 # The backend imports its modules by bare name (import datasets, import scan...),
 # so they have to be collected explicitly rather than discovered from launcher.py.
-BACKEND_MODULES = [
-    "app", "config", "datasets", "geo", "genes", "nativedialog",
-    "scan", "stains", "tiles", "topology", "transcripts",
-]
+#
+# Discovered from the directory rather than hand-listed. A hand-written list is a
+# trap: add a module to backend/, import it from app.py, and everything works
+# from source while the FROZEN build dies with ModuleNotFoundError -- a failure
+# that only appears in the packaged app, which is the worst place to find it.
+# (Nearly hit exactly this: backend/provenance.py was added and imported by
+# app.py while the list here still had eleven names.)
+_SKIP = ("smoke_test", "stain_probe")          # dev scripts, not part of the app
+BACKEND_MODULES = sorted(
+    p.stem for p in BACKEND.glob("*.py")
+    if not p.stem.startswith(("verify_", "diag_", "debug_", "test_"))
+    and not p.stem.endswith("_smoke")
+    and p.stem not in _SKIP
+)
+if "app" not in BACKEND_MODULES:
+    raise SystemExit(f"backend/app.py not found under {BACKEND}")
 
 # uvicorn resolves its loop/protocol implementations at runtime by string.
 UVICORN_HIDDEN = collect_submodules("uvicorn")
