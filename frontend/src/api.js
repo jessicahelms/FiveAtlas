@@ -22,11 +22,11 @@ export async function saveRegions(ds, fc) {
   return r.json();
 }
 
-export async function snap(ds, before, after, moved) {
+export async function snap(ds, before, after, moved, exclude = null) {
   const r = await fetch(`${API}/datasets/${ds}/snap`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ before, after, moved }),
+    body: JSON.stringify({ before, after, moved, exclude }),
   });
   if (!r.ok) throw new Error(`snap ${r.status}: ${await r.text()}`);
   return r.json();
