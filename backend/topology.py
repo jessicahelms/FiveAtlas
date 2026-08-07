@@ -1663,6 +1663,34 @@ def dissolve_gap(features, id_prop, point, tol=40.0, grab=None):
             "kind": kind, "regions": filled}
 
 
+def blankets(features, id_prop, keep=None, frac=0.95):
+    """Names of regions that wrap essentially every OTHER region -- the
+    whole-section outline, whatever it is called. Such a region is never a
+    peer: treat it as a neighbour and a border operation will carve the moved
+    region's shape straight through it. Names in `keep` are never returned --
+    the region the user is actually dragging is the subject, not a bystander.
+
+    Cheap pre-filter first: only a region at least 80% the size of everything
+    put together can possibly wrap it, so the exact (expensive) union test
+    runs on one or two candidates, not the whole file.
+    """
+    geoms, names = _feature_geoms(features, id_prop)
+    if len(geoms) < 2:
+        return []
+    hold = {str(n) for n in (keep or [])}
+    total = unary_union(list(geoms.values()))
+    out = []
+    for k, g in geoms.items():
+        if names[k] in hold or g.area < 0.8 * total.area:
+            continue
+        others = unary_union([o for kk, o in geoms.items() if kk != k])
+        if others.is_empty:
+            continue
+        if _safe_intersection(g, others).area >= frac * others.area:
+            out.append(names[k])
+    return sorted(out)
+
+
 def clean_lines(features, id_prop, points, width=12.0):
     """Circle the stray hairlines an edit left behind, and they are removed.
 

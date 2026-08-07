@@ -1598,12 +1598,12 @@ export default function App() {
     }
     setBusy(true); setError(null);
     try {
-      const res = await api.snap(dsId, snapBaseline, fc, movedList);
+      const res = await api.snap(dsId, snapBaseline, fc, movedList, offList());
       const clean = asFc(res, fc);
       commit(clean); setBaseline(clean); setMoved(new Set());
       setSnapInfo({ movers: res._movers, notes: res._notes });
     } catch (e) { setError(String(e)); } finally { setBusy(false); }
-  }, [dsId, fc, baseline, moved, commit, idProp]);
+  }, [dsId, fc, baseline, moved, commit, idProp, offList]);
 
   const doSave = useCallback(async () => {
     setBusy(true); setError(null);

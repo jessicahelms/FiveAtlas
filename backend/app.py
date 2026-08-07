@@ -892,7 +892,7 @@ def regions_versions(ds_id: str):
 @app.post("/api/datasets/{ds_id}/snap")
 async def snap(ds_id: str, request: Request):
     try:
-        ds.get_dataset(ds_id)
+        d = ds.get_dataset(ds_id)
     except KeyError:
         raise HTTPException(404, "unknown dataset")
     body = await request.json()
@@ -902,10 +902,23 @@ async def snap(ds_id: str, request: Request):
     tol = float(body.get("tol", 40.0))
     if not before or not after:
         raise HTTPException(400, "need 'before' and 'after' FeatureCollections")
+    # The whole-section outline is NEVER a peer: snapped as a neighbour, the
+    # engine carves the moved region's shape straight through it -- a hole in
+    # hemi and a trail of hairline slivers along the border. It sits the snap
+    # out (as does anything the client switched off) and is put back untouched.
+    # Detected on the before state, so it is held out even when it is not
+    # switched off in the sidebar; a name in `moved` is the subject, never held.
+    id_prop = d["id_prop"]
+    auto = topology.blankets(before.get("features") or [], id_prop, keep=moved)
+    holds = (set(body.get("exclude") or []) | set(auto)) - {str(m) for m in moved}
+    kept_b, _ = _hold_out(before.get("features") or [], id_prop, holds)
+    kept_a, held_a = _hold_out(after.get("features") or [], id_prop, holds)
     try:
-        result = geo.run_snap(ds_id, before, after, moved=moved, tol=tol)
+        result = geo.run_snap(ds_id, {**before, "features": kept_b},
+                              {**after, "features": kept_a}, moved=moved, tol=tol)
     except Exception as e:  # surface engine errors to the client
         raise HTTPException(500, f"snap failed: {e}")
+    result["features"] = _put_back(result.get("features") or [], held_a)
     provenance.carry(result, after)
     provenance.stamp(result, "snap-neighbours",
                      ", ".join(str(m) for m in moved) or None,

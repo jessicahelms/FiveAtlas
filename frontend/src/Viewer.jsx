@@ -204,7 +204,7 @@ export default function Viewer({
       return [cls.colorRGB, cls.color, p.color].filter((v) => v != null).join('|');
     }).join(','), [fc]);
   const showEditableRegions = L.showRegions || mode === 'modify' || mode === 'border'
-    || mode === 'split' || mode === 'dissolve' || mode === 'draw';
+    || mode === 'split' || mode === 'dissolve' || mode === 'draw' || mode === 'clean';
 
   // base64 spec of the visible stain channels -> drives the stain tile URLs
   const stainSpec = useMemo(() => {
@@ -258,8 +258,8 @@ export default function Viewer({
     mode: MODES[mode] || ViewMode,   // 'border' -> ViewMode: clicks pick regions
     coordinateSystem: COORDINATE_SYSTEM.CARTESIAN,
     selectedFeatureIndexes: selectedIndexes,
-    // in split/draw mode the canvas clicks are the sketch, not a region pick
-    pickable: mode !== 'split' && mode !== 'draw',
+    // in split/draw/clean mode the canvas clicks are the sketch, not a region pick
+    pickable: mode !== 'split' && mode !== 'draw' && mode !== 'clean',
     // A region switched off in the sidebar is still IN the file and still in this
     // layer -- indices have to keep matching `selected` -- it is just not drawn.
     getFillColor: (f) => {
@@ -551,7 +551,7 @@ export default function Viewer({
     // The mode's own handleClick normally does this (it can see the button); this
     // is the fallback for when deck doesn't forward the right button as a click.
     // finishNow() is a no-op once the sequence is empty, so both firing is safe.
-    if (mode === 'split' || mode === 'draw') return;   // handled on pointerdown above
+    if (mode === 'split' || mode === 'draw' || mode === 'clean') return;   // handled on pointerdown above
 
     const deck = deckRef.current && deckRef.current.deck;
     if (!deck) return;
@@ -599,7 +599,7 @@ export default function Viewer({
       initialViewState={initialViewState}
       layers={stack}
       getCursor={() => (mode === 'modify' || mode === 'border' || mode === 'split'
-        || mode === 'dissolve' || mode === 'draw' ? 'crosshair' : 'grab')}
+        || mode === 'dissolve' || mode === 'draw' || mode === 'clean' ? 'crosshair' : 'grab')}
       onDragStart={(info) => {
         if (info && info.object && info.object.geometry
             && info.object.geometry.type === 'Point' && onGrabVertex) {
