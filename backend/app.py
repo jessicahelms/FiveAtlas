@@ -1139,6 +1139,46 @@ async def regions_dissolve_gap(ds_id: str, request: Request):
             "regions": res["regions"]}
 
 
+@app.post("/api/datasets/{ds_id}/regions/clean-lines")
+async def regions_clean_lines(ds_id: str, request: Request):
+    """Remove the stray hairlines inside a traced loop -- sliver parts of
+    regions and sliver voids between them -- and hand the ground to the healthy
+    neighbours. Body: {points, fc?, width?, exclude?}. Returns the updated FC
+    plus the report, so the client can preview and commit without a second
+    round trip."""
+    try:
+        d = ds.get_dataset(ds_id)
+    except KeyError:
+        raise HTTPException(404, "unknown dataset")
+    body = await request.json()
+    points = body.get("points")
+    if not points or len(points) < 3:
+        raise HTTPException(400, "need 'points': the traced loop")
+    fc = body.get("fc") or geo.load_regions(ds_id)[0]
+    width = float(body.get("width", 12.0))
+    # Switched-off regions sit out, same as gap-finding -- and clean_lines
+    # additionally holds anything that blankets the loop out of its void
+    # union, so hemi does not need to be off for this to work.
+    kept, held = _hold_out(fc["features"], d["id_prop"], body.get("exclude"))
+    try:
+        res = topology.clean_lines(kept, d["id_prop"], points, width=width)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"clean-lines failed: {e}")
+    res["features"] = _put_back(res["features"], held)
+    touched = sorted({r["region"] for r in res["removed"]}
+                     | set(res["filled"]) | set(res["deleted"]))
+    detail = (f"{res['area']:,.0f} px² of stray lines"
+              + (f", {len(res['deleted'])} sliver region(s) deleted" if res["deleted"] else "")
+              + (f" -> {' + '.join(res['filled'])}" if res["filled"] else ""))
+    return {**provenance.stamped(res["features"], fc, "clean-lines",
+                                 detail, touched),
+            "removed": res["removed"], "deleted": res["deleted"],
+            "filled": res["filled"], "covered": res["covered"],
+            "freed": res["freed"], "area": res["area"]}
+
+
 @app.post("/api/datasets/{ds_id}/regions/load")
 async def regions_load(ds_id: str, request: Request):
     """Open an arbitrary GeoJSON file (by path) as this dataset's editable
