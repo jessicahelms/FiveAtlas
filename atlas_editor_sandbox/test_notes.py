@@ -91,7 +91,7 @@ updates = {"ISO": {"damage": ["separation", "voidlarge"],
                    "voids": ["separation.1", "voidlarge.2"]},
            "TH": {"damage": ["bubble"], "voids": ["bubble.1"]}}
 changes = N.apply_regions(doc["data"], updates, annotator="Jessica",
-                          only={"ISO"})
+                          only={"ISO"})["changes"]
 after = doc["render"](doc["data"])
 check("only the region in `only` is written",
       {c["region"] for c in changes} == {"ISO"}, str({c["region"] for c in changes}))
@@ -121,10 +121,27 @@ N.apply_regions(doc2["data"], updates, annotator="Jessica", only={"ISO"})
 check("someone else's name in `annotator` is left alone",
       str(doc2["data"]["ISO"]["annotator"]) == "Emma Jones")
 
+# a working copy with no shape for a recorded damage must not erase it. This is
+# what a fresh workdir (or Restore original) looks like: 23 regions, zero shapes,
+# and every damage field in the file about to be written back as "".
+doc_keep = N.read(ds / "annotation.notes.yaml")
+N.apply_regions(doc_keep["data"], {"ISO": {"damage": ["separation"],
+                                           "voids": ["separation.1"]}}, only={"ISO"})
+res_keep = N.apply_regions(doc_keep["data"], {"ISO": {"damage": [], "voids": []}},
+                           only={"ISO"})
+check("damage already in the file is not cleared by a copy with no shapes",
+      str(doc_keep["data"]["ISO"]["damage"]) == "separation",
+      str(doc_keep["data"]["ISO"]["damage"]))
+check("...and the difference is reported as kept, not dropped in silence",
+      {k["key"] for k in res_keep["kept"]} == {"damage", "voids"},
+      str(res_keep["kept"]))
+check("nothing is reported as a change when nothing was written",
+      res_keep["changes"] == [], str(res_keep["changes"]))
+
 # a region the YAML has never heard of
 doc3 = N.read(ds / "annotation.notes.yaml")
 ch3 = N.apply_regions(doc3["data"], {"NOSUCH": {"damage": ["bubble"], "voids": []}},
-                      only=None)
+                      only=None)["changes"]
 check("a region missing from the YAML is not silently added",
       ch3 == [] and "NOSUCH" not in doc3["render"](doc3["data"]))
 check("...it is reported instead",
@@ -212,7 +229,8 @@ check("every region has the six keys",
       all(set(N.REGION_KEYS) == set(fresh_doc["data"][r].keys())
           for r in ("ISO", "TH", "PAL.1")))
 ch = N.apply_regions(fresh_doc["data"], {"ISO": {"damage": ["bubble"],
-                                                 "voids": ["bubble.1"]}}, only=None)
+                                                 "voids": ["bubble.1"]}},
+                     only=None)["changes"]
 check("and it takes an edit", [c["key"] for c in ch] == ["damage", "voids"])
 
 print("\n" + (f"{len(fails)} FAILED: " + "; ".join(fails) if fails else "all checks passed"))

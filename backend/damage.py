@@ -263,6 +263,13 @@ def containment(region_features, id_prop="name", frac=0.90, margin=1.05):
     return {k: sorted(v) for k, v in out.items()}
 
 
+# How much of a container's own share a contained region must account for before
+# the container is set aside for that shape. 1.0 would demand exactness that
+# floating-point intersections never give; well below ~0.9 and an ordinary
+# straddle at a nested border starts being mistaken for containment.
+SPECIFIC_SHARE = 0.9
+
+
 def assign(region_features, damage_features, id_prop="name", min_overlap=0.01,
            mode="dominant", choices=None, specific_wins=True):
     """Which regions does each damage shape belong to?
@@ -316,10 +323,33 @@ def assign(region_features, damage_features, id_prop="name", min_overlap=0.01,
 
         # Where a shape lands in both a region and something that region
         # contains, only the contained one is recorded -- see containment().
-        reached = {h["region"] for h in kept}
-        enclosing = {h["region"] for h in kept
-                     if any(inner in reached and inner != h["region"]
-                            for inner in encloses.get(h["region"], []))}
+        #
+        # But "also lands in" is not enough on its own. ISO contains SSp, and a
+        # shape drawn in ISO near their long shared border can clip SSp by a few
+        # per cent while lying ENTIRELY in ISO. Setting ISO aside for that would
+        # file the shape under SSp alone -- 95% outside it -- leave ISO's record
+        # empty, and never ask, because one candidate is not a straddle. So the
+        # container is only set aside when what it contains accounts for
+        # essentially all of what the container was holding.
+        #
+        # That has to be the COMBINED share of the contained regions, not the
+        # largest one. A shape straddling TH and ISO is held 100% by hemi and
+        # ~60/40 by the two, so no single region ever clears the bar -- asking
+        # region by region would keep hemi for every straddling shape there is,
+        # and offer the whole-hemisphere outline as a candidate against the two
+        # real regions. Summed, the pair account for all of hemi's share and it
+        # is set aside; SSp's lone 5% still does not account for ISO's, so ISO
+        # stays. A shape that merely grazes a contained region below
+        # min_overlap contributes nothing here, so the container keeps it --
+        # recording it against the outline says something true.
+        fracs = {h["region"]: h["frac"] for h in kept}
+        enclosing = set()
+        for h in kept:
+            inside = sum(fracs.get(inner, 0.0)
+                         for inner in encloses.get(h["region"], [])
+                         if inner != h["region"])
+            if inside >= h["frac"] * SPECIFIC_SHARE:
+                enclosing.add(h["region"])
         for h in kept:
             h["enclosing"] = h["region"] in enclosing
         cand = [h["region"] for h in kept if h["region"] not in enclosing]

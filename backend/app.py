@@ -643,11 +643,15 @@ def _notes_context(ds_id, body):
                                  "unreadable": True,
                                  "fingerprint": doc["fingerprint"]}
     else:
-        changes = notes.apply_regions(doc["data"], updates, annotator=annotator,
+        applied = notes.apply_regions(doc["data"], updates, annotator=annotator,
                                       only=only)
+        changes = applied["changes"]
         after = doc["render"](doc["data"])
         out["files"]["notes"] = {
             "found": True, "path": doc["path"], "changes": changes,
+            # damage the YAML records that this working copy has no shape for:
+            # left alone, and shown, so the difference is not invisible
+            "kept": applied["kept"],
             "diff": notes.diff(doc["text"], after, doc["path"]),
             "unexpected": notes.unexpected_lines(doc["text"], after, changes),
             "missingRegions": notes.missing_regions(doc["data"],
@@ -764,6 +768,12 @@ async def notes_save(ds_id: str, request: Request):
                             "path": f["path"], "expected": res.get("expected"),
                             "actual": res.get("actual")})
             continue
+        # The report is built BEFORE the write, so its fingerprint is the hash we
+        # just superseded. Refresh it: the client keeps this report and sends the
+        # fingerprint back on the next save, and a stale one makes our own write
+        # look like a colleague's -- refusing the next batch and blaming someone.
+        f["fingerprint"] = res["fingerprint"]
+        f["unchanged"] = True
         written.append({"file": key, "path": f["path"],
                         "changes": f.get("changes") or [],
                         "fingerprint": res["fingerprint"]})
@@ -1245,6 +1255,7 @@ async def regions_outline(ds_id: str, request: Request):
     if not body.get("apply"):
         return {"geometry": res["geometry"], "area": res["area"],
                 "method": res["method"], "sources": res["sources"],
+                "parts": res["parts"],
                 "exists": any(str((f.get("properties") or {}).get(d["id_prop"])) == name
                               for f in fc.get("features") or [])}
 
@@ -1260,10 +1271,11 @@ async def regions_outline(ds_id: str, request: Request):
     feats.insert(0, {"type": "Feature", "properties": props,
                      "geometry": res["geometry"]})
     detail = (f"{name} {'rebuilt' if replaced else 'created'} by {res['method']}"
-              f", {res['area']:,.0f} px² from {len(res['sources'])} regions")
+              f", {res['area']:,.0f} px² from {len(res['sources'])} regions"
+              + (f" in {res['parts']} parts" if res["parts"] > 1 else ""))
     return {**provenance.stamped(feats, fc, "section-outline", detail, [name]),
             "name": name, "area": res["area"], "method": res["method"],
-            "replaced": replaced, "sources": res["sources"]}
+            "replaced": replaced, "sources": res["sources"], "parts": res["parts"]}
 
 
 @app.post("/api/datasets/{ds_id}/regions/fill-gap")
