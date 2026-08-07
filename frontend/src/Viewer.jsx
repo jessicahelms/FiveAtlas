@@ -209,17 +209,35 @@ export default function Viewer({
     return encodeURIComponent(btoa(JSON.stringify(vis)));
   }, [stainChannels]);
 
+  // Rotating changes what a tile CONTAINS but not its (z, x, y), so nothing else
+  // would tell either cache to let go: the browser holds tiles for an hour under
+  // Cache-Control, and deck keeps its own by tile index. Putting the orientation
+  // in the URL makes the rotated tiles different resources, and putting it in
+  // refetchKey makes deck go and ask for them.
+  const oKey = (() => {
+    const o = (info && info.orientation) || {};
+    return `${o.rot || 0}${o.flipH ? 'h' : ''}${o.flipV ? 'v' : ''}`;
+  })();
+
   const morph = pyramidTileLayer({
-    id: 'morphology', refetchKey: dsId, levels: info.levels, tileSize: info.tileSize,
+    // the orientation is part of the layer identity: deck keeps a tile cache per
+    // layer, and a same-id layer with a new extent goes on drawing the tiles it
+    // already had -- which showed up as the old and new image both on screen
+    id: `morphology-${oKey}`, refetchKey: `${dsId}|${oKey}`,
+    levels: info.levels, tileSize: info.tileSize,
     width: info.width, height: info.height, opacity: 1,
-    urlFor: (z, x, y) => `/api/datasets/${dsId}/tiles/${z}/${x}/${y}.png`,
+    urlFor: (z, x, y) => `/api/datasets/${dsId}/tiles/${z}/${x}/${y}.png?o=${oKey}`,
   });
 
   const stains = (stainInfo && stainSpec)
     ? pyramidTileLayer({
-        id: 'stain-tiles', refetchKey: stainSpec, levels: stainInfo.levels, tileSize: stainInfo.tileSize,
-        width: stainInfo.width, height: stainInfo.height, opacity: L.stainOpacity,
-        urlFor: (z, x, y) => `/api/datasets/${dsId}/stains/tiles/${z}/${x}/${y}.png?s=${stainSpec}`,
+        id: `stain-tiles-${oKey}`, refetchKey: `${stainSpec}|${oKey}`,
+        levels: stainInfo.levels, tileSize: stainInfo.tileSize,
+        // the displayed extent, which a quarter turn swaps -- info is the one the
+        // backend re-reports on rotation, so both layers agree
+        width: info.width, height: info.height, opacity: L.stainOpacity,
+        urlFor: (z, x, y) =>
+          `/api/datasets/${dsId}/stains/tiles/${z}/${x}/${y}.png?s=${stainSpec}&o=${oKey}`,
       })
     : null;
 

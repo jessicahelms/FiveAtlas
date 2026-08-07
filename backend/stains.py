@@ -21,6 +21,8 @@ import tifffile
 import zarr
 from PIL import Image
 
+import orientation as ORI
+
 # Xenium Explorer / Viv default channel palette, assigned BY CHANNEL INDEX
 # (extracted verbatim from Xenium Explorer's app.asar). For the 4-channel
 # morphology_focus this gives DAPI=blue, ATP1A1/CD45/E-Cadherin=green,
@@ -72,6 +74,27 @@ class StainStack:
 
     def _open(self, name):
         return self._zf.open(name) if self._zf else name
+
+    def close(self):
+        """Release the zip and every per-channel TIFF handle.
+
+        One handle per stain channel plus the enclosing morphology_focus.zip, none
+        of which tifffile/zipfile close on their own -- so closing a dataset left
+        the whole folder locked on Windows and undeletable. Idempotent.
+        """
+        with self._lock:
+            for tf, _z, _g in list(self._z.values()):
+                try:
+                    tf.close()
+                except Exception:
+                    pass
+            self._z = {}
+            zf, self._zf = getattr(self, "_zf", None), None
+            if zf is not None:
+                try:
+                    zf.close()
+                except Exception:
+                    pass
 
     # ---- per-channel pyramid (opened is_ome=False, handle cached) ----------
     def _channel(self, idx):
@@ -134,8 +157,27 @@ class StainStack:
         lo, hi, dmax = self._contrast[idx]
         return {"index": idx, "min": lo, "max": hi, "dataMax": dmax}
 
+    def _window(self, idx, level, x0, y0, x1, y1):
+        """An arbitrary rectangle of one channel -- what a rotated displayed tile
+        needs, since its source rectangle is not tile-aligned."""
+        arr = self._level_arr(idx, level)
+        H, W = arr.shape[-2], arr.shape[-1]
+        x0, y0 = max(0, x0), max(0, y0)
+        x1, y1 = min(W, x1), min(H, y1)
+        if x1 <= x0 or y1 <= y0:
+            return None
+        with self._lock:
+            return np.asarray(arr[..., y0:y1, x0:x1]).squeeze()
+
     # ---- composite tile ----------------------------------------------------
-    def composite_tile(self, spec, level, tx, ty):
+    def composite_tile(self, spec, level, tx, ty, orient=None):
+        rotated = orient is not None and not ORI.is_identity(orient)
+        win = None
+        if rotated:
+            H, W = self.level_shapes[level]
+            win = ORI.source_window(tx, ty, self.tile, orient, W, H)
+            if win is None:
+                return None
         out = None
         for ch in spec:
             if not ch.get("visible", True):
@@ -143,7 +185,7 @@ class StainStack:
             idx = int(ch.get("index", -1))
             if idx not in self._member:
                 continue
-            t = self._tile(idx, level, tx, ty)
+            t = self._window(idx, level, *win) if rotated else self._tile(idx, level, tx, ty)
             if t is None:
                 continue
             if out is None:
@@ -162,7 +204,25 @@ class StainStack:
         rgb = np.clip(out, 0, 255).astype(np.uint8)
         alpha = rgb.max(axis=2).astype(np.uint8)
         rgba = np.dstack([rgb, alpha])
-        if rgba.shape[:2] != (self.tile, self.tile):
+        if rotated:
+            # Transform the blended tile, then paste it where the transform puts
+            # it inside the displayed tile (same placement maths as the morphology
+            # pyramid, so the two layers stay registered).
+            H, W = self.level_shapes[level]
+            x0, y0, x1, y1 = win
+            rgba = ORI.transform_image(rgba, orient)
+            cx = [ORI.fwd(x, y, orient, W, H) for x in (x0, x1) for y in (y0, y1)]
+            dx0 = int(round(min(c[0] for c in cx))) - tx * self.tile
+            dy0 = int(round(min(c[1] for c in cx))) - ty * self.tile
+            pad = np.zeros((self.tile, self.tile, 4), np.uint8)
+            sy0, sx0 = max(0, -dy0), max(0, -dx0)
+            dy, dx = max(0, dy0), max(0, dx0)
+            h = min(rgba.shape[0] - sy0, self.tile - dy)
+            w = min(rgba.shape[1] - sx0, self.tile - dx)
+            if h > 0 and w > 0:
+                pad[dy:dy + h, dx:dx + w] = rgba[sy0:sy0 + h, sx0:sx0 + w]
+            rgba = pad
+        elif rgba.shape[:2] != (self.tile, self.tile):
             pad = np.zeros((self.tile, self.tile, 4), np.uint8)
             pad[: rgba.shape[0], : rgba.shape[1]] = rgba
             rgba = pad

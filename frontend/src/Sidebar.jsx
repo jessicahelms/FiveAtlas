@@ -18,11 +18,15 @@ export default function Sidebar({
   onUndo, onRedo, canUndo, canRedo,
   propEdit, propRadius, onPropEditChange,
   geomReport, onValidate, onRepair, onDismissReport, onForceExport,
-  onRestoreOriginal,
+  onRestoreOriginal, orientation, onOrientation,
   onLoadFile, onExport,
   snapInfo, busy, error,
 }) {
   const [confirmRestore, setConfirmRestore] = useState(false);
+  // Which coordinates to write when the view is rotated/flipped. Default is what
+  // is on screen -- that is what has been edited against.
+  const [exportFrame, setExportFrame] = useState('displayed');
+  const rotated = !!(orientation && (orientation.rot || orientation.flipH || orientation.flipV));
   const idProp = (info && info.idProp) || 'name';
   const names = fc.features.map((f) => displayName(f, idProp) || '(unnamed)');
   // A name carried by several features is ONE multi-part region — every edit acts
@@ -280,6 +284,48 @@ export default function Sidebar({
       </div>
 
       <div className="section">
+        <div className="section-title">Orientation</div>
+        <div className="hint dim">
+          For a slide that was imaged upside down. Moves the image and the regions
+          together, so they stay lined up.
+        </div>
+        <div className="row">
+          <button className="btn sm" disabled={busy || !onOrientation}
+            title="rotate anticlockwise"
+            onClick={() => onOrientation((o) => ({ ...o, rot: (o.rot + 270) % 360 }))}>↺ 90°</button>
+          <button className="btn sm" disabled={busy || !onOrientation}
+            title="rotate clockwise"
+            onClick={() => onOrientation((o) => ({ ...o, rot: (o.rot + 90) % 360 }))}>↻ 90°</button>
+        </div>
+        <div className="row">
+          <button className={`btn sm${orientation && orientation.flipH ? ' on' : ''}`}
+            disabled={busy || !onOrientation} title="mirror left to right"
+            onClick={() => onOrientation((o) => ({ ...o, flipH: !o.flipH }))}>⇄ Flip L/R</button>
+          <button className={`btn sm${orientation && orientation.flipV ? ' on' : ''}`}
+            disabled={busy || !onOrientation} title="mirror top to bottom"
+            onClick={() => onOrientation((o) => ({ ...o, flipV: !o.flipV }))}>⇅ Flip T/B</button>
+        </div>
+        {rotated ? (
+          <>
+            <div className="prop-readout">
+              <span>now</span>
+              <span className="v">
+                {orientation.rot}°{orientation.flipH ? ' ⇄' : ''}{orientation.flipV ? ' ⇅' : ''}
+              </span>
+            </div>
+            <button className="btn sm" disabled={busy}
+              onClick={() => onOrientation({ rot: 0, flipH: false, flipV: false })}>
+              Back to as-imaged
+            </button>
+            <div className="hint dim">
+              Edit in this frame if you like — Export below chooses whether to write
+              these coordinates or the ones the original file used.
+            </div>
+          </>
+        ) : null}
+      </div>
+
+      <div className="section">
         <div className="section-title">Data</div>
         <button className="btn" onClick={onLoadFile} disabled={busy}>📂 Load regions file…</button>
         <button className="btn" onClick={onValidate} disabled={busy}>✓ Check geometry</button>
@@ -307,9 +353,36 @@ export default function Sidebar({
           </div>
         )}
         <div className="slabel">Export</div>
+        {rotated && (
+          <>
+            <div className="hint dim">Write the coordinates…</div>
+            <div className="row">
+              <button className={`btn sm${exportFrame === 'displayed' ? ' on' : ''}`}
+                disabled={busy} title="the rotated / flipped coordinates you have been editing"
+                onClick={() => setExportFrame('displayed')}>
+                As you see it ({orientation.rot}°{orientation.flipH ? ' ⇄' : ''}{orientation.flipV ? ' ⇅' : ''})
+              </button>
+              <button className={`btn sm${exportFrame === 'original' ? ' on' : ''}`}
+                disabled={busy} title="rotate and flip every edit back to the as-imaged frame"
+                onClick={() => setExportFrame('original')}>
+                As imaged (0°)
+              </button>
+            </div>
+            <div className="hint dim">
+              {exportFrame === 'original'
+                ? 'Your edits are rotated and flipped back, so the file lines up with the'
+                  + ' original image. The file is written without an orientation marker.'
+                : 'Written exactly as displayed, marked with the orientation so it can be'
+                  + ' turned back later.'}
+              {' '}The filename says which.
+            </div>
+          </>
+        )}
         <div className="row">
-          <button className="btn" onClick={() => onExport('merged')} disabled={busy}>Merged .geojson</button>
-          <button className="btn" onClick={() => onExport('separate')} disabled={busy}>Separate .zip</button>
+          <button className="btn" onClick={() => onExport('merged', { frame: exportFrame })}
+            disabled={busy}>Merged .geojson</button>
+          <button className="btn" onClick={() => onExport('separate', { frame: exportFrame })}
+            disabled={busy}>Separate .zip</button>
         </div>
         <div className="hint dim">Merged = one file, all regions. Separate = one file per region, zipped.</div>
 
@@ -337,7 +410,9 @@ export default function Sidebar({
                 <button className="btn sm primary" onClick={onRepair} disabled={busy}>Repair</button>
               )}
               {geomReport.mode && (
-                <button className="btn sm" onClick={() => onForceExport(geomReport.mode)} disabled={busy}>
+                <button className="btn sm" disabled={busy}
+                  onClick={() => onForceExport(geomReport.mode,
+                                               geomReport.frame || 'displayed')}>
                   Export anyway
                 </button>
               )}

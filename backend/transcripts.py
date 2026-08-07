@@ -54,6 +54,9 @@ class GeneDensity:
         self._indices = np.asarray(dg["indices"][:])
         self._data = np.asarray(dg["data"][:])
         self._cache: dict[str, tuple] = {}
+        # The CSR arrays above are fully materialised, so the store is never read
+        # again -- but zarr's ZipStore has no __del__, so leaving it open held
+        # transcripts.zarr.zip locked for the life of the process. See close().
         # full-res world extent: micron / pixel_size
         self.W = self.cols * self.grid_x / self.pixel_size
         self.H = self.rows * self.grid_y / self.pixel_size
@@ -63,6 +66,18 @@ class GeneDensity:
 
     def bounds(self):
         return [0, self.H, self.W, 0]  # flipY [left, bottom, right, top]
+
+    def close(self):
+        """Release the zarr store. The CSR arrays stay usable -- they were read
+        in full at construction -- so this only drops the file handle."""
+        with self._lock:
+            root, self._root = getattr(self, "_root", None), None
+            store = getattr(root, "store", None) if root is not None else None
+            if store is not None:
+                try:
+                    store.close()
+                except Exception:
+                    pass
 
     def _grid(self, gene):
         if gene not in self._cache:

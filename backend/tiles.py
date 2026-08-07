@@ -27,6 +27,7 @@ import tifffile
 import zarr
 from PIL import Image
 
+import orientation as ORI
 from config import TILE_SIZE
 
 
@@ -59,6 +60,27 @@ class Pyramid:
         self._compute_contrast()
 
     # -- lazy zarr view of the whole pyramid (imagecodecs decodes touched tiles) --
+    def close(self):
+        """Release the OS file handle on the OME-TIFF.
+
+        tifffile's TiffFile has no __del__ and sits in a reference cycle, so
+        dropping the last reference does NOT close the file -- it waits on a GC
+        pass that may never happen in an idle server. Until then Windows keeps
+        the whole dataset folder locked: closing a dataset and then trying to
+        move or rename it fails with "the file is open in another program".
+        Idempotent, and safe to call while requests are in flight (the lock is
+        the same one _read_window takes).
+        """
+        with self._lock:
+            self._root = None
+            self._level_keys = []
+            tif, self._tif = getattr(self, "_tif", None), None
+            if tif is not None:
+                try:
+                    tif.close()
+                except Exception:
+                    pass
+
     def _open_root(self):
         if self._root is None:
             with self._lock:
@@ -113,23 +135,55 @@ class Pyramid:
         f = (win.astype(np.float32) - self.lo) / (self.hi - self.lo)
         return (np.clip(f, 0.0, 1.0) * 255.0).astype(np.uint8)
 
-    def tile_png(self, level: int, tx: int, ty: int,
-                 plane: Optional[int] = None) -> Optional[bytes]:
+    def tile_u8(self, level: int, tx: int, ty: int, plane: Optional[int] = None,
+                orient=None) -> Optional[np.ndarray]:
+        """One tile as a padded tile x tile uint8 array, in DISPLAY orientation."""
         if level < 0 or level >= self.nlevels:
             return None
         shp = self.level_shapes[level]
         H, W = shp[self.yc], shp[self.xc]
-        y0, x0 = ty * self.tile, tx * self.tile
-        if y0 >= H or x0 >= W or y0 < 0 or x0 < 0:
+        T = self.tile
+        p = self._plane(plane)
+
+        if orient is None or ORI.is_identity(orient):
+            y0, x0 = ty * T, tx * T
+            if y0 >= H or x0 >= W or y0 < 0 or x0 < 0:
+                return None
+            y1, x1 = min(y0 + T, H), min(x0 + T, W)
+            u8 = self._to_uint8(self._read_window(level, p, y0, y1, x0, x1))
+            if u8.shape != (T, T):          # pad partial edge tiles (black = outside)
+                out = np.zeros((T, T), np.uint8)
+                out[: u8.shape[0], : u8.shape[1]] = u8
+                u8 = out
+            return u8
+
+        # Rotated/flipped: read the source rectangle that feeds this displayed
+        # tile, transform it, and paste it at the offset the transform puts it.
+        # Rotation is scale-free, so this works per level with that level's dims.
+        win = ORI.source_window(tx, ty, T, orient, W, H)
+        if win is None:
             return None
-        y1, x1 = min(y0 + self.tile, H), min(x0 + self.tile, W)
-        win = self._read_window(level, self._plane(plane), y0, y1, x0, x1)
-        u8 = self._to_uint8(win)
-        # Pad partial edge tiles to a uniform tile grid (black = outside image).
-        if u8.shape != (self.tile, self.tile):
-            out = np.zeros((self.tile, self.tile), np.uint8)
-            out[: u8.shape[0], : u8.shape[1]] = u8
-            u8 = out
+        x0, y0, x1, y1 = win
+        u8 = ORI.transform_image(
+            self._to_uint8(self._read_window(level, p, y0, y1, x0, x1)), orient)
+        # Where the transformed rectangle lands in display space.
+        cx = [ORI.fwd(x, y, orient, W, H) for x in (x0, x1) for y in (y0, y1)]
+        dx0 = int(round(min(c[0] for c in cx))) - tx * T
+        dy0 = int(round(min(c[1] for c in cx))) - ty * T
+        out = np.zeros((T, T), np.uint8)
+        sy0, sx0 = max(0, -dy0), max(0, -dx0)
+        dy, dx = max(0, dy0), max(0, dx0)
+        h = min(u8.shape[0] - sy0, T - dy)
+        w = min(u8.shape[1] - sx0, T - dx)
+        if h > 0 and w > 0:
+            out[dy:dy + h, dx:dx + w] = u8[sy0:sy0 + h, sx0:sx0 + w]
+        return out
+
+    def tile_png(self, level: int, tx: int, ty: int,
+                 plane: Optional[int] = None, orient=None) -> Optional[bytes]:
+        u8 = self.tile_u8(level, tx, ty, plane, orient)
+        if u8 is None:
+            return None
         buf = io.BytesIO()
         Image.fromarray(u8, mode="L").save(buf, format="PNG")
         return buf.getvalue()
