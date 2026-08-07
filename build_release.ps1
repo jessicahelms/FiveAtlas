@@ -24,8 +24,37 @@ param(
 
 $ErrorActionPreference = "Stop"
 $App = $PSScriptRoot
-$Venv = Join-Path (Split-Path $App -Parent) ".venv\Scripts\python.exe"
-if (-not (Test-Path $Venv)) { throw "python venv not found at $Venv - run setup.bat first" }
+# Prefer the repo-local venv (what setup.bat creates, and what requirements.txt
+# governs) over the one in the parent directory. It used to look ONLY in the
+# parent, which on this machine resolves to a shared Python 3.9 environment that
+# no requirements file constrains -- so the pins that keep the build working,
+# numcodecs<0.16 in particular, did not apply to the Windows build at all.
+$Venv = $null
+foreach ($cand in @((Join-Path $App ".venv\Scripts\python.exe"),
+                    (Join-Path (Split-Path $App -Parent) ".venv\Scripts\python.exe"))) {
+    if (Test-Path $cand) { $Venv = $cand; break }
+}
+if (-not $Venv) {
+    throw "python venv not found in $App\.venv or $(Split-Path $App -Parent)\.venv - run setup.bat first"
+}
+
+# Fail loudly on the dependency combination that silently broke the macOS build:
+# zarr 2.x imports numcodecs.blosc.cbuffer_sizes, which numcodecs 0.16 removed, so
+# `import zarr` raises and the packaged app dies at startup while the developer's
+# machine is fine. Cheap to check, and the failure is otherwise very confusing.
+$depCheck = & $Venv -c @"
+import sys
+try:
+    import zarr, numcodecs
+    from numcodecs.blosc import cbuffer_sizes  # noqa: F401
+    print('OK ' + zarr.__version__ + ' ' + numcodecs.__version__)
+except Exception as e:
+    print('BAD ' + type(e).__name__ + ': ' + str(e))
+"@
+if ($depCheck -notmatch '^OK') {
+    throw "the build environment is broken: $depCheck`nFix with: & '$Venv' -m pip install -r '$App\requirements.txt'"
+}
+Write-Host "   deps         -> zarr/numcodecs $($depCheck -replace '^OK ','')" -ForegroundColor DarkGray
 
 $Work = Join-Path $OutRoot "work"
 $DistDir = Join-Path $OutRoot "dist"
