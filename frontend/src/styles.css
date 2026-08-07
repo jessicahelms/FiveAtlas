@@ -51,6 +51,15 @@ body {
 .regions li:hover { background: #1e2530; }
 .regions li.sel { background: #2b3648; color: #fff; }
 .regions li.moved { color: #ffcf4d; }
+.regions li.off { color: #5d6672; }
+.regions li.off > span:first-child { text-decoration: line-through; }
+.regions li .rowend { display: inline-flex; align-items: center; gap: 6px; }
+.regions li .eye {
+  background: none; border: 0; color: #4d5765; cursor: pointer; padding: 0;
+  font-size: 12px; line-height: 1;
+}
+.regions li:hover .eye { color: #8b95a4; }
+.regions li .eye:hover { color: #e6e9ef; }
 .regions li.pickA { background: #16341f; color: #7df0a2; box-shadow: inset 2px 0 0 #50e678; }
 .regions li.pickB { background: #16233f; color: #9cc0ff; box-shadow: inset 2px 0 0 #5a96ff; }
 .regions li.pickX { background: #241a34; color: #cda2ff; box-shadow: inset 2px 0 0 #be78ff; }
@@ -61,6 +70,16 @@ body {
 .picks { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px; }
 .chip { display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px 3px 3px; border-radius: 12px; font-size: 12px; background: #1e2530; border: 1px solid #2f3a4c; }
 .chip .tag { width: 18px; height: 18px; }
+/* damage chips in the SmartSheet cell boxes, mirroring the sheet's own chips */
+.chip .x {
+  background: none; border: 0; color: #8b95a4; cursor: pointer; padding: 0 2px;
+  font-size: 13px; line-height: 1;
+}
+.chip .x:hover { color: #ff9b9b; }
+.chip { padding: 3px 6px; }
+.pts .picks { margin: 6px 0; }
+.pts select { width: 100%; background: #1a212b; color: #e6e9ef; border: 1px solid #2f3a4c; border-radius: 6px; padding: 5px 8px; font-size: 12px; margin-bottom: 6px; }
+
 .chip.pickA { border-color: #50e678; } .chip.pickA .tag { background: #50e678; }
 .chip.pickB { border-color: #5a96ff; } .chip.pickB .tag { background: #5a96ff; }
 .chip.pickX { border-color: #be78ff; } .chip.pickX .tag { background: #be78ff; }
@@ -81,6 +100,19 @@ body {
 .geomrep .row { flex-wrap: wrap; }
 .notes li.lvl-err { color: #ff9b9b; }
 .notes li.lvl-warn { color: #e6c86a; }
+.hint.lvl-warn { color: #e6c86a; }
+
+/* YAML preview: a diff, not a dump — the point is to see the changed lines */
+.diff {
+  max-height: 260px; overflow: auto; margin: 6px 0 0; padding: 6px;
+  background: #0e1218; border: 1px solid #232a35; border-radius: 4px;
+  font-family: ui-monospace, Consolas, monospace; font-size: 11px;
+  line-height: 1.45; white-space: pre;
+}
+.diff .add { color: #7fd18b; }
+.diff .del { color: #ff9b9b; }
+.diff .hunk { color: #6b7482; }
+.diff .dim { color: #6b7482; }
 
 /* right-click a region -> rename */
 .ctxmenu {

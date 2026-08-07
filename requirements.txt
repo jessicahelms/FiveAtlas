@@ -16,3 +16,7 @@ numcodecs==0.12.1
 numpy==2.0.2
 pillow==11.3.0
 python-multipart==0.0.20
+# ruamel, NOT PyYAML: annotation.notes.yaml and metadata.yml are hand-maintained
+# by several people, and only a round-tripper preserves their comments, key
+# order, quoting and ---/... markers. PyYAML would reformat every file it wrote.
+ruamel.yaml==0.18.6

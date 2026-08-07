@@ -87,6 +87,9 @@ hiddenimports = (
         "shapely.validation", "shapely._geos",
         "tifffile", "zarr", "numcodecs",
         "PIL.Image", "PIL.ImageDraw",
+        # ruamel.yaml is a namespace package and its C backend is loaded by
+        # name, so neither is found by following imports alone.
+        "ruamel.yaml", "ruamel.yaml.clib", "ruamel.yaml.main",
     ]
 )
 

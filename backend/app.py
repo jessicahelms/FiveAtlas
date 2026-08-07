@@ -35,6 +35,8 @@ import geo
 from PIL import Image as PILImage
 
 import orientation as ORI
+import damage as DMG
+import notes
 import provenance
 import topology
 from transcripts import GeneDensity
@@ -427,12 +429,411 @@ async def put_orientation(ds_id: str, request: Request):
     return {**out, "orientation": want, "width": int(w), "height": int(h)}
 
 
+@app.post("/api/datasets/{ds_id}/regions/smartsheet.tsv")
+async def smartsheet_tsv(ds_id: str, request: Request):
+    """One TSV row per region, ready to paste into the tracking sheet.
+
+    Body: {fc?, damageFc?, notes?, extraDamage?, minOverlap?, mode?}. Returns the
+    text AND the assignment behind it, so the UI can show a review table rather than
+    handing over a block nobody can check. Read-only: nothing is written.
+
+    `mode` is "dominant" (default) or "all" -- see damage.assign. Shapes the
+    annotator has already answered for carry their answer in their own properties,
+    so the choice is read back out of the file, not held in the session.
+    """
+    try:
+        d = ds.get_dataset(ds_id)
+    except KeyError:
+        raise HTTPException(404, "unknown dataset")
+    body = await request.json() or {}
+    fc = body.get("fc") or geo.load_regions(ds_id)[0]
+    regions, inline = DMG.split_features(fc.get("features", []), d["id_prop"])
+    # damage.geojson when the client has one, else any damage shapes drawn straight
+    # into the region file
+    dmg = ((body.get("damageFc") or {}).get("features") or []) or inline
+    try:
+        res = DMG.assign(regions, dmg, d["id_prop"],
+                         float(body.get("minOverlap", 0.01)),
+                         mode=str(body.get("mode") or "dominant"),
+                         choices=DMG.choices_from(dmg, d["id_prop"]))
+    except Exception as e:
+        raise HTTPException(500, f"damage assignment failed: {e}")
+    # Hand-ticked designations live on the region features, so the TSV, the cells
+    # and the YAML all say the same thing without the client passing them around.
+    extra = dict(DMG.extras_from(regions, d["id_prop"]))
+    for k, v in (body.get("extraDamage") or {}).items():
+        extra[k] = sorted(set(extra.get(k, [])) | set(v or []))
+    text = DMG.tsv(res, body.get("notes"), extra_damage=extra)
+    return {"tsv": text, "columns": DMG.TSV_COLUMNS, "shapes": res["shapes"],
+            "unassigned": res["unassigned"], "regions": res["regions"],
+            "needsChoice": res["needsChoice"], "containers": res["containers"],
+            "containment": res["containment"], "mode": res["mode"],
+            "designations": {k: {"label": v[0], "drawn": v[1]}
+                             for k, v in DMG.DESIGNATIONS.items()}}
+
+
+@app.post("/api/datasets/{ds_id}/damage/cells")
+async def damage_cells(ds_id: str, request: Request):
+    """One SmartSheet cell per region: the damage chips for its dropdown.
+
+    The sheet's Damage column is a multi-select, so the thing worth copying is a
+    cell, not a row -- `Done`, then the designations by their display names.
+    Body: {fc?, sep?, includeEmpty?, mode?, minOverlap?}. Read-only.
+    """
+    try:
+        d = ds.get_dataset(ds_id)
+    except KeyError:
+        raise HTTPException(404, "unknown dataset")
+    body = await request.json() or {}
+    id_prop = d["id_prop"]
+    fc = body.get("fc") or geo.load_regions(ds_id)[0]
+    regions, dmg = DMG.split_features(fc.get("features") or [], id_prop)
+    res = DMG.assign(regions, dmg, id_prop, float(body.get("minOverlap", 0.01)),
+                     mode=str(body.get("mode") or "dominant"),
+                     choices=DMG.choices_from(dmg, id_prop))
+    sep = str(body.get("sep") or DMG.DEFAULT_SEPARATOR)
+    rows = DMG.cells(res, DMG.extras_from(regions, id_prop),
+                     DMG.done_from(regions, id_prop), sep,
+                     include_empty=bool(body.get("includeEmpty")))
+    named = {r["region"] for r in rows}
+    return {"cells": rows, "sep": sep, "separators": sorted(DMG.SEPARATORS),
+            "doneLabel": DMG.DONE_LABEL,
+            # the shapes still waiting on an answer, and the ones that reached no
+            # region at all -- this panel is where they get a second look
+            "needsChoice": res["needsChoice"], "unassigned": res["unassigned"],
+            "shapes": res["shapes"], "containment": res["containment"],
+            # every region, so a region with nothing yet can still be ticked
+            "regions": [r for r in sorted(res["regions"]) if r not in named],
+            "designations": [{"tag": t, "label": lab, "drawn": drawn}
+                             for t, (lab, drawn) in DMG.DESIGNATIONS.items()]}
+
+
+@app.post("/api/datasets/{ds_id}/damage/canonicalise")
+async def damage_canonicalise(ds_id: str, request: Request):
+    """Tidy damage shape names to `<designation>.<n>`. Body: {damageFc}.
+
+    Returns the renamed features AND the rename map, because `voids` in the YAML
+    lists shapes by name — the caller must rewrite both together or the two files
+    stop agreeing. Read-only: nothing is written."""
+    try:
+        d = ds.get_dataset(ds_id)
+    except KeyError:
+        raise HTTPException(404, "unknown dataset")
+    body = await request.json() or {}
+    feats = ((body.get("damageFc") or {}).get("features") or [])
+    res = DMG.canonicalise(feats, d["id_prop"])
+    return {"type": "FeatureCollection", "features": res["features"],
+            "renames": res["renames"], "collisions": res["collisions"]}
+
+
+def _hold_out(features, id_prop, names):
+    """Split off the regions an operation should ignore.
+
+    `hemi` is the outline of the whole hemisphere: it covers every other region,
+    so nothing is ever "outside a region" and **no gap can ever be found**. The
+    same goes for any container. Rather than special-casing hemi, the client says
+    which regions to set aside, and they are put back untouched afterwards.
+
+    Returns (kept, held) where held is [(original index, feature)].
+    """
+    skip = {str(n) for n in (names or [])}
+    if not skip:
+        return list(features or []), []
+    kept, held = [], []
+    for i, f in enumerate(features or []):
+        nm = str((f.get("properties") or {}).get(id_prop))
+        (held.append((i, f)) if nm in skip else kept.append(f))
+    return kept, held
+
+
+def _put_back(features, held):
+    """Re-insert held-out regions at (about) the index they came from, so draw
+    order survives an operation that ignored them."""
+    out = list(features or [])
+    for i, f in sorted(held, key=lambda t: t[0]):
+        out.insert(min(i, len(out)), f)
+    return out
+
+
+def _notes_worked_on(fc, id_prop, assignment, account=None):
+    """The regions THIS annotator worked on, from the trail the file carries.
+
+    Only these are written. Everyone else's entries in a shared notes file must
+    pass through untouched, and `_provenance` already knows whose edits are whose.
+
+    A damage shape is recorded under its own name in the trail, not its host's,
+    so the regions a shape was assigned to count as worked on too -- otherwise
+    drawing damage would never update any region's notes.
+    """
+    acct = account or provenance.account_name()
+    mine, shapes, claimed = set(), set(), set()
+    for e in provenance.trail(fc):
+        ours = str(e.get("account") or "") == str(acct)
+        for r in e.get("regions") or []:
+            r = str(r)
+            if not ours:
+                claimed.add(r)
+                continue
+            (shapes if DMG.is_damage(r) else mine).add(r)
+
+    # Damage is decided by NAME, not by how the shape got there: drawn with the
+    # damage tool, turned into a region from a gap, or an existing region renamed
+    # to `bubble.1` -- all the same thing by the time it reaches the notes. So a
+    # shape nobody else's trail claims counts as this annotator's; otherwise
+    # damage that arrived by a route with no entry would reach nobody's notes.
+    for s in (assignment or {}).get("shapes", []):
+        nm = s.get("name")
+        if nm in shapes or (nm not in claimed):
+            mine.update(s.get("regions") or [])
+    return mine
+
+
+def _notes_context(ds_id, body):
+    """Everything both preview and save need: the assignment, the loaded YAMLs,
+    and the edits applied to them. Shared so the two cannot drift apart -- a
+    preview that does not match what gets written is worse than no preview."""
+    try:
+        d = ds.get_dataset(ds_id)
+    except KeyError:
+        raise HTTPException(404, "unknown dataset")
+    body = body or {}
+    id_prop = d["id_prop"]
+    fc = body.get("fc") or geo.load_regions(ds_id)[0]
+    feats = fc.get("features") or []
+    regions, dmg = DMG.split_features(feats, id_prop)
+    res = DMG.assign(regions, dmg, id_prop, float(body.get("minOverlap", 0.01)),
+                     mode=str(body.get("mode") or "dominant"),
+                     choices=DMG.choices_from(dmg, id_prop))
+
+    scope = str(body.get("scope") or "mine")
+    worked = _notes_worked_on(fc, id_prop, res)
+    only = None if scope == "all" else worked
+
+    # A name is written into files other people read, so it must be a name
+    # somebody chose -- never the Windows account by default. Blank means "leave
+    # the annotator fields alone", which apply_regions and add_annotator honour.
+    annotator = body.get("annotator")
+    if annotator is None:
+        annotator = provenance.display_name() if provenance.has_display_name() else ""
+
+    # Undrawn designations (missing, cutoff, transcripts...) have no shape to
+    # find, so they can only come from the person; they are stored on the region
+    # itself and merge with the drawn ones here.
+    extra = dict(DMG.extras_from(regions, id_prop))
+    for k, v in (body.get("extraDamage") or {}).items():
+        extra[k] = sorted(set(extra.get(k, [])) | set(v or []))
+    updates = {}
+    for nm, v in res["regions"].items():
+        tags = sorted(set(v["damage"]) | {t for t in extra.get(nm, [])
+                                          if t in DMG.DESIGNATIONS})
+        updates[nm] = {"damage": tags, "voids": v["voids"]}
+
+    found = notes.find(d["root"])
+    out = {"dataset": ds_id, "root": d["root"], "assignment": res,
+           "workedOn": sorted(worked), "scope": scope, "annotator": annotator,
+           "files": {}}
+
+    doc = notes.read(found["notes"]["path"]) if found["notes"]["found"] else None
+    if doc is None:
+        out["files"]["notes"] = {"found": False, "path": found["notes"]["path"]}
+    elif not hasattr(doc["data"], "get"):
+        # Empty, truncated or not a mapping. It happens on a share, and it must
+        # not read as "no changes" -- that would quietly skip the save forever.
+        out["files"]["notes"] = {"found": True, "path": doc["path"],
+                                 "unreadable": True,
+                                 "fingerprint": doc["fingerprint"]}
+    else:
+        changes = notes.apply_regions(doc["data"], updates, annotator=annotator,
+                                      only=only)
+        after = doc["render"](doc["data"])
+        out["files"]["notes"] = {
+            "found": True, "path": doc["path"], "changes": changes,
+            "diff": notes.diff(doc["text"], after, doc["path"]),
+            "unexpected": notes.unexpected_lines(doc["text"], after, changes),
+            "missingRegions": notes.missing_regions(doc["data"],
+                                                    [r for r in res["regions"]]),
+            "fingerprint": doc["fingerprint"], "text": after,
+            "unchanged": after == doc["text"],
+        }
+
+    meta = notes.read(found["metadata"]["path"]) if found["metadata"]["found"] else None
+    if meta is None:
+        out["files"]["metadata"] = {"found": False, "path": found["metadata"]["path"]}
+    elif not hasattr(meta["data"], "get"):
+        out["files"]["metadata"] = {"found": True, "path": meta["path"],
+                                    "unreadable": True,
+                                    "fingerprint": meta["fingerprint"]}
+    else:
+        change = notes.add_annotator(meta["data"], annotator)
+        after = meta["render"](meta["data"])
+        changes = [change] if change else []
+        out["files"]["metadata"] = {
+            "found": True, "path": meta["path"], "changes": changes,
+            "diff": notes.diff(meta["text"], after, meta["path"]),
+            "unexpected": notes.unexpected_lines(meta["text"], after, changes),
+            "fingerprint": meta["fingerprint"], "text": after,
+            "unchanged": after == meta["text"],
+        }
+    return out
+
+
+@app.get("/api/datasets/{ds_id}/notes")
+def notes_state(ds_id: str):
+    """Which YAMLs the dataset folder has, and their exact paths.
+
+    Cheap and read-only, so the panel can name the file it will write the moment
+    a dataset opens — including when there is nothing there to write to.
+    """
+    try:
+        d = ds.get_dataset(ds_id)
+    except KeyError:
+        raise HTTPException(404, "unknown dataset")
+    found = notes.find(d["root"])
+    out = {"root": d["root"], "files": {}}
+    for key, info in found.items():
+        doc = notes.read(info["path"]) if info["found"] else None
+        entry = {"found": info["found"], "path": info["path"]}
+        if doc is not None:
+            data = doc["data"]
+            keys = list(data.keys()) if hasattr(data, "keys") else []
+            entry["fingerprint"] = doc["fingerprint"]
+            entry["keys"] = keys
+            if key == "notes":
+                entry["regions"] = [k for k in keys
+                                    if hasattr(data.get(k), "get")]
+            else:
+                entry["annotators"] = [str(x) for x in (data.get("annotators") or [])
+                                       if not notes.is_unset(x)]
+        out["files"][key] = entry
+    return out
+
+
+@app.post("/api/datasets/{ds_id}/notes/preview")
+async def notes_preview(ds_id: str, request: Request):
+    """What would be written to the two YAMLs, as a DIFF against what is on disk.
+
+    Body: {fc?, mode?, extraDamage?, annotator?, scope?, minOverlap?}. Read-only.
+    `scope` defaults to "mine": only the regions this annotator's provenance
+    entries name. "all" writes every region the geometry knows about.
+    """
+    ctx = _notes_context(ds_id, await request.json())
+    for f in ctx["files"].values():
+        f.pop("text", None)              # the diff is the preview; not the dump
+    return ctx
+
+
+@app.post("/api/datasets/{ds_id}/notes/save")
+async def notes_save(ds_id: str, request: Request):
+    """Write the YAMLs in the dataset folder. Body: as preview, plus
+    {which?: ["notes","metadata"], fingerprints?: {...}, force?: bool}.
+
+    The document is rebuilt here rather than trusting anything the client held:
+    between a preview and a save, a colleague can have written to the same file.
+    """
+    body = await request.json() or {}
+    ctx = _notes_context(ds_id, body)
+    which = body.get("which") or ["notes", "metadata"]
+    force = bool(body.get("force"))
+    sent = body.get("fingerprints") or {}
+    written, skipped = [], []
+
+    for key in which:
+        f = ctx["files"].get(key) or {}
+        if not f.get("found"):
+            skipped.append({"file": key, "reason": "missing",
+                            "path": f.get("path")})
+            continue
+        if f.get("unreadable"):
+            skipped.append({"file": key, "reason": "unreadable",
+                            "path": f.get("path")})
+            continue
+        if f.get("unchanged"):
+            skipped.append({"file": key, "reason": "nothing-to-write",
+                            "path": f["path"]})
+            continue
+        if f.get("unexpected") and not force:
+            # A line no edit accounts for means the round-trip is rewriting the
+            # file. Refuse: reformatting a shared, hand-maintained record is the
+            # damage this whole module exists to avoid.
+            skipped.append({"file": key, "reason": "unexpected-changes",
+                            "path": f["path"], "lines": f["unexpected"]})
+            continue
+        res = notes.save(f["path"], f["text"], expect=sent.get(key) or f["fingerprint"])
+        if not res.get("ok"):
+            skipped.append({"file": key, "reason": res.get("reason"),
+                            "path": f["path"], "expected": res.get("expected"),
+                            "actual": res.get("actual")})
+            continue
+        written.append({"file": key, "path": f["path"],
+                        "changes": f.get("changes") or [],
+                        "fingerprint": res["fingerprint"]})
+
+    for f in ctx["files"].values():
+        f.pop("text", None)
+    return {**ctx, "written": written, "skipped": skipped}
+
+
+@app.post("/api/datasets/{ds_id}/notes/create")
+async def notes_create(ds_id: str, request: Request):
+    """Create `annotation.notes.yaml` in the dataset folder, on purpose.
+
+    Separate from save, and never reached by accident: a second competing copy of
+    a shared record is worse than not having one. Body: {fc?, path?}.
+    """
+    try:
+        d = ds.get_dataset(ds_id)
+    except KeyError:
+        raise HTTPException(404, "unknown dataset")
+    body = await request.json() or {}
+    found = notes.find(d["root"])
+    path = Path(str(body.get("path") or found["notes"]["path"]))
+    if path.exists():
+        raise HTTPException(409, f"{path.name} already exists — it is edited, never replaced")
+    fc = body.get("fc") or geo.load_regions(ds_id)[0]
+    regions, _ = DMG.split_features(fc.get("features") or [], d["id_prop"])
+    names = []
+    for f in regions:
+        nm = (f.get("properties") or {}).get(d["id_prop"])
+        if nm is not None and str(nm) not in names:
+            names.append(str(nm))
+    text = notes.new_notes_text(names, experiment_id=d.get("label"),
+                                by=provenance.display_name())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="") as fh:
+        fh.write(text)
+    return {"path": str(path), "regions": names,
+            "fingerprint": notes.fingerprint(path)}
+
+
+@app.get("/api/damage/designations")
+def damage_designations():
+    """The damage vocabulary, for the "what am I drawing" dropdown.
+
+    `drawn` is the SOP's "should this be annotated": true always, false never
+    (nothing to draw -- it can only be a tag on the region), null the annotator's
+    call. Served rather than hard-coded in the client so there is one list.
+
+    `aliases` is the fold -> tag map behind parse_name(), so the client can label
+    a name in the list the same way the backend would instead of approximating
+    it. Fold a name the same way: strip spaces, underscores and hyphens, lower."""
+    return {"designations": [{"tag": t, "label": label, "drawn": drawn}
+                             for t, (label, drawn) in DMG.DESIGNATIONS.items()],
+            "aliases": DMG.alias_map(),
+            "enclave": DMG.ENCLAVE}
+
+
 @app.get("/api/identity")
 def get_identity():
     """Who edits are attributed to. The account is read-only -- a display name on
     its own could be anyone's, and a chain of custody has to say who really made
-    the change."""
-    return {"name": provenance.display_name(), "account": provenance.account_name()}
+    the change.
+
+    `set` says whether a real name was ever entered, as opposed to `name` falling
+    back to the Windows account. The trail can live with "FIVE"; the lab's shared
+    annotator roster cannot, so the caller has to be able to tell the difference.
+    """
+    return {"name": provenance.display_name(), "account": provenance.account_name(),
+            "set": provenance.has_display_name()}
 
 
 @app.post("/api/identity")
@@ -699,12 +1100,16 @@ async def regions_dissolve_gap(ds_id: str, request: Request):
         raise HTTPException(400, "need 'point': [x, y]")
     fc = body.get("fc") or geo.load_regions(ds_id)[0]
     tol = float(body.get("tol", 40.0))
+    # Regions switched off in the sidebar -- usually the hemisphere outline, which
+    # would otherwise mean there is no such thing as a gap.
+    kept, held = _hold_out(fc["features"], d["id_prop"], body.get("exclude"))
     try:
-        res = topology.dissolve_gap(fc["features"], d["id_prop"], point, tol=tol)
+        res = topology.dissolve_gap(kept, d["id_prop"], point, tol=tol)
     except ValueError as e:      # no gap there / click was inside a region
         raise HTTPException(422, str(e))
     except Exception as e:
         raise HTTPException(500, f"dissolve-gap failed: {e}")
+    res["features"] = _put_back(res["features"], held)
     return {**provenance.stamped(res["features"], fc, "dissolve-gap",
                                  f"{res['area']:,.0f} px² into "
                                  f"{' + '.join(str(n) for n in res['regions'])}",
@@ -739,8 +1144,13 @@ async def regions_load(ds_id: str, request: Request):
 @app.post("/api/datasets/{ds_id}/regions/add")
 async def regions_add(ds_id: str, request: Request):
     """Add a new region from a drawn outline. Body: {points:[[x,y]...], fc?, name?,
-    carve?}. carve (default true) makes overlapped regions cede the ground, so the
-    file stays a clean partition."""
+    carve?, damage?}. carve (default true) makes overlapped regions cede the
+    ground, so the file stays a clean partition.
+
+    `damage` is a designation tag (see /api/damage/designations). Damage is an
+    ordinary region in every respect but two: the designation names it, numbered
+    globally across the file the way the lab numbers it; and it must NOT carve,
+    because it sits INSIDE its host and the host stays whole."""
     try:
         d = ds.get_dataset(ds_id)
     except KeyError:
@@ -750,19 +1160,110 @@ async def regions_add(ds_id: str, request: Request):
     if not points or len(points) < 3:
         raise HTTPException(400, "need 'points': at least three [x, y] pairs")
     fc = body.get("fc") or geo.load_regions(ds_id)[0]
+    feats = fc.get("features") or []
+
+    name, carve = body.get("name"), bool(body.get("carve", True))
+    asked = body.get("damage")
+    # parse_name() resolves a bare tag as well as a numbered name, and tolerates
+    # the display spelling ("Small void") the dropdown sends back.
+    tag = DMG.parse_name(asked)[0] if asked else None
+    if asked and not tag:
+        raise HTTPException(422, f"unknown damage designation: {asked!r}")
+    if tag:
+        # Every name in the file, not one region's -- numbering is global per
+        # designation (separation.4/.5/.6 in one region, .7 in another).
+        name = DMG.format_name(
+            tag, DMG.next_number([(f.get("properties") or {}).get(d["id_prop"])
+                                  for f in feats], tag))
+        carve = False
+
     try:
-        res = topology.add_region(fc["features"], d["id_prop"], points,
-                                  name=body.get("name"),
-                                  carve=bool(body.get("carve", True)))
+        res = topology.add_region(feats, d["id_prop"], points,
+                                  name=name, carve=carve)
     except ValueError as e:
         raise HTTPException(422, str(e))
     except Exception as e:
         raise HTTPException(500, f"add-region failed: {e}")
-    return {**provenance.stamped(res["features"], fc, "add-region",
-                                 f"{res['name']}, {res['area']:,.0f} px²"
-                                 + (f", taken from {', '.join(res['ceded'])}" if res["ceded"] else ""),
+
+    # Where the shape landed, by the same rule the SmartSheet export uses -- so
+    # what the sidebar says now is what the export says later. `candidates` is
+    # what to offer if it straddles two regions: the annotator is asked at the
+    # moment of drawing, when they can still see what they drew.
+    inside, candidates, dominant, needs = [], [], None, False
+    if tag:
+        anat, _ = DMG.split_features(res["features"], d["id_prop"])
+        drawn = [f for f in res["features"]
+                 if (f.get("properties") or {}).get(d["id_prop"]) == res["name"]]
+        try:
+            hit = DMG.assign(anat, drawn, d["id_prop"])["shapes"]
+            if hit:
+                inside = hit[0]["regions"]
+                candidates = hit[0]["candidates"]
+                dominant = hit[0]["dominant"]
+                needs = hit[0]["needsChoice"]
+        except Exception:
+            pass                             # a label, never a reason to fail
+
+    detail = f"{res['name']}, {res['area']:,.0f} px²"
+    if tag:
+        detail += f" ({DMG.DESIGNATIONS[tag][0]} damage"
+        detail += f" in {', '.join(inside)})" if inside else ", over no region)"
+    elif res["ceded"]:
+        detail += f", taken from {', '.join(res['ceded'])}"
+    return {**provenance.stamped(res["features"], fc, "add-region", detail,
                                  [res["name"]]),
-            "name": res["name"], "area": res["area"], "ceded": res["ceded"]}
+            "name": res["name"], "area": res["area"], "ceded": res["ceded"],
+            "damage": tag, "inside": inside, "candidates": candidates,
+            "dominant": dominant, "needsChoice": needs}
+
+
+@app.post("/api/datasets/{ds_id}/regions/outline")
+async def regions_outline(ds_id: str, request: Request):
+    """Build the hemisection outline from the regions themselves.
+
+    Body: {fc?, name?, method?: "bubble"|"hull", radius?, exclude?, apply?}.
+    With apply=false (the default) it returns the geometry to preview; with
+    apply=true it adds or REPLACES the named region and returns the new FC.
+    """
+    try:
+        d = ds.get_dataset(ds_id)
+    except KeyError:
+        raise HTTPException(404, "unknown dataset")
+    body = await request.json() or {}
+    fc = body.get("fc") or geo.load_regions(ds_id)[0]
+    name = str(body.get("name") or "hemi")
+    try:
+        res = topology.section_outline(
+            fc.get("features") or [], d["id_prop"], name=name,
+            method=str(body.get("method") or "bubble"),
+            radius=float(body.get("radius", 200.0)),
+            exclude=body.get("exclude"))
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"outline failed: {e}")
+    if not body.get("apply"):
+        return {"geometry": res["geometry"], "area": res["area"],
+                "method": res["method"], "sources": res["sources"],
+                "exists": any(str((f.get("properties") or {}).get(d["id_prop"])) == name
+                              for f in fc.get("features") or [])}
+
+    feats = [f for f in (fc.get("features") or [])
+             if str((f.get("properties") or {}).get(d["id_prop"])) != name]
+    replaced = len(feats) != len(fc.get("features") or [])
+    # First in the list, so the outline draws UNDER everything it wraps.
+    props = {d["id_prop"]: name}
+    for f in fc.get("features") or []:
+        if isinstance((f.get("properties") or {}).get("classification"), dict):
+            props["classification"] = {"name": name}
+            break
+    feats.insert(0, {"type": "Feature", "properties": props,
+                     "geometry": res["geometry"]})
+    detail = (f"{name} {'rebuilt' if replaced else 'created'} by {res['method']}"
+              f", {res['area']:,.0f} px² from {len(res['sources'])} regions")
+    return {**provenance.stamped(feats, fc, "section-outline", detail, [name]),
+            "name": name, "area": res["area"], "method": res["method"],
+            "replaced": replaced, "sources": res["sources"]}
 
 
 @app.post("/api/datasets/{ds_id}/regions/fill-gap")
@@ -779,14 +1280,16 @@ async def regions_fill_gap(ds_id: str, request: Request):
     if not point or len(point) < 2:
         raise HTTPException(400, "need 'point': [x, y]")
     fc = body.get("fc") or geo.load_regions(ds_id)[0]
+    kept, held = _hold_out(fc["features"], d["id_prop"], body.get("exclude"))
     try:
-        res = topology.fill_gap_with_region(fc["features"], d["id_prop"], point,
+        res = topology.fill_gap_with_region(kept, d["id_prop"], point,
                                             name=body.get("name"),
                                             tol=float(body.get("tol", 40.0)))
     except ValueError as e:
         raise HTTPException(422, str(e))
     except Exception as e:
         raise HTTPException(500, f"fill-gap failed: {e}")
+    res["features"] = _put_back(res["features"], held)
     return {**provenance.stamped(res["features"], fc, "fill-gap",
                                  f"{res['name']}, {res['area']:,.0f} px²", [res["name"]]),
             "name": res["name"], "area": res["area"], "kind": res["kind"],
@@ -803,8 +1306,15 @@ async def regions_validate(ds_id: str, request: Request):
         raise HTTPException(404, "unknown dataset")
     body = await request.json()
     fc = (body or {}).get("fc") or geo.load_regions(ds_id)[0]
+    # Regions switched off are not checked: the hemisphere outline overlaps every
+    # region by design, so leaving it in reports 22 "overlaps" that are correct.
+    kept, _held = _hold_out(fc.get("features", []), d["id_prop"], (body or {}).get("exclude"))
     try:
-        return JSONResponse(topology.validate_features(fc.get("features", []), d["id_prop"]))
+        out = topology.validate_features(kept, d["id_prop"])
+        if _held:
+            out["excluded"] = sorted({str((f.get("properties") or {}).get(d["id_prop"]))
+                                      for _i, f in _held})
+        return JSONResponse(out)
     except Exception as e:
         raise HTTPException(500, f"validate failed: {e}")
 
