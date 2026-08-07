@@ -166,6 +166,7 @@ export default function Viewer({
   onAddBorderPoint,
   splitDraw, onSplitEdit,
   drawPoly, onDrawEdit,
+  cleanPoly, onCleanEdit, cleanPreview,
   gapPreview, onPickGap,
   propRing, onRegionMenu,
   onGrabVertex, onReleaseDrag,
@@ -184,6 +185,8 @@ export default function Viewer({
   if (!splitModeRef.current) splitModeRef.current = new FinishableLineMode();
   const drawModeRef = useRef(null);
   if (!drawModeRef.current) drawModeRef.current = new FinishablePolygonMode();
+  const cleanModeRef = useRef(null);
+  if (!cleanModeRef.current) cleanModeRef.current = new FinishablePolygonMode();
 
   const initialViewState = useMemo(() => {
     const vw = Math.max(window.innerWidth - 340, 300);
@@ -371,6 +374,44 @@ export default function Viewer({
       })
     : null;
 
+  // Clean mode: trace a loop around stray hairlines (right-click to close it).
+  const cleanLayer = (mode === 'clean')
+    ? new EditableGeoJsonLayer({
+        id: 'clean-draw',
+        data: cleanPoly || { type: 'FeatureCollection', features: [] },
+        mode: cleanModeRef.current,
+        coordinateSystem: COORDINATE_SYSTEM.CARTESIAN,
+        selectedFeatureIndexes: [],       // required -- see the draw layer above
+        pickable: true,
+        getFillColor: [255, 120, 40, 40],
+        getLineColor: [255, 120, 40, 255],
+        getTentativeLineColor: [255, 200, 60, 255],
+        getTentativeFillColor: [255, 200, 60, 30],
+        lineWidthUnits: 'pixels',
+        getLineWidth: 2,
+        getTentativeLineWidth: 2,
+        editHandlePointRadiusScale: 2.2,
+        getEditHandlePointColor: [255, 120, 40, 255],
+        onEdit: onCleanEdit,
+      })
+    : null;
+
+  // ...and the stray lines it found, highlighted until Apply or Cancel.
+  const cleanFoundLayer = (mode === 'clean' && cleanPreview)
+    ? new GeoJsonLayer({
+        id: 'clean-found',
+        data: { type: 'Feature', properties: {}, geometry: cleanPreview },
+        coordinateSystem: COORDINATE_SYSTEM.CARTESIAN,
+        pickable: false,
+        filled: true,
+        getFillColor: [255, 45, 45, 150],
+        getLineColor: [255, 45, 45, 255],
+        lineWidthUnits: 'pixels',
+        getLineWidth: 1.5,
+        lineWidthMinPixels: 1.5,
+      })
+    : null;
+
   // Dissolve mode: the void the backend found under the last click, highlighted
   // so you can see exactly what "Dissolve" is about to hand to its neighbours.
   const gapLayer = (mode === 'dissolve' && gapPreview)
@@ -423,6 +464,8 @@ export default function Viewer({
   if (borderLayer) stack.push(borderLayer);
   if (splitLayer) stack.push(splitLayer);
   if (drawLayer) stack.push(drawLayer);
+  if (cleanLayer) stack.push(cleanLayer);
+  if (cleanFoundLayer) stack.push(cleanFoundLayer);
   if (gapLayer) stack.push(gapLayer);
   if (ringLayer) stack.push(ringLayer);
 
@@ -473,7 +516,8 @@ export default function Viewer({
   const ctxHandlerRef = useRef(null);
   const sketchModeRef = useRef(null);
   sketchModeRef.current = mode === 'split' ? splitModeRef.current
-    : mode === 'draw' ? drawModeRef.current : null;
+    : mode === 'draw' ? drawModeRef.current
+    : mode === 'clean' ? cleanModeRef.current : null;
 
   useEffect(() => {
     const el = hostRef.current;

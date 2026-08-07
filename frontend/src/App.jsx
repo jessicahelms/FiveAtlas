@@ -418,6 +418,11 @@ export default function App() {
 
   // draw: an outline the user traces to create a brand-new region
   const [drawPoly, setDrawPoly] = useState({ type: 'FeatureCollection', features: [] });
+  // clean: a loop traced around stray hairlines; the found slivers wait as a
+  // preview until Apply, so nothing is removed sight-unseen
+  const [cleanPoly, setCleanPoly] = useState({ type: 'FeatureCollection', features: [] });
+  const [cleanFound, setCleanFound] = useState(null);   // { res, next }
+  const [cleanMsg, setCleanMsg] = useState(null);
   const [drawMsg, setDrawMsg] = useState(null);
   // ...and WHAT it is: 'region', or a damage designation tag. Damage is an
   // ordinary region here — same file, same list, same editing — so this only
@@ -813,31 +818,40 @@ export default function App() {
     // is listed again in the export review, so nothing is lost by leaving.
     setDamageAsk(null);
   }, []);
+  const clearClean = useCallback(() => {
+    setCleanPoly({ type: 'FeatureCollection', features: [] });
+    setCleanFound(null); setCleanMsg(null);
+  }, []);
 
   const onToggleModify = useCallback(() => {
     setMode((m) => (m === 'modify' ? 'view' : 'modify'));
-    clearBorder(); clearSplit(); clearGap(); clearDraw();
-  }, [clearBorder, clearSplit, clearGap, clearDraw]);
+    clearBorder(); clearSplit(); clearGap(); clearDraw(); clearClean();
+  }, [clearBorder, clearSplit, clearGap, clearDraw, clearClean]);
 
   const onToggleBorder = useCallback(() => {
     setMode((m) => (m === 'border' ? 'view' : 'border'));
-    setSelected([]); clearBorder(); clearSplit(); clearGap(); clearDraw();
-  }, [clearBorder, clearSplit, clearGap, clearDraw]);
+    setSelected([]); clearBorder(); clearSplit(); clearGap(); clearDraw(); clearClean();
+  }, [clearBorder, clearSplit, clearGap, clearDraw, clearClean]);
 
   const onToggleSplit = useCallback(() => {
     setMode((m) => (m === 'split' ? 'view' : 'split'));
-    clearBorder(); clearSplit(); clearGap(); clearDraw();
-  }, [clearBorder, clearSplit, clearGap, clearDraw]);
+    clearBorder(); clearSplit(); clearGap(); clearDraw(); clearClean();
+  }, [clearBorder, clearSplit, clearGap, clearDraw, clearClean]);
 
   const onToggleDissolve = useCallback(() => {
     setMode((m) => (m === 'dissolve' ? 'view' : 'dissolve'));
-    setSelected([]); clearBorder(); clearSplit(); clearGap(); clearDraw();
-  }, [clearBorder, clearSplit, clearGap, clearDraw]);
+    setSelected([]); clearBorder(); clearSplit(); clearGap(); clearDraw(); clearClean();
+  }, [clearBorder, clearSplit, clearGap, clearDraw, clearClean]);
 
   const onToggleDraw = useCallback(() => {
     setMode((m) => (m === 'draw' ? 'view' : 'draw'));
-    setSelected([]); clearBorder(); clearSplit(); clearGap(); clearDraw();
-  }, [clearBorder, clearSplit, clearGap, clearDraw]);
+    setSelected([]); clearBorder(); clearSplit(); clearGap(); clearDraw(); clearClean();
+  }, [clearBorder, clearSplit, clearGap, clearDraw, clearClean]);
+
+  const onToggleClean = useCallback(() => {
+    setMode((m) => (m === 'clean' ? 'view' : 'clean'));
+    setSelected([]); clearBorder(); clearSplit(); clearGap(); clearDraw(); clearClean();
+  }, [clearBorder, clearSplit, clearGap, clearDraw, clearClean]);
 
   // Border mode: clicking a region toggles it in the pick set. Exactly two picks
   // -> fetch (and if needed bridge) their shared border as a draggable arc.
@@ -1459,6 +1473,58 @@ export default function App() {
     }
   }, [applyAddRegion]);
 
+  // Clean mode: a traced loop goes to the backend, which finds every
+  // sliver-thin artifact inside it. The result WAITS as a preview — the freed
+  // lines highlighted on the image, the report in the sidebar — and nothing
+  // changes until Apply. One call does both: the response carries the updated
+  // FC, so Apply is a local commit.
+  const runCleanLines = useCallback(async (ring) => {
+    if (!ring || ring.length < 3 || !fc) return;
+    setBusy(true); setError(null); setCleanMsg('looking for stray lines…');
+    try {
+      const res = await api.cleanLines(dsId, fc, ring, { exclude: offList() });
+      setCleanFound({ res, next: asFc(res, fc) });
+      const bits = [];
+      if (res.removed.length) {
+        bits.push(`${res.removed.length} sliver piece(s) from ${res.removed
+          .map((r) => r.region).join(', ')}`);
+      }
+      if (res.deleted.length) bits.push(`${res.deleted.join(', ')} deleted whole`);
+      if (res.filled.length) bits.push(`ground to ${res.filled.join(' + ')}`);
+      setCleanMsg(`Found ${Math.round(res.area).toLocaleString()} px² of stray `
+        + `lines${bits.length ? ` — ${bits.join('; ')}` : ''}. Apply to remove.`);
+    } catch (e) {
+      setCleanFound(null);
+      setCleanMsg(apiDetail(e));
+    } finally { setBusy(false); }
+  }, [dsId, fc, offList]);
+
+  const onCleanEdit = useCallback(({ updatedData, editType }) => {
+    if (editType === 'addFeature') {
+      const f = updatedData.features[updatedData.features.length - 1];
+      const ring = f && f.geometry && f.geometry.coordinates && f.geometry.coordinates[0];
+      setCleanPoly({ type: 'FeatureCollection', features: [] });
+      if (ring && ring.length >= 3) runCleanLines(ring);
+    } else {
+      setCleanPoly(updatedData);
+    }
+  }, [runCleanLines]);
+
+  const applyClean = useCallback(() => {
+    if (!cleanFound) return;
+    const { res, next } = cleanFound;
+    commit(next); setBaseline(next);
+    setMoved((prev) => {
+      const n = new Set(prev);
+      res.removed.forEach((r) => n.add(r.region));
+      res.filled.forEach((x) => n.add(x));
+      return n;
+    });
+    setCleanFound(null);
+    setCleanMsg(`Removed ${Math.round(res.area).toLocaleString()} px² of stray `
+      + 'lines. Circle more, or Save to keep it.');
+  }, [cleanFound, commit]);
+
   const bumpPoints = () => {};   // vertex-count control disabled (paused)
   /* was:
   const bumpPoints = useCallback((dir) => {
@@ -1560,7 +1626,7 @@ export default function App() {
       const newFc = asFc(res, fc);
       commit(newFc); setBaseline(newFc);
       setSelected([]); setMoved(new Set()); setMode('view');
-      clearBorder(); clearSplit(); clearGap(); clearDraw();
+      clearBorder(); clearSplit(); clearGap(); clearDraw(); clearClean();
       const kept = res.backup ? String(res.backup).split(/[\\/]/).pop() : null;
       setSnapInfo({ saved: `restored the original (${res.count} regions)`
         + (kept ? ` — your previous work is kept as ${kept}` : '') });
@@ -1601,7 +1667,7 @@ export default function App() {
         if (st && st.channels && st.channels.length) setStainInfo(st);
       } catch (e) { /* dataset has no morphology_focus */ }
       setSelected([]); setMoved(new Set()); setMode('view');
-      clearBorder(); clearSplit(); clearGap(); clearDraw();
+      clearBorder(); clearSplit(); clearGap(); clearDraw(); clearClean();
       const o = res.orientation;
       setSnapInfo({ saved: `view is now ${o.rot}°`
         + (o.flipH ? ' + flipped left/right' : '')
@@ -1890,6 +1956,9 @@ export default function App() {
                 onToggleSplit={onToggleSplit}
                 onToggleDissolve={onToggleDissolve}
                 onToggleDraw={onToggleDraw}
+                onToggleClean={onToggleClean}
+                cleanFound={cleanFound && cleanFound.res} cleanMsg={cleanMsg}
+                onApplyClean={applyClean} onCancelClean={clearClean}
                 borderPicks={borderPicks} borderMsg={borderMsg} borderShared={borderShared}
                 onClearBorder={clearBorder} onShareBorders={doShareBorders}
                 onMerge={doMerge} splitMsg={splitMsg}
@@ -1953,6 +2022,8 @@ export default function App() {
                 onAddBorderPoint={onAddBorderPoint}
                 splitDraw={splitDraw} onSplitEdit={onSplitEdit}
                 drawPoly={drawPoly} onDrawEdit={onDrawEdit}
+                cleanPoly={cleanPoly} onCleanEdit={onCleanEdit}
+                cleanPreview={cleanFound && cleanFound.res.freed}
                 gapPreview={gapFind && gapFind.gap} onPickGap={onPickGap}
                 propRing={propRing} onRegionMenu={openRegionMenu}
                 onGrabVertex={onGrabVertex} onReleaseDrag={onReleaseDrag}

@@ -1663,6 +1663,165 @@ def dissolve_gap(features, id_prop, point, tol=40.0, grab=None):
             "kind": kind, "regions": filled}
 
 
+def clean_lines(features, id_prop, points, width=12.0):
+    """Circle the stray hairlines an edit left behind, and they are removed.
+
+    `points` is a loop the user traced around the offending lines. Inside it,
+    two kinds of artifact are taken:
+
+      * a region PART that is sliver-thin -- the whole connected piece erodes
+        to nothing at width/2. Thinness is judged on the full piece, never on
+        what the loop happens to clip, so circling across a healthy region's
+        edge cannot shave it: its piece is fat, and fat pieces are never taken.
+        A piece qualifies if any of it is inside the loop -- the lines are long
+        and circling a stretch of one is enough; the erosion test is what keeps
+        that from grabbing anything real.
+      * a sliver-thin VOID between regions -- found by the same morphological
+        close find_gap uses, so hairline corridors open at both ends are seen
+        even though they are not holes. Voids are judged against the union of
+        the regions that do NOT blanket the traced loop: a wrap-everything
+        outline (hemi) covers every void, and holding it out of the union is
+        what makes them visible -- without renaming which region is the
+        outline. Fake voids that appear because a covering region was held out
+        are fat, so the erosion test discards them.
+
+    The freed ground is then handed out exactly like dissolve_gap: a component
+    some remaining region already covers needs nothing (the sliver was lying on
+    top of it -- removing it IS the fix); otherwise the touching regions split
+    it at the midline. Covering regions never claim, so the outline can never
+    eat a hairline that two real regions should share.
+
+    Damage shapes are untouched throughout -- drawn on purpose, often thin.
+
+    Returns {features, removed, deleted, filled, covered, freed, area}.
+    """
+    if not points or len(points) < 3:
+        raise ValueError("trace a loop around the lines you want removed")
+    lasso = Polygon([(float(p[0]), float(p[1])) for p in points])
+    if not lasso.is_valid:
+        lasso = lasso.buffer(0)
+    if lasso.is_empty or lasso.area <= 0:
+        raise ValueError("that loop has no area")
+    w = max(float(width), 2.0)
+
+    geoms, names = _feature_geoms(features, id_prop)
+    if not geoms:
+        raise ValueError("no regions loaded")
+    dmg_keys = {k for k, nm in names.items() if _damage.is_damage(nm)}
+
+    # -- sliver parts of regions ---------------------------------------------
+    removed_by, removed_report = {}, []
+    for k, g in geoms.items():
+        if k in dmg_keys:
+            continue
+        take = [p for p in _polys(g)
+                if p.buffer(-w / 2.0).is_empty
+                and not _safe_intersection(p, lasso).is_empty]
+        if take:
+            removed_by[k] = unary_union(take)
+            removed_report.append({"region": names[k],
+                                   "area": float(sum(p.area for p in take)),
+                                   "parts": len(take)})
+
+    # -- sliver voids ----------------------------------------------------------
+    # The union deliberately leaves out damage shapes and anything that blankets
+    # the loop (the outline, or the region being worked inside). The blanket set
+    # is remembered: those regions sit the whole operation out -- they hide
+    # voids, they must not claim ground, and their covering a hairline says
+    # nothing (hemi covers every hairline there is).
+    blanket = 0.98 * lasso.area
+    blanket_keys = {k for k, g in geoms.items()
+                    if k not in dmg_keys
+                    and _safe_intersection(g, lasso).area >= blanket}
+    u_keys = [k for k in geoms
+              if k not in dmg_keys and k not in blanket_keys]
+    voids = []
+    if u_keys:
+        U = unary_union([geoms[k] for k in u_keys]).buffer(0)
+        try:
+            closed = U.buffer(w, join_style=2).buffer(-w, join_style=2).buffer(0)
+            raw = _safe_difference(closed, U)
+        except Exception:
+            raw = None
+        if raw is not None and not raw.is_empty:
+            voids = [c for c in _polys(raw)
+                     if c.buffer(-w / 2.0).is_empty
+                     and not _safe_intersection(c, lasso).is_empty]
+
+    pieces = list(voids)
+    for g in removed_by.values():
+        pieces.extend(_polys(g))
+    if not pieces:
+        raise ValueError("nothing sliver-thin inside that loop -- it only takes "
+                         "lines a few pixels wide, never healthy regions")
+    freed = unary_union(pieces).buffer(0)
+
+    # -- take the slivers out of their donors ---------------------------------
+    out = json.loads(json.dumps(features))
+    deleted, drop = [], set()
+    for k, cut in removed_by.items():
+        g = clean_geom(_safe_difference(geoms[k], cut), smooth=False)
+        if g.is_empty or g.area <= 0:
+            # the whole region was hairline -- exactly the leftover this tool
+            # exists for, and the user circled it. Gone, and said out loud.
+            deleted.append(names[k])
+            drop.add(int(k))
+            del geoms[k]
+            continue
+        geoms[k] = g
+        out[int(k)]["geometry"] = mapping(g)
+
+    # -- hand the freed ground to the survivors -------------------------------
+    filled_area, filled_names, covered = {}, [], set()
+    for comp in _polys(freed):
+        collar = comp.buffer(max(1.0, w * 0.1))
+        touch = {k: g for k, g in geoms.items()
+                 if k not in dmg_keys and k not in blanket_keys
+                 and g.intersects(collar)}
+        # A PEER that already covers the component means the sliver was lying
+        # on its ground -- removing it was the whole fix, nothing to fill.
+        # Only peers count: the blanket set covers everything by definition.
+        cover = [k for k, g in touch.items() if g.covers(comp.buffer(-0.25))]
+        if cover:
+            covered.add(names[min(cover, key=lambda k: geoms[k].area)])
+            continue
+        if not touch:
+            continue
+        if len(touch) == 1:
+            claims = {next(iter(touch)): comp}
+        else:
+            win = comp.buffer(max(w * 2.0, 25.0))
+            local = {}
+            for k, g in touch.items():
+                gl = _safe_intersection(g, win)
+                local[k] = g if gl.is_empty else gl
+            spacing = max(min(w, comp.length / 24.0), 2.0)
+            claims = _nearest_partition(comp, local, spacing)
+        for k, claim in claims.items():
+            if claim is None or claim.is_empty:
+                continue
+            claim = _safe_intersection(claim, comp)
+            if claim.is_empty or claim.area <= 0:
+                continue
+            g = unary_union([geoms[k], claim]).buffer(0)
+            g = _snap_polys(g, 0.01)
+            g = clean_geom(g, smooth=False)
+            if g.is_empty:
+                continue
+            geoms[k] = g
+            out[int(k)]["geometry"] = mapping(g)
+            filled_area[k] = filled_area.get(k, 0.0) + float(claim.area)
+
+    filled_names = sorted({names[k] for k in filled_area})
+    out = [f for i, f in enumerate(out) if i not in drop]
+    return {"features": out,
+            "removed": sorted(removed_report, key=lambda r: -r["area"]),
+            "deleted": sorted(deleted),
+            "filled": filled_names,
+            "covered": sorted(covered),
+            "freed": mapping(freed), "area": float(freed.area)}
+
+
 # ---- resampling outlines ------------------------------------------------------
 
 

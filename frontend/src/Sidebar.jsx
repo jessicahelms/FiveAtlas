@@ -22,6 +22,7 @@ export default function Sidebar({
   onRestoreOriginal, orientation, onOrientation,
   onAnswerReportDamage,
   regionsOff, onToggleRegionOff, outlinePreview, onOutline, onDismissOutline,
+  onToggleClean, cleanFound, cleanMsg, onApplyClean, onCancelClean,
   cellsReport, cellSep, cellsAll, onLoadCells, onDismissCells, onCellSep,
   onCellsAll, onRegionDamage,
   notesInfo, notesReport, notesScope, onNotesScope, onNotesPreview, onNotesSave,
@@ -399,6 +400,60 @@ export default function Sidebar({
           {mode === 'dissolve' ? '⬤ Fixing gaps' : 'Fix a gap'}
         </button>
 
+        <button className={mode === 'clean' ? 'btn on' : 'btn'} onClick={onToggleClean}>
+          {mode === 'clean' ? '◌ Circling stray lines' : 'Clean up stray lines'}
+        </button>
+
+        {mode === 'clean' && (
+          <div className="border-pick">
+            <div className="hint dim">
+              Trace a loop around the leftover hairlines — click each point,
+              then <b>right-click to finish</b> (or Enter). Everything
+              sliver-thin inside is removed and the ground goes to the healthy
+              neighbours. Fat, healthy regions are never touched, and neither
+              are damage shapes.
+            </div>
+            {cleanFound && (
+              <>
+                <div className="pts-head">
+                  {Math.round(cleanFound.area).toLocaleString()} px² of stray lines
+                </div>
+                {cleanFound.removed.length > 0 && (
+                  <div className="hint dim">
+                    {cleanFound.removed.map((r) => (
+                      <div key={r.region}>
+                        {r.region}: {r.parts} piece{r.parts > 1 ? 's' : ''}
+                        {' '}({Math.round(r.area).toLocaleString()} px²)
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {cleanFound.deleted.length > 0 && (
+                  <div className="hint lvl-warn">
+                    {cleanFound.deleted.join(', ')} {cleanFound.deleted.length > 1
+                      ? 'are hairline all over and will be deleted whole'
+                      : 'is hairline all over and will be deleted whole'}
+                  </div>
+                )}
+                {cleanFound.filled.length > 0 && (
+                  <div className="pick-row">
+                    <span className="pick-val">→ {cleanFound.filled.join(' + ')}</span>
+                  </div>
+                )}
+                <div className="row">
+                  <button className="btn sm primary" onClick={onApplyClean} disabled={busy}>
+                    Apply
+                  </button>
+                  <button className="btn sm" onClick={onCancelClean} disabled={busy}>
+                    Cancel
+                  </button>
+                </div>
+              </>
+            )}
+            {cleanMsg && <div className="hint">{cleanMsg}</div>}
+          </div>
+        )}
+
         {mode === 'dissolve' && (
           <div className="border-pick">
             <div className="hint dim">
@@ -426,7 +481,8 @@ export default function Sidebar({
           </div>
         )}
 
-        {mode !== 'border' && mode !== 'split' && mode !== 'dissolve' && mode !== 'draw' && (
+        {mode !== 'border' && mode !== 'split' && mode !== 'dissolve' && mode !== 'draw'
+          && mode !== 'clean' && (
           <div className="hint">
             <b>Edit points</b>: select a region, drag its outline.
             <b> Shared borders</b>: pick regions to drag a border, tile, or merge them.

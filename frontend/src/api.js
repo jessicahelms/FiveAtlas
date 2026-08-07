@@ -109,6 +109,19 @@ export async function dissolveGap(ds, fc, point, tol = 40, exclude = null) {
   return r.json(); // { type, features, gap, area, kind, regions }
 }
 
+// Circle stray hairlines and remove them: sliver parts of regions and sliver
+// voids between them, inside the traced loop. Returns the updated FC plus the
+// report (removed/deleted/filled/freed), so preview and commit need one call.
+export async function cleanLines(ds, fc, points, { width = 12, exclude = null } = {}) {
+  const r = await fetch(`${API}/datasets/${ds}/regions/clean-lines`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fc, points, width, exclude }),
+  });
+  if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+  return r.json(); // { type, features, removed, deleted, filled, covered, freed, area }
+}
+
 // Open an arbitrary GeoJSON (by path) as the editable working copy.
 export async function loadRegionsFile(ds, path) {
   const r = await fetch(`${API}/datasets/${ds}/regions/load`, {
