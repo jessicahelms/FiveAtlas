@@ -1727,7 +1727,15 @@ export default function App() {
         if (featureName(f, idProp) !== region) return f;
         const props = { ...(f.properties || {}) };
         if ('done' in patch) props._damage_done = !!patch.done;
+        // add/remove are RELATIVE, and the panel uses them. Its list of ticks
+        // comes from cellsReport, which only catches up on the round trip that
+        // follows each tick — so two ticks in quick succession both computed
+        // their new list from the same pre-tick snapshot, and the second wrote
+        // the first one back out. The feature's own props are never stale.
+        const cur = Array.isArray(props._damage_extra) ? props._damage_extra : [];
         if ('extra' in patch) props._damage_extra = [...patch.extra];
+        if (patch.addExtra) props._damage_extra = [...new Set([...cur, patch.addExtra])];
+        if (patch.removeExtra) props._damage_extra = cur.filter((x) => x !== patch.removeExtra);
         return { ...f, properties: props };
       }),
     }, fc);

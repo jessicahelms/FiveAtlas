@@ -633,7 +633,7 @@ export default function Sidebar({
                             <button className="x" disabled={busy}
                               title="remove"
                               onClick={() => onRegionDamage && onRegionDamage(
-                                c.region, { extra: c.typed.filter((x) => x !== t) })}>
+                                c.region, { removeExtra: t })}>
                               ×
                             </button>
                           )}
@@ -647,7 +647,7 @@ export default function Sidebar({
                       onChange={(e) => {
                         if (!e.target.value) return;
                         onRegionDamage && onRegionDamage(c.region,
-                          { extra: [...c.typed, e.target.value] });
+                          { addExtra: e.target.value });
                       }}>
                       <option value="">+ add a damage type…</option>
                       {spare.map((d) => (
