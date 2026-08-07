@@ -57,6 +57,30 @@ for name in ("annotation.notes.yaml", "metadata.yml"):
     check(f"{name} comes back byte for byte", out == raw,
           "" if out == raw else f"{len(raw)} -> {len(out)} chars")
 
+# The endings are part of the file too, and read_text() above cannot see them --
+# it translates on the way in, so both sides of that comparison are already LF.
+# metadata.yml here is CRLF throughout: normalising it turns "add one annotator"
+# into a whole-file diff on a record several people hand-maintain.
+for name in ("annotation.notes.yaml", "metadata.yml"):
+    disk = (SAMPLE / name).read_bytes()
+    doc_b = N.read(SAMPLE / name)                      # read only, never written
+    crlf, lf = disk.count(b"\r\n"), disk.count(b"\n") - disk.count(b"\r\n")
+    check(f"{name}: read() keeps the file's own endings  (CRLF {crlf} / LF {lf})",
+          doc_b["text"].encode("utf-8") == disk)
+    check(f"{name}: an untouched render is byte-identical to disk",
+          doc_b["render"](doc_b["data"]).encode("utf-8") == disk)
+
+ds_nl = fresh()
+p_nl = ds_nl / "metadata.yml"
+doc_nl = N.read(p_nl)
+N.add_annotator(doc_nl["data"], "Jessica")
+N.save(p_nl, doc_nl["render"](doc_nl["data"]), expect=doc_nl["fingerprint"])
+wrote = p_nl.read_bytes()
+check("a save puts CRLF back, so one added name stays a one-line diff",
+      wrote.count(b"\r\n") > 0 and b"\n" not in wrote.replace(b"\r\n", b""),
+      f"CRLF {wrote.count(bytes([13, 10]))} / bare LF "
+      f"{wrote.replace(bytes([13, 10]), b'').count(bytes([10]))}")
+
 meta_raw = (SAMPLE / "metadata.yml").read_text(encoding="utf-8")
 check("the leading comment survives", N.parse(meta_raw)[1](N.parse(meta_raw)[0])
       .startswith("# Sample Metadata"))

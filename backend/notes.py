@@ -111,15 +111,26 @@ def _yaml_for(text: str) -> YAML:
 
 
 def parse(text: str):
-    """-> (data, renderer). `renderer(data)` gives the text back."""
-    pre, body = _preamble(text)
-    y = _yaml_for(text)
+    """-> (data, renderer). `renderer(data)` gives the text back.
+
+    The file's line endings are its own. ruamel emits \\n whatever it was given,
+    so a CRLF file -- this project's `metadata.yml` is 41 CRLF lines and not one
+    LF -- came back all-LF, and adding a single annotator landed as a whole-file
+    diff on a record several people hand-maintain. Everything inside here works
+    in LF, because splitlines() and the diff do; the ending is put back on the
+    way out, so `render(read(p)["text"]) == text` byte for byte either way.
+    """
+    nl = "\r\n" if "\r\n" in text else "\n"
+    lf = text.replace("\r\n", "\n")
+    pre, body = _preamble(lf)
+    y = _yaml_for(lf)
     data = y.load(body)
 
     def render(d) -> str:
         buf = io.StringIO()
         y.dump(d, buf)
-        return pre + buf.getvalue()
+        out = (pre + buf.getvalue()).replace("\r\n", "\n")
+        return out.replace("\n", nl) if nl != "\n" else out
 
     return data, render
 
@@ -141,7 +152,10 @@ def read(path):
     p = Path(path)
     if not p.exists():
         return None
-    text = p.read_text(encoding="utf-8")
+    # newline="" so the file's own endings reach parse() instead of being
+    # translated to \n on the way in -- read_text() would hide a CRLF file.
+    with open(p, "r", encoding="utf-8", newline="") as fh:
+        text = fh.read()
     data, render = parse(text)
     return {"path": str(p), "text": text, "data": data, "render": render,
             "fingerprint": fingerprint(p)}

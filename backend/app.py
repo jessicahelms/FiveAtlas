@@ -555,7 +555,7 @@ def _put_back(features, held):
     return out
 
 
-def _notes_worked_on(fc, id_prop, assignment, account=None):
+def _notes_worked_on(fc, id_prop, assignment, account=None, extras=None):
     """The regions THIS annotator worked on, from the trail the file carries.
 
     Only these are written. Everyone else's entries in a shared notes file must
@@ -585,6 +585,15 @@ def _notes_worked_on(fc, id_prop, assignment, account=None):
         nm = s.get("name")
         if nm in shapes or (nm not in claimed):
             mine.update(s.get("regions") or [])
+
+    # A designation nobody can draw -- cutoff, missing, low transcripts -- is
+    # ticked ON the region: no shape for the loop above to find, and no trail
+    # entry of its own for the one before it. Same rule as a shape, then, or
+    # ticking Cutoff on a region you had not otherwise touched saved as nothing
+    # at all -- the preview showing no change, and no reason why.
+    for nm, tags in (extras or {}).items():
+        if tags and str(nm) not in claimed:
+            mine.add(str(nm))
     return mine
 
 
@@ -605,8 +614,16 @@ def _notes_context(ds_id, body):
                      mode=str(body.get("mode") or "dominant"),
                      choices=DMG.choices_from(dmg, id_prop))
 
+    # Undrawn designations (missing, cutoff, transcripts...) have no shape to
+    # find, so they can only come from the person; they are stored on the region
+    # itself and merge with the drawn ones below. Worked out BEFORE scope,
+    # because a tick is one of the things that puts a region in scope.
+    extra = dict(DMG.extras_from(regions, id_prop))
+    for k, v in (body.get("extraDamage") or {}).items():
+        extra[k] = sorted(set(extra.get(k, [])) | set(v or []))
+
     scope = str(body.get("scope") or "mine")
-    worked = _notes_worked_on(fc, id_prop, res)
+    worked = _notes_worked_on(fc, id_prop, res, extras=extra)
     only = None if scope == "all" else worked
 
     # A name is written into files other people read, so it must be a name
@@ -616,12 +633,6 @@ def _notes_context(ds_id, body):
     if annotator is None:
         annotator = provenance.display_name() if provenance.has_display_name() else ""
 
-    # Undrawn designations (missing, cutoff, transcripts...) have no shape to
-    # find, so they can only come from the person; they are stored on the region
-    # itself and merge with the drawn ones here.
-    extra = dict(DMG.extras_from(regions, id_prop))
-    for k, v in (body.get("extraDamage") or {}).items():
-        extra[k] = sorted(set(extra.get(k, [])) | set(v or []))
     updates = {}
     for nm, v in res["regions"].items():
         tags = sorted(set(v["damage"]) | {t for t in extra.get(nm, [])
@@ -1263,11 +1274,19 @@ async def regions_outline(ds_id: str, request: Request):
              if str((f.get("properties") or {}).get(d["id_prop"])) != name]
     replaced = len(feats) != len(fc.get("features") or [])
     # First in the list, so the outline draws UNDER everything it wraps.
-    props = {d["id_prop"]: name}
-    for f in fc.get("features") or []:
-        if isinstance((f.get("properties") or {}).get("classification"), dict):
-            props["classification"] = {"name": name}
-            break
+    #
+    # A rebuild REPLACES the outline, so it keeps what the old one carried --
+    # its colour, and any damage ticked on it. Building minimal props from
+    # scratch dropped all of that every time, and the outline is rebuilt often.
+    old = next((f for f in (fc.get("features") or [])
+                if str((f.get("properties") or {}).get(d["id_prop"])) == name), None)
+    props = dict((old or {}).get("properties") or {})
+    props[d["id_prop"]] = name
+    if "classification" not in props:
+        for f in fc.get("features") or []:
+            if isinstance((f.get("properties") or {}).get("classification"), dict):
+                props["classification"] = {"name": name}
+                break
     feats.insert(0, {"type": "Feature", "properties": props,
                      "geometry": res["geometry"]})
     detail = (f"{name} {'rebuilt' if replaced else 'created'} by {res['method']}"
