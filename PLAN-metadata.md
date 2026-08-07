@@ -92,25 +92,60 @@ an ordinary region — never guess.
 
 ---
 
-## Assignment: containment does the work
+## File layout: damage is its own file
 
-On export, each damage shape is assigned to the anatomical region that contains it.
+From the SOP (LabArchives, *Damage Tracking*): damage annotations are exported as a
+**separate `damage.geojson` per sample**, shared between annotators. The workflow is:
+import the existing `damage.geojson` if there is one, add any damage in your region
+that nobody has annotated yet, re-export the whole file, then update
+`annotation.notes.yaml`.
 
-- Fully inside exactly one region → that region.
-- Straddling several → assign to the one with the **largest overlap**, and flag it.
-- Inside none (outside the tissue, or the regions do not cover it) → flag as
-  unassigned rather than dropping it silently.
+So FiveAtlas loads three things per dataset:
 
-**The user must be able to override**, both when it is wrong and when the damage
-genuinely spans regions. So the export step is not silent: it shows the assignment
-table — shape, designation, assigned region, % overlap — with an editable region
-cell and multi-select for a shape that belongs to more than one. Anything flagged
-sorts to the top.
+```
+<regions>.geojson        anatomy, one per annotator's working copy
+damage.geojson           damage shapes, SHARED across annotators for the sample
+annotation.notes.yaml    per-region record, generated from the two above
+```
 
-*Open question:* when one shape spans two regions, does its id go in **both**
-regions' `voids`, or only the dominant one? The sample file has no duplicated id, so
-the current data cannot answer it. Defaulting to both, since dropping it from a
-region that is genuinely affected loses information — but confirm.
+Damage is a **separate layer**, drawn and edited alongside the regions but exported
+to its own file. It does not belong in the region export — the SOP has annotators
+strip non-damage annotations before exporting `damage.geojson`, and vice versa.
+
+Because the file is shared and accumulates, two practical consequences:
+
+- **Numbering must not collide.** `<tag>.<n>` is allocated across the whole
+  `damage.geojson`, so two annotators working on the same sample at once can both
+  mint `separation.8`. Renumber on import, or scope the check to the loaded file and
+  detect duplicates on merge.
+- **Import must merge, not replace.** Loading a `damage.geojson` that a colleague has
+  since extended should keep their shapes and yours. Merge by name, and report
+  same-name-different-geometry rather than silently picking one.
+
+## Assignment: overlap, not containment
+
+The SOP is explicit: fill *"the void field with the names of all selections in the
+damage GeoJSON file that **overlap** your region"*. So a shape straddling two regions
+appears in **both** regions' `voids` — which is what falls out naturally when each
+annotator independently records their own region.
+
+- Overlaps exactly one region → that region.
+- Overlaps several → all of them, per the SOP.
+- Overlaps none → flag as unassigned rather than dropping it silently.
+
+Needs a minimum-overlap threshold so a hairline touch along a shared border does not
+list a shape in a neighbour it barely grazes. Suggest ignoring below ~1% of the shape
+or a few hundred px², shown in the table so it is never invisible.
+
+**The user must be able to override.** Export shows the assignment table — shape,
+designation, regions, % overlap each — with the region cells editable and anything
+unassigned or marginal sorted to the top.
+
+> **Conflict to resolve:** the user asked for *dominant region by default, with a
+> prompt offering both*. The written SOP says *all overlapping regions*. These
+> produce different YAML. Recommendation: follow the SOP (all overlapping, each
+> deselectable in the table), because that is what the manual process has been
+> producing and what downstream readers of these files expect.
 
 ---
 
@@ -183,12 +218,78 @@ anatomy, drawing one will corrupt a share-borders run.
 
 ---
 
+## Answered by the SOP
+
+- **Damage lives in its own `damage.geojson`**, shared per sample, not in the region
+  export.
+- **Overlap, not containment**, decides which regions list a shape.
+- **`enclaves` holds the enclosed region's name** — "the enclosed region should be
+  noted in the metadata yaml".
+- **Undrawn designations get no instance id.** They appear in `damage` only, which
+  is why the per-region panel must be able to add a code without geometry.
+
+## Useful details from the SOP worth building in
+
+- **Damage is found using the stains.** The ATP1A1/CD45/E-Cadherin boundary stain
+  (magenta) shows voids as black and folds as increased signal; alphaSMA/Vimentin
+  marks the pial surface, so alphaSMA interior to the boundary stain means an
+  external fold. Entering damage-annotation mode should offer to switch to that
+  channel pair — it is the actual working view for this task.
+- **`notes` carries the judgement calls**, and the SOP asks for them explicitly:
+  an area dense with small voids that were not individually annotated, or a line of
+  separations where only the large ones were drawn. The panel should prompt for a
+  note when a designation is recorded with no shape.
+- **"Not Done"** is a real state — a region too damaged to annotate is marked Not
+  Done rather than annotated badly. Worth representing.
+- **Tissue that is not part of the section** (stray fragments, severed optic nerve)
+  must be excluded from annotation. A stray-fragment check could flag small
+  disconnected pieces far from the main body.
+
 ## Still to confirm
 
-1. A shape spanning two regions — both regions' `voids`, or just the dominant one?
-2. Is `voidsmall` numbered even when not drawn, or does an undrawn designation never
-   get an instance id? (Sample suggests the latter — `transcripts` has none.)
-3. `enclaves` in the sample holds `placeholder1,placeholder2` — is the intended
-   content the enclosed **region name** (e.g. `VL`) or an instance id?
-4. Do damage shapes belong in the exported regions `.geojson` that downstream tools
-   read, or only in the YAML?
+1. **Dominant-vs-all overlap** — see the conflict flagged above.
+2. Is `damage.geojson` ever per-annotator rather than per-sample? If two people can
+   hold different copies, merge-on-import needs to be the default, not a special case.
+3. Should FiveAtlas write `annotation.notes.yaml` for **all** regions, or only the
+   ones this annotator worked on? The SOP is per-annotator ("update the damage field"
+   for your region), which suggests a partial update that preserves everyone else's
+   entries untouched.
+## SmartSheet
+
+The SOP has annotators tick damage types in a SmartSheet dropdown by hand. Two ways
+to help, and the cheap one may be the better one.
+
+**Do the 30-second check first.** Log in → Account → Personal Settings → API Access.
+If "Generate new access token" is there, that account has API access. Don't take my
+word on which plans include it — Smartsheet has moved API access between tiers, and
+the panel is definitive for *this* account.
+
+### Option A — no API, no cost: "Copy for SmartSheet"
+
+A button producing a TSV block — one row per region: region, damage codes, voids,
+annotator, notes. Multi-column TSV pastes straight into a sheet. No token, no IT
+approval, nothing to pay for, and it works today.
+
+This gets most of the value. The manual step becomes one paste instead of ticking
+boxes per region, and there is no credential to manage or leak.
+
+### Option B — API write-back, if available
+
+`POST /2.0/sheets/{id}/rows`, token in the header. Only worth it if updates should
+land without anyone opening the sheet.
+
+Three cautions if this route is taken:
+
+- **A token is a secret.** Never in the repo, never in the shipped exe, never in an
+  exported file. Per-user, stored in the workdir alongside `identity.json`, and
+  excluded from every export path.
+- **One shared token destroys the attribution.** SmartSheet records the token
+  owner as the editor, so a single lab token makes every update look like one
+  person's — which defeats the point of tracking who annotated what. Each annotator
+  needs their own token, which is also a per-seat licence question.
+- **Writing to a shared tracking sheet is outward-facing.** It must be explicit and
+  confirmed, never a silent side effect of Export.
+
+Recommendation: build Option A regardless — it is small, useful immediately, and
+needs no permission from anyone. Treat Option B as optional, config-gated on a
+`smartsheet.json` in the workdir, feature hidden when absent.
