@@ -714,24 +714,16 @@ export default function Sidebar({
                     : ' · no metadata.yml'}
                 </div>
                 <label className="field">
-                  <span>Annotator (written into the file)</span>
+                  <span>Annotator</span>
                   <input
                     type="text" value={(identity && identity.name) || ''}
                     disabled={busy}
-                    placeholder={identity && identity.account
-                      ? `your name — not the "${identity.account}" account`
-                      : 'your name'}
+                    placeholder="your name (blank = don't write one)"
+                    title="Written into the annotator fields and the metadata.yml roster. Left blank, those are not touched — only damage and voids are written."
                     onChange={(e) => onIdentity && onIdentity(e.target.value, false)}
                     onBlur={(e) => onIdentity && onIdentity(e.target.value, true)}
                   />
                 </label>
-                {identity && !identity.name && (
-                  <div className="hint dim">
-                    Left blank, the annotator fields and the metadata.yml roster
-                    are not touched — only damage and voids are written. Your
-                    Windows account is never written into a shared file as a name.
-                  </div>
-                )}
                 <div className="row">
                   <button className={`btn sm${notesScope === 'mine' ? ' on' : ''}`}
                     disabled={busy} title="only the regions your edits touched"
