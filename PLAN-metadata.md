@@ -184,6 +184,53 @@ Remember the name for the session so it is asked once, not per export.
 
 ---
 
+## Auto-load, and never create a second copy
+
+The requirement that decides this: **the same YAML is edited every time; a new one
+must never appear.** So:
+
+- **Auto-load from the dataset folder.** `scan.py` surfaces `annotation.notes.yaml`,
+  `metadata.yml` and `damage.geojson` as sources the same way it finds the regions
+  and the morphology. No one has to remember to open them, and there is no chance of
+  picking the wrong copy.
+- **Always show the exact path** being read and written, in the panel header, not
+  buried in a dialog. If someone is about to write to the wrong sample, that line is
+  what tells them.
+- **Never create one silently.** If the folder has no `annotation.notes.yaml`, say so
+  and offer "Create it here: <full path>" as an explicit action. Silently generating
+  one is exactly how a second, competing copy gets born.
+- **A "Load a different notes file…" escape hatch** for the odd case, which then
+  becomes the write target and says so.
+
+### The file is shared, so treat it as shared
+
+Other annotators edit the same file between your sessions. Three rules follow:
+
+1. **Re-read immediately before writing.** Never write a copy held in memory since
+   load — that is how you silently revert a colleague.
+2. **Detect outside changes.** Record size + mtime + hash at load; if they differ at
+   save, stop and show what changed rather than overwriting.
+3. **Update only the regions this annotator worked on** — which `_provenance`
+   already knows. Everyone else's entries pass through untouched, byte for byte.
+
+## Preview before writing — as a diff, not a dump
+
+Both the YAML and the TSV get a preview step, and for the YAML it should be a
+**diff**, not the whole file. A full dump of 23 regions makes it impossible to spot
+what actually changed; a diff of the changed keys is checkable in seconds.
+
+- Path being written, in full, at the top.
+- Changed keys only, before → after, grouped by region. Full file behind a toggle.
+- **Diff the rendered output against what is on disk.** That does double duty: it
+  shows the intended edits AND catches accidental reformatting. If a line you never
+  touched appears in the diff, the round-trip is damaging the file and the save
+  should be refused rather than trusted.
+- Nothing is written until Save is pressed in that view.
+
+For the TSV, preview the **table** rather than the raw text — shape, designation,
+regions, % overlap, with unassigned and marginal rows at the top. That is the form a
+person can actually check. Raw TSV behind a toggle, then Copy.
+
 ## Writing the YAML
 
 `ruamel.yaml`, **not PyYAML** — round-tripping must preserve comments, key order and

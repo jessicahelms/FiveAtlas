@@ -19,6 +19,11 @@ from shapely.geometry import shape, mapping, LineString, Polygon, Point, MultiPo
 from shapely.ops import linemerge, polygonize, split, unary_union, voronoi_diagram
 from shapely.strtree import STRtree
 
+# Damage shapes sit INSIDE the tissue, so anything that reasons about the extent
+# of the section has to leave them out. damage.py is pure (shapely only), so this
+# import adds no cycle.
+import damage as _damage
+
 
 def _lines(geom):
     """Flatten any geometry to its LineString parts."""
@@ -1928,6 +1933,70 @@ def add_region(features, id_prop, points, name=None, carve=True, min_area=25.0):
 
     out.append(_new_feature(features, id_prop, nm, g))
     return {"features": out, "name": nm, "area": float(g.area), "ceded": ceded}
+
+
+def section_outline(features, id_prop, name="hemi", method="bubble", radius=200.0,
+                    exclude=None, min_area=25.0):
+    """Build the outline that wraps every region -- the hemisection.
+
+    Two ways, because they fail differently:
+
+    * `bubble` (default) is a morphological CLOSING: grow everything by `radius`,
+      union it, shrink back. It bridges the hairline gaps between neighbours and
+      swallows small interior voids, while still following the real coastline of
+      the section -- concavities and all.
+    * `hull` is the convex hull. Cheap and predictable, but a coronal section is
+      not convex: the hull cuts straight across every notch and midline dip, so
+      it claims ground the tissue does not cover.
+
+    The outline is EXCLUDED from its own input (a rebuild must not wrap the last
+    version of itself and creep outwards, run after run), as is anything named in
+    `exclude` and every damage shape -- damage sits inside the tissue, so it can
+    only pull the outline in.
+
+    Returns {geometry, area, method, replaced, sources}.
+    """
+    skip = {str(n) for n in (exclude or [])} | {str(name)}
+    geoms, used = [], []
+    for f in features or []:
+        nm = str((f.get("properties") or {}).get(id_prop))
+        if nm in skip or _damage.is_damage(nm):
+            continue
+        if (f.get("geometry") or {}).get("type") not in ("Polygon", "MultiPolygon"):
+            continue
+        try:
+            g = shape(f["geometry"])
+        except Exception:
+            continue
+        if not g.is_valid:
+            g = g.buffer(0)
+        if g.is_empty or g.area < min_area:
+            continue
+        geoms.append(g)
+        used.append(nm)
+    if not geoms:
+        raise ValueError("no regions to build an outline from")
+
+    body = unary_union(geoms)
+    if method == "hull":
+        out = body.convex_hull
+    else:
+        r = float(radius)
+        if r <= 0:
+            raise ValueError("the bubble radius must be positive")
+        out = body.buffer(r, join_style=1).buffer(-r, join_style=1)
+    if not out.is_valid:
+        out = out.buffer(0)
+    # Only the outer coastline: a closing can leave interior holes where a void
+    # was too big to swallow, and an outline with holes is not an outline.
+    parts = _polys(out)
+    if not parts:
+        raise ValueError("the outline came out empty -- try a larger radius")
+    out = max(parts, key=lambda p: p.area)
+    out = Polygon(out.exterior)
+    return {"geometry": mapping(_snap_polys(out)), "area": float(out.area),
+            "method": ("hull" if method == "hull" else "bubble"),
+            "sources": sorted(used)}
 
 
 def fill_gap_with_region(features, id_prop, point, name=None, tol=40.0, grab=None):

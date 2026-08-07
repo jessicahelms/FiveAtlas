@@ -99,11 +99,11 @@ export async function splitRegion(ds, region, fc, points, name) {
 // Find the leftover void under a clicked point and hand it to the region(s)
 // around it. Returns the gap outline (for preview) AND the updated FC, so the
 // client can show what it found and commit it without a second round trip.
-export async function dissolveGap(ds, fc, point, tol = 40) {
+export async function dissolveGap(ds, fc, point, tol = 40, exclude = null) {
   const r = await fetch(`${API}/datasets/${ds}/regions/dissolve-gap`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ fc, point, tol }),
+    body: JSON.stringify({ fc, point, tol, exclude }),
   });
   if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
   return r.json(); // { type, features, gap, area, kind, regions }
@@ -128,23 +128,115 @@ export async function browseFile() {
 
 // Add a brand-new region from a drawn outline. carve=true (default) makes any
 // region the outline covers cede that ground, so the file stays a clean partition.
-export async function addRegion(ds, fc, points, { name = null, carve = true } = {}) {
+// `damage` is a designation tag: the server names the shape <tag>.<n> and never
+// carves, because damage sits inside its host and the host stays whole.
+export async function addRegion(ds, fc, points, { name = null, carve = true, damage = null } = {}) {
   const r = await fetch(`${API}/datasets/${ds}/regions/add`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ fc, points, name, carve }),
+    body: JSON.stringify({ fc, points, name, carve, damage }),
   });
   if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
-  return r.json(); // { type, features, name, area, ceded }
+  return r.json(); // { type, features, name, area, ceded, damage, inside }
+}
+
+// Build the hemisection outline from the regions themselves. apply=false previews.
+export async function sectionOutline(ds, body) {
+  const r = await fetch(`${API}/datasets/${ds}/regions/outline`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {}),
+  });
+  if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+  return r.json();
+}
+
+// One SmartSheet cell per region — the chips for its multi-select Damage dropdown.
+export async function damageCells(ds, body) {
+  const r = await fetch(`${API}/datasets/${ds}/damage/cells`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {}),
+  });
+  if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+  return r.json(); // { cells: [{region, done, tags, labels, values, text}], ... }
+}
+
+// --- the two per-sample YAMLs ---------------------------------------------------
+// These live in the DATASET folder, which the rest of the app only ever reads, and
+// they are shared between annotators. Hence: state first (what is there, and its
+// exact path), preview second (a diff), save last, and creation is its own call
+// that never happens by accident.
+
+export async function notesState(ds) {
+  const r = await fetch(`${API}/datasets/${ds}/notes`);
+  if (!r.ok) throw new Error(`notes ${r.status}`);
+  return r.json(); // { root, files: { notes, metadata } }
+}
+
+export async function notesPreview(ds, body) {
+  const r = await fetch(`${API}/datasets/${ds}/notes/preview`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {}),
+  });
+  if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+  return r.json();
+}
+
+export async function notesSave(ds, body) {
+  const r = await fetch(`${API}/datasets/${ds}/notes/save`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {}),
+  });
+  if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+  return r.json(); // { written: [...], skipped: [...] }
+}
+
+export async function notesCreate(ds, body) {
+  const r = await fetch(`${API}/datasets/${ds}/notes/create`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {}),
+  });
+  if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+  return r.json();
+}
+
+// Who edits are attributed to. The account is read-only — a typed name on its own
+// is unverifiable, which is the point of a chain of custody.
+export async function getIdentity() {
+  const r = await fetch(`${API}/identity`);
+  if (!r.ok) throw new Error(`identity ${r.status}`);
+  return r.json(); // { name, account }
+}
+
+export async function setIdentity(name) {
+  const r = await fetch(`${API}/identity`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });
+  if (!r.ok) throw new Error(`identity ${r.status}`);
+  return r.json();
+}
+
+// The damage vocabulary and the spellings that resolve to it. Static, so it is
+// fetched once — not per dataset.
+export async function designations() {
+  const r = await fetch(`${API}/damage/designations`);
+  if (!r.ok) throw new Error(`designations ${r.status}`);
+  return r.json(); // { designations: [{tag,label,drawn}], aliases, enclave }
 }
 
 // Turn the gap under a point into a NEW region, rather than dissolving it into
 // the surrounding regions.
-export async function fillGap(ds, fc, point, { name = null, tol = 40 } = {}) {
+export async function fillGap(ds, fc, point, { name = null, tol = 40, exclude = null } = {}) {
   const r = await fetch(`${API}/datasets/${ds}/regions/fill-gap`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ fc, point, name, tol }),
+    body: JSON.stringify({ fc, point, name, tol, exclude }),
   });
   if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
   return r.json(); // { type, features, name, area, kind, gap }
@@ -171,6 +263,18 @@ export async function setOrientation(ds, o, fc) {
   return r.json(); // { type, features, _orientation, orientation, width, height }
 }
 
+// One TSV row per region for the tracking sheet, plus the damage-to-region
+// assignment behind it so the user can check it before pasting. Read-only.
+export async function smartsheetTsv(ds, body) {
+  const r = await fetch(`${API}/datasets/${ds}/regions/smartsheet.tsv`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {}),
+  });
+  if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+  return r.json(); // { tsv, columns, shapes, unassigned, regions, designations }
+}
+
 // Every snapshot Save has written, newest first.
 export async function listVersions(ds) {
   const r = await fetch(`${API}/datasets/${ds}/regions/versions`);
@@ -180,11 +284,11 @@ export async function listVersions(ds) {
 
 // Check the regions for self-intersections, empties, missing names, overlaps.
 // Read-only: nothing is modified.
-export async function validateRegions(ds, fc) {
+export async function validateRegions(ds, fc, exclude = null) {
   const r = await fetch(`${API}/datasets/${ds}/regions/validate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ fc }),
+    body: JSON.stringify({ fc, exclude }),
   });
   if (!r.ok) throw new Error(`validate ${r.status}: ${await r.text()}`);
   return r.json(); // { problems, counts, ok }

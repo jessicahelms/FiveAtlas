@@ -43,6 +43,20 @@ def display_name() -> str:
     return account_name()
 
 
+def has_display_name() -> bool:
+    """Has a real name been entered, or is `display_name()` falling back to the
+    Windows account? Anything written into a file OTHER PEOPLE read wants a name,
+    not an account, and only the caller knows which it needs."""
+    try:
+        p = _identity_file()
+        if p.exists():
+            nm = (json.load(open(p, encoding="utf-8")) or {}).get("name")
+            return bool(nm and str(nm).strip())
+    except Exception:
+        pass
+    return False
+
+
 def account_name() -> str:
     for var in ("USERNAME", "USER", "LOGNAME"):
         v = os.environ.get(var)

@@ -84,6 +84,25 @@ function borderArcsFc(arcs) {
 // `_provenance`, the edit trail that has to travel with the file through the
 // hand-off chain. Every rebuild goes through here: the trail comes from the
 // response when the server stamped one, otherwise from the collection we had.
+// An edit the client makes without a round trip — rename, colour, delete — has no
+// endpoint to stamp it, so it is stamped here, onto the collection, the moment it
+// happens. Deferring it to the save would be too late for anything that reads the
+// trail in between: the notes panel decides which regions are YOURS from it, and a
+// region renamed to `bubble.1` is damage the moment it is renamed.
+function stampFc(fc, who, action, detail, regions) {
+  const entry = {
+    t: new Date().toISOString().slice(0, 19),
+    who: (who && who.name) || (who && who.account) || 'unknown',
+    account: (who && who.account) || 'unknown',
+    app: 'client',
+    action,
+  };
+  if (detail) entry.detail = String(detail);
+  if (regions && regions.length) entry.regions = regions.map(String);
+  const trail = Array.isArray(fc && fc._provenance) ? fc._provenance : [];
+  return { ...fc, _provenance: [...trail, entry] };
+}
+
 function asFc(res, prev) {
   // Carry every file-level member, not just the ones we can name: `_provenance`
   // (the edit trail) and `_orientation` (which frame the coordinates are in), and
@@ -379,9 +398,36 @@ export default function App() {
   // dissolve: click a leftover void -> preview it, then hand it to its neighbours
   const [gapFind, setGapFind] = useState(null);   // { gap, area, kind, regions, fc }
   const [gapMsg, setGapMsg] = useState(null);
+  // Regions switched off. `hemi` is the whole-hemisphere outline and covers every
+  // other region, so with it in play nothing is ever outside a region and NO GAP
+  // can be found — and Check geometry reports 22 overlaps that are all correct.
+  // Switching a region off leaves it in the file, untouched; it is only ignored
+  // by the operations that assume a clean partition, and hidden on the map.
+  const [regionsOff, setRegionsOff] = useState(() => new Set());
+  const regionsOffRef = useRef(regionsOff);
+  regionsOffRef.current = regionsOff;
+  const offList = useCallback(
+    () => (regionsOffRef.current.size ? [...regionsOffRef.current] : null), []);
+  const toggleRegionOff = useCallback((nm) => {
+    setRegionsOff((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(nm)) next.add(nm);
+      return next;
+    });
+  }, []);
+
   // draw: an outline the user traces to create a brand-new region
   const [drawPoly, setDrawPoly] = useState({ type: 'FeatureCollection', features: [] });
   const [drawMsg, setDrawMsg] = useState(null);
+  // ...and WHAT it is: 'region', or a damage designation tag. Damage is an
+  // ordinary region here — same file, same list, same editing — so this only
+  // decides the name and whether the outline carves its host.
+  const [drawKind, setDrawKind] = useState('region');
+  const [designations, setDesignations] = useState(null);   // { designations, aliases }
+  // A damage shape that reaches into a second region. Damage is recorded against
+  // the ONE region holding most of it, so a straddling shape is a question for
+  // the annotator — asked now, while they can still see what they drew.
+  const [damageAsk, setDamageAsk] = useState(null);   // {name, candidates, dominant}
   // resample: thin the shared border after Share borders
   const [resampleTol, setResampleTol] = useState(150);
   const [resample, setResample] = useState(null);   // { counts, fc, tol }
@@ -502,6 +548,16 @@ export default function App() {
         setDatasets(list);
         setDsId((cur) => cur || (list[0] && list[0].id) || null);
       } catch (e) { /* ignore */ }
+    })();
+  }, []);
+
+  // The damage vocabulary. Static and dataset-independent, so once is enough.
+  // Null until it arrives — the draw panel then offers regions only, rather than
+  // showing an empty damage list as though there were no designations.
+  useEffect(() => {
+    (async () => {
+      try { setDesignations(await api.designations()); }
+      catch (e) { /* the dropdown falls back to "anatomical region" only */ }
     })();
   }, []);
 
@@ -742,6 +798,9 @@ export default function App() {
   const clearGap = useCallback(() => { setGapFind(null); setGapMsg(null); }, []);
   const clearDraw = useCallback(() => {
     setDrawPoly({ type: 'FeatureCollection', features: [] }); setDrawMsg(null);
+    // An unanswered question falls back to the dominant region — the same shape
+    // is listed again in the export review, so nothing is lost by leaving.
+    setDamageAsk(null);
   }, []);
 
   const onToggleModify = useCallback(() => {
@@ -1101,7 +1160,13 @@ export default function App() {
       if (duplicate) throw new Error(`Another region is already named "${newName}".`);
 
       const features = currentFc.features.map((f, i) => (i === featureIndex ? { ...f, properties: props } : f));
-      const nextFc = { ...currentFc, features };
+      let nextFc = { ...currentFc, features };
+      // Record it now, not at save: renaming a region to `bubble.1` makes it
+      // damage, and the notes panel works out whose regions are whose from this.
+      if (oldName !== newName) {
+        nextFc = stampFc(nextFc, identityRef.current, 'rename',
+                         `${oldName} → ${newName}`, [newName]);
+      }
       commit(nextFc);
       setSelected([featureIndex]);
 
@@ -1179,7 +1244,8 @@ export default function App() {
     const cur = fcRef.current;
     if (!cur || !cur.features || !cur.features[featureIndex]) return;
     const nm = featureName(cur.features[featureIndex], idProp);
-    const next = { ...cur, features: cur.features.filter((_, i) => i !== featureIndex) };
+    const next = stampFc({ ...cur, features: cur.features.filter((_, i) => i !== featureIndex) },
+                         identityRef.current, 'delete-region', nm, [nm]);
     commit(next);
     // keep the snap baseline aligned -- match by name, not index
     setBaseline((prev) => ((prev && prev.features)
@@ -1252,7 +1318,7 @@ export default function App() {
     setBusy(true); setError(null); setGapFind(null);
     setGapMsg('looking for a gap there…');
     try {
-      const res = await api.dissolveGap(dsId, fc, [coord[0], coord[1]]);
+      const res = await api.dissolveGap(dsId, fc, [coord[0], coord[1]], 40, offList());
       setGapFind({
         gap: res.gap, area: res.area, kind: res.kind, regions: res.regions,
         point: [coord[0], coord[1]],     // kept so "New region" can reuse the click
@@ -1272,7 +1338,7 @@ export default function App() {
     if (!gapFind || !fc) return;
     setBusy(true); setError(null);
     try {
-      const res = await api.fillGap(dsId, fc, gapFind.point);
+      const res = await api.fillGap(dsId, fc, gapFind.point, { exclude: offList() });
       const newFc = asFc(res, fc);
       commit(newFc); setBaseline(newFc);
       setMoved((prev) => { const n = new Set(prev); n.add(res.name); return n; });
@@ -1297,13 +1363,15 @@ export default function App() {
   }, [gapFind, commit]);
 
   // Draw mode: trace an outline, and it becomes a new region. Any region the
-  // outline covers cedes that ground, so the file stays a clean partition.
+  // outline covers cedes that ground, so the file stays a clean partition —
+  // EXCEPT for damage, which lies inside its host and leaves it whole.
   const applyAddRegion = useCallback(async (coords) => {
     if (!coords || coords.length < 3 || !fc) return;
+    const dmgTag = drawKind === 'region' ? null : drawKind;
     setBusy(true); setError(null);
-    setDrawMsg('creating…');
+    setDrawMsg(dmgTag ? 'adding damage…' : 'creating…');
     try {
-      const res = await api.addRegion(dsId, fc, coords);
+      const res = await api.addRegion(dsId, fc, coords, { damage: dmgTag });
       const newFc = asFc(res, fc);
       commit(newFc); setBaseline(newFc);
       setMoved((prev) => {
@@ -1312,14 +1380,48 @@ export default function App() {
         (res.ceded || []).forEach((x) => n.add(x));
         return n;
       });
-      const took = (res.ceded || []).length
-        ? ` — ${res.ceded.join(', ')} gave up the overlap`
-        : '';
-      setDrawMsg(`Created “${res.name}” (${Math.round(res.area).toLocaleString()} px²)${took}. Right-click it to rename.`);
+      const area = `${Math.round(res.area).toLocaleString()} px²`;
+      if (res.damage) {
+        // Where it landed matters more than the area: a shape over no region is
+        // the one case the annotator has to fix, and it says so now rather than
+        // at export time.
+        const where = (res.inside || []).length
+          ? ` in ${res.inside.join(' + ')}`
+          : ' — it overlaps NO region, so it will not reach the sheet';
+        if (res.needsChoice) {
+          setDamageAsk({ name: res.name, candidates: res.candidates || [], dominant: res.dominant });
+          setDrawMsg(`Added “${res.name}” (${area}) — it reaches into ${(res.candidates || []).length} regions.`);
+        } else {
+          setDamageAsk(null);
+          setDrawMsg(`Added “${res.name}” (${area})${where}. Draw another, or change the kind above.`);
+        }
+      } else {
+        const took = (res.ceded || []).length
+          ? ` — ${res.ceded.join(', ')} gave up the overlap`
+          : '';
+        setDrawMsg(`Created “${res.name}” (${area})${took}. Right-click it to rename.`);
+      }
     } catch (e) {
       setDrawMsg(apiDetail(e));
     } finally { setBusy(false); }
-  }, [dsId, fc, commit]);
+  }, [dsId, fc, commit, drawKind]);
+
+  // The answer goes on the shape itself (`_damage_regions`), not into session
+  // state: it is an annotator's judgement, and it has to survive a save, an
+  // email and the next person opening the file.
+  const answerDamage = useCallback((regions, shapeName) => {
+    const nm = shapeName || (damageAsk && damageAsk.name);
+    if (!nm || !fc) return null;
+    const next = asFc({
+      features: fc.features.map((f) => (featureName(f, idProp) === nm
+        ? { ...f, properties: { ...(f.properties || {}), _damage_regions: regions } }
+        : f)),
+    }, fc);
+    commit(next); setBaseline(next);
+    if (damageAsk && damageAsk.name === nm) setDamageAsk(null);
+    setDrawMsg(`“${nm}” recorded in ${regions.join(' + ')}. Draw another, or change the kind above.`);
+    return next;                      // so a caller can re-report against it
+  }, [damageAsk, fc, idProp, commit]);
 
   const onDrawEdit = useCallback(({ updatedData, editType }) => {
     if (editType === 'addFeature') {
@@ -1485,6 +1587,168 @@ export default function App() {
     } finally { setBusy(false); }
   }, [dsId, info, fc, commit, clearBorder, clearSplit, clearGap, clearDraw]);
 
+  // Build the tracking-sheet TSV and put it on the clipboard. The clipboard write
+  // must happen in the click's own task on some browsers, so the text is written
+  // first and the review table shown after -- never the other way round.
+  // The two per-sample YAMLs in the dataset folder.
+  const [notesInfo, setNotesInfo] = useState(null);     // what is there, and where
+  const [notesReport, setNotesReport] = useState(null); // the previewed diff
+  const [notesScope, setNotesScope] = useState('mine');
+  const [identity, setIdentity] = useState(null);       // { name, account }
+  // read by client-side stamps, which must not re-create themselves on every
+  // identity change
+  const identityRef = useRef(null);
+  identityRef.current = identity;
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const who = await api.getIdentity();
+        // `name` falls back to the Windows account when nobody has entered one.
+        // That is fine for the edit trail and wrong for a shared roster, so the
+        // notes panel starts empty until a real name is typed.
+        setIdentity({ ...who, name: who.set ? who.name : '' });
+      } catch (e) { /* the panel asks for a name anyway */ }
+    })();
+  }, []);
+
+  const refreshNotes = useCallback(async (id) => {
+    if (!id) return;
+    try { setNotesInfo(await api.notesState(id)); }
+    catch (e) { setNotesInfo(null); }
+  }, []);
+
+  useEffect(() => { setNotesReport(null); refreshNotes(dsId); }, [dsId, refreshNotes]);
+
+  const doNotesPreview = useCallback(async (scope) => {
+    if (!dsId || !fc) return;
+    const which = scope || notesScope;
+    setBusy(true); setError(null);
+    try {
+      const res = await api.notesPreview(dsId, {
+        fc, scope: which, annotator: identity && identity.name,
+      });
+      setNotesReport(res);
+    } catch (e) { setError(apiDetail(e)); } finally { setBusy(false); }
+  }, [dsId, fc, notesScope, identity]);
+
+  // Save re-derives everything server-side from the file on disk; the
+  // fingerprints from the preview are what make a colleague's edit in between a
+  // refusal rather than an overwrite.
+  const doNotesSave = useCallback(async (which) => {
+    if (!dsId || !fc || !notesReport) return;
+    const files = notesReport.files || {};
+    const fingerprints = {};
+    Object.entries(files).forEach(([k, v]) => {
+      if (v && v.fingerprint) fingerprints[k] = v.fingerprint;
+    });
+    setBusy(true); setError(null);
+    try {
+      const res = await api.notesSave(dsId, {
+        fc, scope: notesScope, annotator: identity && identity.name,
+        which: which || Object.keys(files).filter((k) => files[k] && files[k].found),
+        fingerprints,
+      });
+      setNotesReport(res);
+      await refreshNotes(dsId);
+    } catch (e) { setError(apiDetail(e)); } finally { setBusy(false); }
+  }, [dsId, fc, notesReport, notesScope, identity, refreshNotes]);
+
+  const doNotesCreate = useCallback(async () => {
+    if (!dsId || !fc) return;
+    setBusy(true); setError(null);
+    try {
+      await api.notesCreate(dsId, { fc });
+      await refreshNotes(dsId);
+      await doNotesPreview();
+    } catch (e) { setError(apiDetail(e)); } finally { setBusy(false); }
+  }, [dsId, fc, refreshNotes, doNotesPreview]);
+
+  // Typing updates the field; only leaving it persists, so a name is not saved
+  // one keystroke at a time.
+  const doSetIdentity = useCallback(async (name, persist) => {
+    setIdentity((cur) => ({ ...(cur || {}), name, set: true }));
+    if (!persist) return;
+    try { await api.setIdentity(name); } catch (e) { /* kept locally anyway */ }
+  }, []);
+
+  // The per-region SmartSheet cells. The sheet's Damage column is a multi-select
+  // dropdown, so what gets copied is one cell per region, not one long row.
+  const [cellsReport, setCellsReport] = useState(null);
+  const [cellSep, setCellSep] = useState('cell');
+  const [cellsAll, setCellsAll] = useState(false);   // boxes for regions with none
+
+  const loadCells = useCallback(async (nextFc, opts) => {
+    if (!dsId) return;
+    const use = nextFc || fc;
+    if (!use) return;
+    const o = opts || {};
+    try {
+      setCellsReport(await api.damageCells(dsId, {
+        fc: use,
+        sep: o.sep || cellSep,
+        includeEmpty: 'all' in o ? o.all : cellsAll,
+      }));
+    } catch (e) { setError(apiDetail(e)); }
+  }, [dsId, fc, cellSep, cellsAll]);
+
+  // Ticking Done, or adding a designation nobody can draw, is an annotation ON
+  // the region — so it is stored on the region feature, the same way a damage
+  // shape stores which region it belongs to. It survives save, export and reload.
+  const setRegionDamage = useCallback(async (region, patch) => {
+    if (!fc) return;
+    const next = asFc({
+      features: fc.features.map((f) => {
+        if (featureName(f, idProp) !== region) return f;
+        const props = { ...(f.properties || {}) };
+        if ('done' in patch) props._damage_done = !!patch.done;
+        if ('extra' in patch) props._damage_extra = [...patch.extra];
+        return { ...f, properties: props };
+      }),
+    }, fc);
+    commit(next); setBaseline(next);
+    await loadCells(next);
+  }, [fc, idProp, commit, loadCells]);
+
+  // Build the hemisection outline from the regions themselves, rather than
+  // drawing it by hand around 22 of them.
+  const [outlinePreview, setOutlinePreview] = useState(null);
+  const doOutline = useCallback(async (opts) => {
+    if (!dsId || !fc) return;
+    setBusy(true); setError(null);
+    try {
+      const res = await api.sectionOutline(dsId, {
+        fc, exclude: offList(), ...(opts || {}),
+      });
+      if (!(opts || {}).apply) {
+        setOutlinePreview({ ...res, ...(opts || {}) });
+        return;
+      }
+      const newFc = asFc(res, fc);
+      commit(newFc); setBaseline(newFc);
+      setMoved((prev) => new Set(prev).add(res.name));
+      setOutlinePreview(null);
+      setSnapInfo((s) => ({
+        ...(s || {}),
+        saved: `“${res.name}” ${res.replaced ? 'rebuilt' : 'created'} by ${res.method}`
+          + ` — ${Math.round(res.area).toLocaleString()} px² around ${res.sources.length} regions`,
+      }));
+    } catch (e) { setError(apiDetail(e)); } finally { setBusy(false); }
+  }, [dsId, fc, commit, offList]);
+
+  // The whole-row TSV export is gone from the UI (the sheet's Damage column is a
+  // multi-select, so the per-region cells replaced it). `regions/smartsheet.tsv`
+  // is still there and still tested, for the day the other columns are wanted.
+
+  // Answering a straddling shape from the review panel: record it, then rebuild
+  // the boxes from the file that now carries the answer — a panel still showing
+  // the old assignment would be the thing people paste.
+  const answerDamageInReport = useCallback(async (regions, shapeName) => {
+    const next = answerDamage(regions, shapeName);
+    if (!next) return;
+    await loadCells(next);
+  }, [answerDamage, loadCells]);
+
   const doReset = useCallback(async () => {
     setBusy(true); setError(null);
     try {
@@ -1530,7 +1794,7 @@ export default function App() {
   const doValidate = useCallback(async () => {
     setBusy(true); setError(null);
     try {
-      const res = await api.validateRegions(dsId, fcRef.current || fc);
+      const res = await api.validateRegions(dsId, fcRef.current || fc, offList());
       setGeomReport({
         problems: res.problems, counts: res.counts, mode: null,
         title: res.ok
@@ -1597,6 +1861,8 @@ export default function App() {
                 onResampleTol={previewResample} onApplyResample={applyResample}
                 onCancelResample={cancelResample}
                 gapFind={gapFind} gapMsg={gapMsg} drawMsg={drawMsg}
+                drawKind={drawKind} onDrawKind={setDrawKind} designations={designations}
+                damageAsk={damageAsk} onAnswerDamage={answerDamage}
                 onDissolve={applyDissolve} onFillGap={applyFillGap} onClearGap={clearGap}
                 selectedName={selectedName}
                 moved={moved} canSnap={canSnap} onSnap={doSnap} onSave={doSave} onReset={doReset}
@@ -1609,6 +1875,20 @@ export default function App() {
                 onRestoreOriginal={doRestoreOriginal}
                 orientation={(info && info.orientation) || null}
                 onOrientation={applyOrientation}
+                onAnswerReportDamage={answerDamageInReport}
+                regionsOff={regionsOff} onToggleRegionOff={toggleRegionOff}
+                outlinePreview={outlinePreview} onOutline={doOutline}
+                onDismissOutline={() => setOutlinePreview(null)}
+                cellsReport={cellsReport} cellSep={cellSep} cellsAll={cellsAll}
+                onLoadCells={() => loadCells()} onDismissCells={() => setCellsReport(null)}
+                onCellSep={(s) => { setCellSep(s); loadCells(null, { sep: s }); }}
+                onCellsAll={(v) => { setCellsAll(v); loadCells(null, { all: v }); }}
+                onRegionDamage={setRegionDamage}
+                notesInfo={notesInfo} notesReport={notesReport} notesScope={notesScope}
+                onNotesScope={(s) => { setNotesScope(s); if (notesReport) doNotesPreview(s); }}
+                onNotesPreview={() => doNotesPreview()} onNotesSave={doNotesSave}
+                onNotesCreate={doNotesCreate} onDismissNotes={() => setNotesReport(null)}
+                identity={identity} onIdentity={doSetIdentity}
                 onLoadFile={loadRegionsFromFile} onExport={doExport}
                 snapInfo={snapInfo} busy={busy} error={error}
               />
@@ -1642,7 +1922,7 @@ export default function App() {
                 onGrabVertex={onGrabVertex} onReleaseDrag={onReleaseDrag}
                 geneBitmap={geneBitmap} geneBounds={geneBounds}
                 stainInfo={stainInfo} stainChannels={stainChannels}
-                layers={layers}
+                layers={layers} regionsOff={regionsOff}
               />
             </div>
           </>

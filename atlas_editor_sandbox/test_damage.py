@@ -60,13 +60,18 @@ shapes = [
     feat("bubble.1", box(10, 99.9, 20, 400)),
     feat("separation.2", box(500, 500, 510, 510)),  # nowhere
 ]
-a = D.assign(regions, shapes)
+# mode="all" is the literal SOP reading; mode="dominant" is what the lab chose on
+# 2026-08-07. Both are tested because both are supported and they write different
+# YAML -- see the dominant block below.
+a = D.assign(regions, shapes, mode="all")
 by = {s["name"]: s for s in a["shapes"]}
 check("shape inside one region -> that region", by["separation.1"]["regions"] == ["ISO"])
 check("straddling shape goes in BOTH regions (per the SOP)",
       sorted(by["voidlarge.1"]["regions"]) == ["ISO", "TH"], str(by["voidlarge.1"]["regions"]))
 check("straddling shape still names a dominant one",
       by["voidlarge.1"]["dominant"] in ("ISO", "TH") and by["voidlarge.1"]["spans"])
+check("mode=all never asks -- every overlapping region is recorded",
+      a["needsChoice"] == [])
 check("hairline graze is not assigned, but IS reported",
       by["bubble.1"]["regions"] == [] and by["bubble.1"]["marginal"],
       f"marginal={by['bubble.1']['marginal']}")
@@ -79,6 +84,170 @@ check("region voids list the shape ids",
       a["regions"]["ISO"]["voids"] == ["separation.1", "voidlarge.1"])
 check("TH only gets the shape that reaches it",
       a["regions"]["TH"] == {"damage": ["voidlarge"], "voids": ["voidlarge.1"]})
+
+# --- dominant, and the question it raises ---------------------------------------
+# The lab's call: a shape belongs to the ONE region holding most of it, and one
+# that reaches into a second is a question for the annotator, not for geometry.
+dom = D.assign(regions, shapes, mode="dominant")
+byd = {s["name"]: s for s in dom["shapes"]}
+check("dominant is the default", D.assign(regions, shapes)["mode"] == "dominant")
+check("a shape inside one region is unchanged by the mode",
+      byd["separation.1"]["regions"] == ["ISO"])
+check("a straddling shape goes to the region holding most of it",
+      byd["voidlarge.1"]["regions"] == ["TH"], str(byd["voidlarge.1"]["regions"]))
+check("...and it is flagged for the annotator rather than settled quietly",
+      byd["voidlarge.1"]["needsChoice"]
+      and [s["name"] for s in dom["needsChoice"]] == ["voidlarge.1"])
+check("both regions are offered, most-of-it first",
+      byd["voidlarge.1"]["candidates"] == ["TH", "ISO"], str(byd["voidlarge.1"]["candidates"]))
+check("a shape in one region is never a question",
+      not byd["separation.1"]["needsChoice"] and not byd["separation.1"]["spans"])
+
+# The answer rides on the shape, so it survives a save and the next annotator.
+answered = [dict(f, properties={**f["properties"], D.CHOICE_PROP: ["ISO", "TH"]})
+            if f["properties"]["name"] == "voidlarge.1" else f for f in shapes]
+ch = D.choices_from(answered)
+check("the answer is read back off the shape", ch == {"voidlarge.1": ["ISO", "TH"]})
+ans = D.assign(regions, answered, mode="dominant", choices=ch)
+bya = {s["name"]: s for s in ans["shapes"]}
+check("an answered shape is recorded where the annotator said",
+      sorted(bya["voidlarge.1"]["regions"]) == ["ISO", "TH"])
+check("...and is not asked about again", ans["needsChoice"] == [])
+check("the answer reaches both regions' voids",
+      "voidlarge.1" in ans["regions"]["ISO"]["voids"]
+      and "voidlarge.1" in ans["regions"]["TH"]["voids"])
+one = D.assign(regions, answered, mode="dominant", choices={"voidlarge.1": ["ISO"]})
+check("choosing the smaller side overrides the geometry",
+      {s["name"]: s["regions"] for s in one["shapes"]}["voidlarge.1"] == ["ISO"])
+stale = D.assign(regions, shapes, mode="dominant", choices={"separation.1": ["TH"]})
+bys = {s["name"]: s for s in stale["shapes"]}
+check("an answer naming a region the shape no longer reaches is dropped, not written",
+      bys["separation.1"]["regions"] == ["ISO"] and bys["separation.1"]["staleChoice"] == ["TH"])
+
+# --- containment: the more specific region wins ---------------------------------
+# `hemi` wraps every region, so it holds 100% of every shape and would be offered
+# against the region actually drawn in. But containment is a RELATION, not a label
+# on a region: on the real file ISO contains SSp and RSP while still being an
+# ordinary region people draw in, so it can only be set aside for a shape that
+# lands in SSp or RSP too.
+whole = feat("hemi", box(-10, -10, 210, 110))
+inner = feat("SSp", box(0, 0, 50, 100))          # 50% of ISO, wholly inside it
+with_hemi = [whole] + regions
+check("a region that swallows another is spotted",
+      D.containment(with_hemi) == {"hemi": ["ISO", "TH"]}, str(D.containment(with_hemi)))
+check("side-by-side neighbours contain nothing", D.containment(regions) == {})
+check("two coincident copies of one region do not swallow each other",
+      D.containment([feat("ISO", box(0, 0, 100, 100)),
+                     feat("ISO2", box(0, 0, 100, 100))]) == {})
+hemi_a = D.assign(with_hemi, shapes, mode="dominant")
+byh = {s["name"]: s for s in hemi_a["shapes"]}
+check("the containment relation is reported, not just a flat list",
+      hemi_a["containment"] == {"hemi": ["ISO", "TH"]} and hemi_a["containers"] == ["hemi"])
+check("a shape drawn in ISO is recorded in ISO, not the region enclosing it",
+      byh["separation.1"]["regions"] == ["ISO"], str(byh["separation.1"]["regions"]))
+# It keeps what nothing more specific claimed — bubble.1 only grazes ISO (0.03%,
+# below the threshold) and otherwise sits in hemi's own ground. Recording it
+# against the outline says something true; calling it homeless does not.
+check("the enclosing region keeps only what no more specific region claimed",
+      hemi_a["regions"]["hemi"]["voids"] == ["bubble.1"],
+      str(hemi_a["regions"]["hemi"]["voids"]))
+check("the shapes inside real regions do NOT also land in it",
+      "separation.1" not in hemi_a["regions"]["hemi"]["voids"]
+      and "voidlarge.1" not in hemi_a["regions"]["hemi"]["voids"])
+check("the shape says which region was set aside for it",
+      byh["separation.1"]["enclosing"] == ["hemi"])
+check("an enclosing region does not turn every shape into a question",
+      not byh["separation.1"]["needsChoice"])
+
+# The part a blanket "skip containers" rule would get wrong: a shape in ISO's own
+# ground, nowhere near SSp, must still be recorded against ISO.
+nested = [whole, feat("ISO", box(0, 0, 100, 100)), inner, feat("TH", box(100, 0, 200, 100))]
+own = [feat("separation.9", box(70, 10, 90, 30))]     # in ISO, outside SSp
+nest_a = D.assign(nested, own, mode="dominant")
+check("ISO contains SSp and is still an ordinary region",
+      D.containment(nested).get("ISO") == ["SSp"], str(D.containment(nested)))
+check("a shape in the containing region's OWN ground still lands there",
+      nest_a["shapes"][0]["regions"] == ["ISO"], str(nest_a["shapes"][0]["regions"]))
+check("...while a shape inside the nested region goes to the nested one",
+      D.assign(nested, [feat("separation.8", box(10, 10, 30, 30))], mode="dominant")
+      ["shapes"][0]["regions"] == ["SSp"])
+check("no shape is left with nowhere to go", nest_a["unassigned"] == [])
+
+# What the rule is actually for. The tie-break alone stops the enclosing region
+# winning outright — both hold 100% of the shape, and the smaller takes the tie —
+# but it does nothing about it being a *candidate*, which turns every shape into a
+# question and hands it every void in mode="all".
+raw = D.assign(with_hemi, shapes, mode="dominant", specific_wins=False)
+byr = {s["name"]: s for s in raw["shapes"]}
+check("a tie on fraction goes to the more specific region, never the one enclosing it",
+      byr["separation.1"]["dominant"] == "ISO", str(byr["separation.1"]["candidates"]))
+check("without the rule every shape becomes a question",
+      byr["separation.1"]["needsChoice"] and len(raw["needsChoice"]) == 2,
+      str([s["name"] for s in raw["needsChoice"]]))
+check("without the rule the enclosing region collects every void — including the "
+      "shape that reaches no real region at all",
+      sorted(D.assign(with_hemi, shapes, mode="all", specific_wins=False)
+             ["regions"]["hemi"]["voids"]) == ["bubble.1", "separation.1", "voidlarge.1"])
+check("a shape outside every region, outline included, is still flagged",
+      [s["name"] for s in hemi_a["unassigned"]] == ["separation.2"],
+      str([s["name"] for s in hemi_a["unassigned"]]))
+
+# --- the SmartSheet cell --------------------------------------------------------
+# The sheet's Damage column is a multi-select dropdown: one cell, several chips,
+# by their DISPLAY names. `Done` rides in the same cell without being damage.
+print()
+extras = {"ISO": ["cutoff", "transcripts"], "TH": ["separation"]}
+done = {"ISO": True}
+cs = {c["region"]: c for c in D.cells(a, extras, done)}
+check("a region with damage gets a box", set(cs) == {"ISO", "TH"}, str(sorted(cs)))
+check("Done comes first, then the designations",
+      cs["ISO"]["values"][0] == D.DONE_LABEL, str(cs["ISO"]["values"]))
+check("the chips are display names, not tags",
+      "Small void" not in cs["ISO"]["values"] and "Cutoff" in cs["ISO"]["values"]
+      and "cutoff" not in cs["ISO"]["values"], str(cs["ISO"]["values"]))
+check("drawn and hand-ticked damage merge into one cell",
+      cs["ISO"]["values"] == ["Done", "Separation", "Large void", "Cutoff",
+                              "Low/no transcripts"], str(cs["ISO"]["values"]))
+check("...but the box still says which came from a shape",
+      cs["ISO"]["drawn"] == ["separation", "voidlarge"]
+      and cs["ISO"]["typed"] == ["cutoff", "transcripts"])
+check("a region with no Done tick has no Done chip",
+      D.DONE_LABEL not in cs["TH"]["values"], str(cs["TH"]["values"]))
+check("the same designation drawn AND ticked appears once",
+      cs["TH"]["values"].count("Separation") == 1, str(cs["TH"]["values"]))
+check("a region with nothing is left out unless asked for",
+      "CP" not in {c["region"] for c in D.cells(a, {}, {})}
+      and "hemi" in {c["region"] for c in D.cells(
+          D.assign([whole] + regions, shapes), {}, {}, include_empty=True)})
+# A region with no damage at all still needs a box once it is ticked off — that
+# tick is the annotator saying they went through it and found nothing.
+ticked = {c["region"]: c for c in D.cells(nest_a, {}, {"TH": True})}
+check("ticking Done alone is enough to get a box, with no damage in it",
+      "TH" in ticked and ticked["TH"]["tags"] == []
+      and ticked["TH"]["values"] == [D.DONE_LABEL], str(ticked.get("TH", {}).get("values")))
+
+check("the default format quotes the cell, so a grid keeps it in one",
+      cs["ISO"]["text"].startswith('"') and cs["ISO"]["text"].endswith('"')
+      and cs["ISO"]["text"].count("\n") == len(cs["ISO"]["values"]) - 1)
+check("lines format is the same values, unquoted",
+      D.cell_text(["Done", "Bubble"], "lines") == "Done\nBubble")
+check("comma format for a sheet that wants one",
+      D.cell_text(["Done", "Bubble"], "comma") == "Done, Bubble")
+check("an unknown format falls back rather than failing",
+      D.cell_text(["Done"], "nonsense") == D.cell_text(["Done"], D.DEFAULT_SEPARATOR))
+check("every designation's chip matches its dropdown label",
+      all(D.label_of(t) == lab for t, (lab, _) in D.DESIGNATIONS.items()))
+
+# read back off the features, the way the routes do
+feats = [dict(feat("ISO", box(0, 0, 100, 100)))]
+feats[0]["properties"] = {"name": "ISO", D.EXTRA_PROP: ["Cutoff", "cutoff", "nonsense"],
+                          D.DONE_PROP: True}
+check("hand-ticked types are read off the region, tolerating display spellings",
+      D.extras_from(feats) == {"ISO": ["cutoff"]}, str(D.extras_from(feats)))
+check("the Done tick is read off the region", D.done_from(feats) == {"ISO": True})
+check("a region with neither is simply absent",
+      D.extras_from([feat("TH", box(0, 0, 1, 1))]) == {}
+      and D.done_from([feat("TH", box(0, 0, 1, 1))]) == {})
 
 # --- TSV ------------------------------------------------------------------------
 notes = {

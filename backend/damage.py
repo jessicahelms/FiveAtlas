@@ -66,6 +66,15 @@ _ALIASES[_key("no transcripts")] = "transcripts"
 _ALIASES[_key("low transcripts")] = "transcripts"
 
 
+def alias_map():
+    """Every written form that resolves to a tag, keyed by its folded spelling.
+
+    Handed to the client so its labelling agrees with `parse_name` rather than
+    re-deriving the vocabulary and drifting from it.
+    """
+    return dict(_ALIASES)
+
+
 def parse_name(name):
     """`'separation.7'` -> `('separation', 7)`. Not a designation -> `(None, None)`.
 
@@ -182,19 +191,29 @@ def split_features(features, id_prop="name"):
     return regions, dmg
 
 
-def assign(region_features, damage_features, id_prop="name", min_overlap=0.01):
-    """Which regions does each damage shape overlap?
+# Where the annotator's answer to "which region does this shape belong to?" is
+# kept: on the shape itself, so it survives a save, an email and a reload. The
+# file is the record here, the same reasoning as `_provenance`.
+CHOICE_PROP = "_damage_regions"
 
-    The SOP says the `voids` field lists "all selections in the damage GeoJSON file
-    that OVERLAP your region" -- so a shape straddling two regions belongs to both,
-    which is what falls out when each annotator records their own region.
 
-    `min_overlap` is the fraction OF THE SHAPE that must lie inside a region, so a
-    hairline touch along a shared border does not list a shape in a neighbour it
-    barely grazes. Marginal ones are still reported, flagged, never dropped silently.
+def choices_from(damage_features, id_prop="name"):
+    """{shape name: [regions]} — the choices already recorded on the shapes."""
+    out = {}
+    for f in damage_features or []:
+        props = f.get("properties") or {}
+        nm = props.get(id_prop)
+        picked = props.get(CHOICE_PROP)
+        if nm is None or not isinstance(picked, (list, tuple)):
+            continue
+        vals = [str(x) for x in picked if str(x).strip()]
+        if vals:
+            out[str(nm)] = vals
+    return out
 
-    Returns {shapes: [...], regions: {name: {damage, voids}}, unassigned: [...]}
-    """
+
+def _regions_by_name(region_features, id_prop="name"):
+    """name -> geometry, with a multi-part region unioned into one body."""
     rgeo = {}
     for f in region_features or []:
         nm = (f.get("properties") or {}).get(id_prop)
@@ -203,8 +222,73 @@ def assign(region_features, damage_features, id_prop="name", min_overlap=0.01):
             continue
         nm = str(nm)
         rgeo[nm] = unary_union([rgeo[nm], g]) if nm in rgeo else g
+    return rgeo
 
-    shapes, unassigned = [], []
+
+def containment(region_features, id_prop="name", frac=0.90, margin=1.05):
+    """{region: [the regions it swallows whole]}.
+
+    `hemi` is the outline of the entire hemisphere and all 22 other regions sit
+    inside it, so EVERY damage shape drawn anywhere is also "inside hemi". Left
+    alone, hemi's `voids` becomes a copy of the whole damage file -- and under
+    mode="dominant" it is worse than noise: hemi holds 100% of the shape and gets
+    offered against the region the annotator actually drew in, so every single
+    shape becomes a question.
+
+    This is a RELATION, not a label on a region, and the difference matters. On
+    the real file `ISO` contains `SSp` (97%) and `RSP` (94%), and `dft` contains
+    `VL.2` -- but ISO and dft are ordinary regions an annotator owns and draws in.
+    Striking them out wholesale would strand every shape drawn in ISO proper. So
+    a container is only set aside for a shape that ALSO lands in something it
+    contains: the more specific region wins, and nothing else changes.
+
+    The 0.90 threshold is `topology.containment()`'s, picked from real data where
+    genuine side-by-side neighbours overlap 0% of each other and a container
+    swallows 94-100%. `margin` keeps two coincident copies of one region from
+    swallowing each other and emptying the assignment.
+    """
+    rgeo = _regions_by_name(region_features, id_prop)
+    out = {}
+    for a, ga in rgeo.items():
+        for b, gb in rgeo.items():
+            if a == b or gb.area <= 0 or ga.area < gb.area * margin:
+                continue
+            if not ga.intersects(gb):
+                continue
+            try:
+                if ga.intersection(gb).area / gb.area >= frac:
+                    out.setdefault(a, []).append(b)
+            except Exception:
+                continue
+    return {k: sorted(v) for k, v in out.items()}
+
+
+def assign(region_features, damage_features, id_prop="name", min_overlap=0.01,
+           mode="dominant", choices=None, specific_wins=True):
+    """Which regions does each damage shape belong to?
+
+    `mode="dominant"` (the lab's call, 2026-08-07): a shape is recorded against
+    the ONE region holding most of it. A shape that also reaches into a second
+    region is flagged `needsChoice` so the annotator is ASKED rather than guessed
+    at -- keep the dominant one, move it to the other, or record both. Their
+    answer rides on the shape (`CHOICE_PROP`) and is honoured verbatim from then
+    on, including across annotators.
+
+    `mode="all"` is the literal SOP reading -- "all selections that OVERLAP your
+    region", so a straddling shape belongs to both. Kept because it is what the
+    written procedure says, and because the two write different YAML.
+
+    `min_overlap` is the fraction OF THE SHAPE that must lie inside a region, so a
+    hairline touch along a shared border does not list a shape in a neighbour it
+    barely grazes. Marginal ones are still reported, flagged, never dropped silently.
+
+    Returns {shapes, regions: {name: {damage, voids}}, unassigned, needsChoice,
+    containers, mode}.
+    """
+    rgeo = _regions_by_name(region_features, id_prop)
+    encloses = containment(region_features, id_prop) if specific_wins else {}
+
+    shapes, unassigned, asks = [], [], []
     per_region = {nm: {"damage": set(), "voids": set()} for nm in rgeo}
 
     for f in damage_features or []:
@@ -225,24 +309,61 @@ def assign(region_features, damage_features, id_prop="name", min_overlap=0.01):
             if ov <= 0:
                 continue
             hits.append({"region": rname, "frac": ov / area, "area": ov})
-        hits.sort(key=lambda h: -h["frac"])
+        # Most of the shape first; ties go to the SMALLER region, so the specific
+        # one wins over the one that merely encloses it.
+        hits.sort(key=lambda h: (-h["frac"], rgeo[h["region"]].area))
         kept = [h for h in hits if h["frac"] >= min_overlap]
+
+        # Where a shape lands in both a region and something that region
+        # contains, only the contained one is recorded -- see containment().
+        reached = {h["region"] for h in kept}
+        enclosing = {h["region"] for h in kept
+                     if any(inner in reached and inner != h["region"]
+                            for inner in encloses.get(h["region"], []))}
+        for h in kept:
+            h["enclosing"] = h["region"] in enclosing
+        cand = [h["region"] for h in kept if h["region"] not in enclosing]
+        dominant = cand[0] if cand else None
+
+        # A stored answer wins -- but only for regions the shape still reaches. If
+        # it has been dragged off one since, that part of the answer is stale and
+        # is reported rather than written on.
+        asked = [str(x) for x in (choices or {}).get(nm, [])]
+        picked = [c for c in asked if c in cand]
+        stale = [c for c in asked if c not in cand]
+
+        if picked:
+            recorded = picked
+        elif mode == "all":
+            recorded = list(cand)
+        else:
+            recorded = [dominant] if dominant else []
+        needs = mode == "dominant" and len(cand) > 1 and not picked
+
         entry = {
             "name": nm, "designation": tag, "number": num,
             "area": float(area),
-            "regions": [h["region"] for h in kept],
-            "dominant": kept[0]["region"] if kept else None,
+            "regions": recorded,
+            "candidates": cand,
+            "dominant": dominant,
             "overlaps": hits,
             # things a person needs to look at rather than trust
             "marginal": [h["region"] for h in hits if h["frac"] < min_overlap],
-            "spans": len(kept) > 1,
+            # set aside because a region they contain took the shape instead
+            "enclosing": sorted(enclosing),
+            "spans": len(cand) > 1,
+            "chosen": picked or None,
+            "staleChoice": stale,
+            "needsChoice": needs,
         }
         shapes.append(entry)
-        if not kept:
+        if not cand:
             unassigned.append(entry)
-        for h in kept:
-            per_region[h["region"]]["damage"].add(tag)
-            per_region[h["region"]]["voids"].add(nm)
+        if needs:
+            asks.append(entry)
+        for rname in recorded:
+            per_region[rname]["damage"].add(tag)
+            per_region[rname]["voids"].add(nm)
 
     def _sorted_voids(v):
         return sorted(v, key=lambda s: (parse_name(s)[0] or "", parse_name(s)[1] or 0))
@@ -250,10 +371,131 @@ def assign(region_features, damage_features, id_prop="name", min_overlap=0.01):
     return {
         "shapes": shapes,
         "unassigned": unassigned,
+        "needsChoice": asks,
+        # {region: [regions it contains]} — reported so the UI can say why a
+        # region ended up with nothing rather than leaving a blank row.
+        "containment": encloses,
+        "containers": sorted(encloses),
+        "mode": mode,
         "regions": {nm: {"damage": sorted(d["damage"]),
                          "voids": _sorted_voids(d["voids"])}
                     for nm, d in per_region.items()},
     }
+
+
+# --- the SmartSheet cell --------------------------------------------------------
+#
+# The tracking sheet's Damage column is a MULTI-SELECT dropdown: one cell holds
+# several chips (`Done ×  Bubble ×  Cutoff ×`). So the useful export is not one
+# long row -- it is one CELL per region, holding the DISPLAY names, which is what
+# the dropdown's options are.
+#
+# `Done` sits in the same cell as the damage: it is the annotator's "I have been
+# through this region" tick, not a designation, so it is kept out of DESIGNATIONS
+# and out of the YAML, and only ever added here.
+DONE_LABEL = "Done"
+
+# Per-region annotation, stored on the REGION feature the way a shape stores its
+# own choice -- it is a judgement that has to survive a save and a reload.
+EXTRA_PROP = "_damage_extra"     # designations nobody can draw: cutoff, missing...
+DONE_PROP = "_damage_done"       # the Done tick
+
+# How the values reach the clipboard. Pasting multi-line text into a grid usually
+# splits it across ROWS; a quoted field is the convention that keeps it in one
+# cell. Which one SmartSheet wants is a five-second experiment, so all three are
+# offered rather than guessed at.
+SEPARATORS = {
+    "cell": lambda vals: '"' + "\n".join(vals) + '"',
+    "lines": lambda vals: "\n".join(vals),
+    "comma": lambda vals: ", ".join(vals),
+}
+DEFAULT_SEPARATOR = "cell"
+
+
+def label_of(tag) -> str:
+    d = DESIGNATIONS.get(tag)
+    return d[0] if d else str(tag)
+
+
+def _prop_of(features, id_prop, prop, cast):
+    out = {}
+    for f in features or []:
+        props = f.get("properties") or {}
+        nm = props.get(id_prop)
+        if nm is None or prop not in props:
+            continue
+        v = cast(props.get(prop))
+        if v is not None:
+            out[str(nm)] = v
+    return out
+
+
+def extras_from(region_features, id_prop="name"):
+    """{region: [tags]} — designations ticked by hand, off the region itself.
+
+    Half the vocabulary can never be drawn (`missing`, `cutoff`, `transcripts`
+    and the rest), so without this it could not reach the sheet at all.
+    """
+    def clean(v):
+        if not isinstance(v, (list, tuple)):
+            return None
+        tags = []
+        for x in v:
+            t = parse_name(x)[0]
+            if t and t not in tags:
+                tags.append(t)
+        return tags
+    return _prop_of(region_features, id_prop, EXTRA_PROP, clean)
+
+
+def done_from(region_features, id_prop="name"):
+    """{region: bool} — which regions the annotator has ticked off."""
+    return _prop_of(region_features, id_prop, DONE_PROP, lambda v: bool(v))
+
+
+def cell_values(tags, done=False) -> list:
+    """The chips for one cell: Done first, then the designations in SOP order."""
+    order = list(DESIGNATIONS)
+    seen = sorted({t for t in (tags or []) if t in DESIGNATIONS},
+                  key=order.index)
+    return ([DONE_LABEL] if done else []) + [label_of(t) for t in seen]
+
+
+def cell_text(values, sep=DEFAULT_SEPARATOR) -> str:
+    return SEPARATORS.get(sep, SEPARATORS[DEFAULT_SEPARATOR])(list(values))
+
+
+def cells(assignment, extras=None, done=None, sep=DEFAULT_SEPARATOR,
+          include_empty=False) -> list:
+    """One box per region, ready to paste into the dropdown cell.
+
+    Drawn damage and hand-ticked damage are the same thing by the time they reach
+    the sheet, so they merge here; `sources` keeps them apart for the UI, because
+    "there is a shape for this" and "someone said so" are not equally checkable.
+    """
+    extras, done = extras or {}, done or {}
+    out = []
+    for region in sorted(assignment.get("regions", {})):
+        a = assignment["regions"][region]
+        drawn = list(a["damage"])
+        typed = [t for t in extras.get(region, []) if t in DESIGNATIONS]
+        tags = sorted(set(drawn) | set(typed), key=list(DESIGNATIONS).index)
+        is_done = bool(done.get(region))
+        if not tags and not is_done and not include_empty:
+            continue
+        values = cell_values(tags, is_done)
+        out.append({
+            "region": region,
+            "done": is_done,
+            "tags": tags,
+            "labels": [label_of(t) for t in tags],
+            "drawn": drawn,
+            "typed": typed,
+            "voids": list(a["voids"]),
+            "values": values,
+            "text": cell_text(values, sep),
+        })
+    return out
 
 
 TSV_COLUMNS = ["Region", "Full name", "Annotator", "Damage", "Voids", "Enclaves", "Notes"]

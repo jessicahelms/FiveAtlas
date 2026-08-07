@@ -158,6 +158,8 @@ function pyramidTileLayer({ id, levels, tileSize, width, height, opacity, urlFor
   });
 }
 
+const EMPTY_SET = new Set();
+
 export default function Viewer({
   info, dsId, fc, mode, idProp = 'name', selectedIndexes, onEdit, onClickFeature,
   borderPicks, borderArc, onBorderEdit,
@@ -167,11 +169,13 @@ export default function Viewer({
   gapPreview, onPickGap,
   propRing, onRegionMenu,
   onGrabVertex, onReleaseDrag,
-  geneBitmap, geneBounds, stainInfo, stainChannels, layers,
+  geneBitmap, geneBounds, stainInfo, stainChannels, layers, regionsOff,
 }) {
   const L = layers || DEFAULT_LAYERS;
   const picks = borderPicks || [];
   const picksKey = picks.join('|');
+  const off = regionsOff || EMPTY_SET;
+  const offKey = [...off].sort().join('|');
   const deckRef = useRef(null);
 
   // One instance each, kept for the life of the component: a new mode object
@@ -253,8 +257,11 @@ export default function Viewer({
     selectedFeatureIndexes: selectedIndexes,
     // in split/draw mode the canvas clicks are the sketch, not a region pick
     pickable: mode !== 'split' && mode !== 'draw',
+    // A region switched off in the sidebar is still IN the file and still in this
+    // layer -- indices have to keep matching `selected` -- it is just not drawn.
     getFillColor: (f) => {
       const nm = regionName(f, idProp);
+      if (nm && off.has(nm)) return [0, 0, 0, 0];
       const pi = nm ? picks.indexOf(nm) : -1;
       if (pi >= 0) { const [r, g, b] = PICK_COLORS[Math.min(pi, 2)]; return [r, g, b, 80]; }
       const [r, g, b] = regionRgb(f, idProp);
@@ -262,6 +269,7 @@ export default function Viewer({
     },
     getLineColor: (f) => {
       const nm = regionName(f, idProp);
+      if (nm && off.has(nm)) return [0, 0, 0, 0];
       const pi = nm ? picks.indexOf(nm) : -1;
       if (pi >= 0) { const [r, g, b] = PICK_COLORS[Math.min(pi, 2)]; return [r, g, b, 255]; }
       if (selected.has(fc.features.indexOf(f))) return [255, 80, 80, 255];
@@ -276,8 +284,8 @@ export default function Viewer({
     },
     updateTriggers: {
       // colourKey so a colour change repaints -- deck caches these accessors
-      getFillColor: [picksKey, colourKey],
-      getLineColor: [selectedIndexes, picksKey, colourKey],
+      getFillColor: [picksKey, colourKey, offKey],
+      getLineColor: [selectedIndexes, picksKey, colourKey, offKey],
       getLineWidth: [selectedIndexes, picksKey],
     },
     // draggable vertex handles (ModifyMode) -- pixel-sized + white-outlined so

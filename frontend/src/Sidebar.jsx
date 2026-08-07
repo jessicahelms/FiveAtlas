@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { parseName, nextNumber, formatName } from './damage';
 
 function displayName(feature, idProp) {
   const props = (feature && feature.properties) || {};
@@ -10,7 +11,7 @@ export default function Sidebar({
   info, fc, sources, selected, onSelectName, onRegionMenu,
   mode, onToggleModify, onToggleBorder, onToggleSplit, onToggleDissolve, onToggleDraw,
   borderPicks, borderMsg, borderShared, onClearBorder, onShareBorders, onMerge,
-  splitMsg, drawMsg,
+  splitMsg, drawMsg, drawKind, onDrawKind, designations, damageAsk, onAnswerDamage,
   resample, resampleTol, onResampleTol, onApplyResample, onCancelResample,
   gapFind, gapMsg, onDissolve, onFillGap, onClearGap,
   selectedName,
@@ -19,10 +20,17 @@ export default function Sidebar({
   propEdit, propRadius, onPropEditChange,
   geomReport, onValidate, onRepair, onDismissReport, onForceExport,
   onRestoreOriginal, orientation, onOrientation,
+  onAnswerReportDamage,
+  regionsOff, onToggleRegionOff, outlinePreview, onOutline, onDismissOutline,
+  cellsReport, cellSep, cellsAll, onLoadCells, onDismissCells, onCellSep,
+  onCellsAll, onRegionDamage,
+  notesInfo, notesReport, notesScope, onNotesScope, onNotesPreview, onNotesSave,
+  onNotesCreate, onDismissNotes, identity, onIdentity,
   onLoadFile, onExport,
   snapInfo, busy, error,
 }) {
   const [confirmRestore, setConfirmRestore] = useState(false);
+  const [copiedCell, setCopiedCell] = useState(null);
   // Which coordinates to write when the view is rotated/flipped. Default is what
   // is on screen -- that is what has been edited against.
   const [exportFrame, setExportFrame] = useState('displayed');
@@ -35,6 +43,22 @@ export default function Sidebar({
   const partCount = names.reduce((m, nm) => ({ ...m, [nm]: (m[nm] || 0) + 1 }), {});
   const picks = borderPicks || [];
   const pickTag = (i) => (i === 0 ? 'A' : i === 1 ? 'B' : String(i + 1));
+
+  // Damage is an ordinary region in this list; the designation is just shown
+  // beside it, so `separation.4` reads as damage while `PAL.1` — anatomy that
+  // happens to end in a number — does not.
+  const aliases = (designations && designations.aliases) || null;
+  const desigList = (designations && designations.designations) || [];
+  const labelOf = desigList.reduce((m, d) => ({ ...m, [d.tag]: d.label }), {});
+  const damageOf = (nm) => (aliases ? parseName(nm, aliases).tag : null);
+  // drawn: true = always a shape, null = the annotator's call, false = never —
+  // those have nothing to trace and can only be a tag on the region.
+  const drawable = desigList.filter((d) => d.drawn !== false);
+  const tagOnly = desigList.filter((d) => d.drawn === false);
+  const nextDamageName = drawKind && drawKind !== 'region' && aliases
+    ? formatName(drawKind, nextNumber(names, drawKind, aliases))
+    : null;
+  const off = regionsOff || new Set();
 
   return (
     <div className="pane">
@@ -68,6 +92,12 @@ export default function Sidebar({
         <div className="section-title">
           Regions ({names.length}){mode === 'border' ? ' — click to pick' : ''}
         </div>
+        {off.size > 0 && (
+          <div className="hint dim">
+            {[...off].join(', ')} switched off — still in the file and exported,
+            but ignored by gap-finding and Check geometry, and hidden on the map.
+          </div>
+        )}
         <ul className="regions">
           {names.map((nm, i) => {
             const pi = picks.indexOf(nm);
@@ -76,6 +106,7 @@ export default function Sidebar({
             const cls = [
               selected[0] === i ? 'sel' : '',
               moved.has(nm) ? 'moved' : '',
+              off.has(nm) ? 'off' : '',
               pi === 0 ? 'pickA' : pi === 1 ? 'pickB' : pi > 1 ? 'pickX' : '',
             ].filter(Boolean).join(' ');
             return (
@@ -92,8 +123,28 @@ export default function Sidebar({
                   ? `one region in ${parts} parts — edits act on all of them; right-click to rename or delete`
                   : 'right-click to rename or delete'}
               >
-                <span>{nm}{parts > 1 ? <span className="dim"> · part {part}/{parts}</span> : null}</span>
-                <span>{pi >= 0 ? pickTag(pi) : (moved.has(nm) ? '●' : '')}</span>
+                <span>
+                  {nm}
+                  {parts > 1 ? <span className="dim"> · part {part}/{parts}</span> : null}
+                  {damageOf(nm) ? <span className="dim"> · {labelOf[damageOf(nm)]}</span> : null}
+                </span>
+                <span className="rowend">
+                  {pi >= 0 ? pickTag(pi) : (moved.has(nm) ? '●' : '')}
+                  {/* Switch a region off: it stays in the file, but the
+                      operations that assume a clean partition stop seeing it.
+                      Without this, `hemi` covering everything means no gap can
+                      ever be found. */}
+                  <button
+                    className="eye" disabled={busy}
+                    title={off.has(nm)
+                      ? 'switched off — click to use it again'
+                      : 'switch off: hide it and leave it out of gap-finding and Check geometry'}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onToggleRegionOff && onToggleRegionOff(nm);
+                    }}
+                  >{off.has(nm) ? '◍' : '◉'}</button>
+                </span>
               </li>
             );
           })}
@@ -204,17 +255,143 @@ export default function Sidebar({
         )}
 
         <button className={mode === 'draw' ? 'btn on' : 'btn'} onClick={onToggleDraw}>
-          {mode === 'draw' ? '✚ Drawing a new region' : 'Add a new region'}
+          {mode === 'draw'
+            ? (nextDamageName ? `✚ Drawing ${labelOf[drawKind] || drawKind}` : '✚ Drawing a new region')
+            : 'Add a new region or damage'}
         </button>
 
         {mode === 'draw' && (
           <div className="border-pick">
-            <div className="hint dim">
-              Trace the outline on the image — click each point, then <b>right-click
-              to finish</b> (or Enter). <b>Esc</b> throws the outline away.
-              Anything it covers is taken from the region underneath.
-            </div>
+            <label className="field">
+              <span>What are you drawing?</span>
+              <select
+                value={drawKind || 'region'}
+                disabled={busy || !onDrawKind}
+                onChange={(e) => onDrawKind && onDrawKind(e.target.value)}
+              >
+                <option value="region">Anatomical region</option>
+                {drawable.length > 0 && (
+                  <optgroup label="Damage — drawn as a shape">
+                    {drawable.map((d) => (
+                      <option key={d.tag} value={d.tag}>
+                        {d.label}{d.drawn === null ? ' (if you want it drawn)' : ''}
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
+                {/* Shown but not selectable: without them half the vocabulary
+                    looks missing; offering them would invite a shape that the
+                    SOP says has nothing to trace. */}
+                {tagOnly.length > 0 && (
+                  <optgroup label="Damage — recorded per region, never drawn">
+                    {tagOnly.map((d) => (
+                      <option key={d.tag} value={d.tag} disabled>{d.label}</option>
+                    ))}
+                  </optgroup>
+                )}
+              </select>
+            </label>
+
+            {nextDamageName ? (
+              <>
+                <div className="pick-row">
+                  <span>Will be named</span>
+                  <span className="pick-val">{nextDamageName}</span>
+                </div>
+                <div className="hint dim">
+                  Trace the damaged area — click each point, then <b>right-click to
+                  finish</b> (or Enter). <b>Esc</b> throws it away. It becomes a
+                  region like any other, but it sits <b>inside</b> the region it
+                  covers: nothing is taken away, and the two overlap on purpose.
+                  Numbering runs across the whole file, not per region.
+                </div>
+              </>
+            ) : (
+              <div className="hint dim">
+                Trace the outline on the image — click each point, then <b>right-click
+                to finish</b> (or Enter). <b>Esc</b> throws the outline away.
+                Anything it covers is taken from the region underneath.
+              </div>
+            )}
+            {!designations && (
+              <div className="hint dim">
+                (damage designations didn't load — restart the backend to draw damage)
+              </div>
+            )}
             {drawMsg && <div className="hint">{drawMsg}</div>}
+
+            {/* A shape that reaches into a second region. Damage goes to the one
+                region holding most of it, so this is a judgement call and the
+                annotator makes it now, not the geometry. */}
+            {damageAsk && (damageAsk.candidates || []).length > 1 && (
+              <div className="pts">
+                <div className="pts-head">
+                  Which region is <b>{damageAsk.name}</b> in?
+                </div>
+                <div className="hint dim">
+                  It sits in {damageAsk.candidates.length} regions — most of it in{' '}
+                  <b>{damageAsk.dominant}</b>. Recording it in both puts it in both
+                  their notes, which is what the SOP asks for when two annotators
+                  each own one side.
+                </div>
+                <div className="row">
+                  {damageAsk.candidates.map((nm) => (
+                    <button
+                      key={nm} disabled={busy}
+                      className={nm === damageAsk.dominant ? 'btn sm primary' : 'btn sm'}
+                      onClick={() => onAnswerDamage && onAnswerDamage([nm])}
+                    >
+                      {nm}{nm === damageAsk.dominant ? ' (most of it)' : ''}
+                    </button>
+                  ))}
+                  <button className="btn sm" disabled={busy}
+                    onClick={() => onAnswerDamage && onAnswerDamage([...damageAsk.candidates])}>
+                    {damageAsk.candidates.length > 2 ? `All ${damageAsk.candidates.length}` : 'Both'}
+                  </button>
+                </div>
+                <div className="hint dim">
+                  Leave it alone and it goes to {damageAsk.dominant}; you'll be shown
+                  it again in the SmartSheet review.
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* The hemisection outline, built from the regions rather than traced by
+            hand around all 22 of them. */}
+        <button className="btn" disabled={busy || !onOutline}
+          onClick={() => onOutline && onOutline({})}>
+          ⬭ Build the hemisection outline…
+        </button>
+
+        {outlinePreview && (
+          <div className="border-pick">
+            <div className="pts-head">
+              {outlinePreview.exists ? 'Rebuild' : 'Create'} “hemi” —{' '}
+              {Math.round(outlinePreview.area).toLocaleString()} px²
+            </div>
+            <div className="hint dim">
+              Wrapped around {outlinePreview.sources.length} regions
+              {outlinePreview.exists && ' (the existing one is not used as input, '
+                + 'so rebuilding does not creep outwards)'}. Damage shapes are left
+              out — they sit inside the tissue and would only pull it in.
+            </div>
+            {/* No radius or method controls, on purpose. Measured on the real
+                file: 40 px → 2000 px moves the outline area by 0.8% in total,
+                because the regions already tile the section tightly and there is
+                almost nothing left for a wider bridge to close. The knob had
+                nothing to turn, so it went. The convex hull went with it — it
+                claims 3.4% more ground by cutting across every notch.
+                `method` and `radius` are still on the route if that ever
+                changes. */}
+            <div className="row">
+              <button className="btn sm primary" disabled={busy}
+                onClick={() => onOutline && onOutline({ apply: true })}>
+                {outlinePreview.exists ? 'Replace hemi' : 'Create hemi'}
+              </button>
+              <button className="btn sm" onClick={onDismissOutline} disabled={busy}>Cancel</button>
+            </div>
           </div>
         )}
 
@@ -352,6 +529,319 @@ export default function Sidebar({
             </div>
           </div>
         )}
+        {/* The sheet's Damage column is a MULTI-SELECT dropdown — one cell holds
+            several chips — so what is worth copying is a cell per region, not a
+            row. `Done` rides in the same cell; it is the annotator's tick, not a
+            designation, so it never reaches the YAML. */}
+        <div className="slabel">SmartSheet damage</div>
+        <button className="btn" onClick={onLoadCells} disabled={busy}>
+          ⎘ Damage cells, region by region…
+        </button>
+
+        {cellsReport && (
+          <div className="geomrep">
+            <div className="hint dim">
+              One box per region — copy it, click that region's Damage cell in
+              SmartSheet, paste. The names match the dropdown's own options.
+            </div>
+            <div className="row">
+              {(cellsReport.separators || []).map((s) => (
+                <button key={s} disabled={busy}
+                  className={`btn sm${cellSep === s ? ' on' : ''}`}
+                  title={s === 'cell' ? 'quoted, so a grid keeps it in ONE cell'
+                    : s === 'lines' ? 'one value per line, unquoted'
+                      : 'comma separated'}
+                  onClick={() => onCellSep && onCellSep(s)}>
+                  {s === 'cell' ? 'One cell' : s === 'lines' ? 'Lines' : 'Commas'}
+                </button>
+              ))}
+            </div>
+            <div className="hint dim">
+              If a paste lands as separate <b>rows</b> instead of chips in one
+              cell, switch format and paste again — SmartSheet is picky and which
+              one it wants is quicker to try than to look up.
+            </div>
+            <label className="chk">
+              <input type="checkbox" checked={!!cellsAll} disabled={busy}
+                onChange={(e) => onCellsAll && onCellsAll(e.target.checked)} />
+              <span>Show every region, not only those with damage</span>
+            </label>
+
+            {/* Shapes still waiting on an answer. Promised when one was drawn
+                and left alone — this is where it comes back. */}
+            {(cellsReport.needsChoice || []).map((s) => (
+              <div className="pts" key={`ask-${s.name}`}>
+                <div className="pts-head">Which region is <b>{s.name}</b> in?</div>
+                <div className="hint dim">
+                  {(s.overlaps || []).filter((o) => s.candidates.includes(o.region))
+                    .map((o) => `${o.region} ${(o.frac * 100).toFixed(0)}%`).join(' · ')}
+                  {' — '}unanswered, so it is counted in <b>{s.dominant}</b>.
+                </div>
+                <div className="row">
+                  {(s.candidates || []).map((nm) => (
+                    <button key={nm} disabled={busy}
+                      className={nm === s.dominant ? 'btn sm primary' : 'btn sm'}
+                      onClick={() => onAnswerReportDamage && onAnswerReportDamage([nm], s.name)}>
+                      {nm}
+                    </button>
+                  ))}
+                  <button className="btn sm" disabled={busy}
+                    onClick={() => onAnswerReportDamage
+                      && onAnswerReportDamage([...(s.candidates || [])], s.name)}>
+                    {(s.candidates || []).length > 2 ? `All ${s.candidates.length}` : 'Both'}
+                  </button>
+                </div>
+              </div>
+            ))}
+            {(cellsReport.unassigned || []).length > 0 && (
+              <div className="hint lvl-warn">
+                {cellsReport.unassigned.length} shape(s) overlap no region, so they
+                reach no cell: {cellsReport.unassigned.map((s) => s.name).join(', ')}
+              </div>
+            )}
+
+            {(cellsReport.cells || []).length === 0 && (
+              <div className="hint dim">
+                No region has damage yet — draw some, or tick a type below after
+                turning on “show every region”.
+              </div>
+            )}
+
+            {(cellsReport.cells || []).map((c) => {
+              const spare = (cellsReport.designations || [])
+                .filter((d) => !c.tags.includes(d.tag));
+              return (
+                <div className="pts" key={c.region}>
+                  <div className="pts-head">{c.region}</div>
+                  <label className="chk">
+                    <input type="checkbox" checked={!!c.done} disabled={busy}
+                      onChange={(e) => onRegionDamage
+                        && onRegionDamage(c.region, { done: e.target.checked })} />
+                    <span>{cellsReport.doneLabel || 'Done'}</span>
+                  </label>
+                  <div className="picks">
+                    {c.tags.map((t) => {
+                      const drawn = c.drawn.includes(t);
+                      const lab = (cellsReport.designations
+                        .find((d) => d.tag === t) || {}).label || t;
+                      return (
+                        <span key={t} className="chip" title={drawn
+                          ? 'from a shape you drew — delete the shape to remove it'
+                          : 'ticked by hand'}>
+                          {lab}
+                          {drawn ? <span className="dim"> ◆</span> : (
+                            <button className="x" disabled={busy}
+                              title="remove"
+                              onClick={() => onRegionDamage && onRegionDamage(
+                                c.region, { extra: c.typed.filter((x) => x !== t) })}>
+                              ×
+                            </button>
+                          )}
+                        </span>
+                      );
+                    })}
+                    {c.tags.length === 0 && <span className="hint dim">no damage yet</span>}
+                  </div>
+                  {spare.length > 0 && (
+                    <select value="" disabled={busy}
+                      onChange={(e) => {
+                        if (!e.target.value) return;
+                        onRegionDamage && onRegionDamage(c.region,
+                          { extra: [...c.typed, e.target.value] });
+                      }}>
+                      <option value="">+ add a damage type…</option>
+                      {spare.map((d) => (
+                        <option key={d.tag} value={d.tag}>
+                          {d.label}{d.drawn === false ? ' (never drawn)' : ''}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                  <textarea className="pathin" readOnly rows={Math.min(6, Math.max(2, c.values.length + 1))}
+                    value={c.text}
+                    style={{ width: '100%', fontFamily: 'monospace', fontSize: '11px' }}
+                    onFocus={(e) => e.target.select()} />
+                  <button className="btn sm primary" disabled={busy}
+                    onClick={() => {
+                      // clipboard writes need the gesture itself, not a later
+                      // continuation, so this happens in the handler
+                      navigator.clipboard.writeText(c.text)
+                        .then(() => setCopiedCell(c.region))
+                        .catch(() => setCopiedCell(null));
+                    }}>
+                    {copiedCell === c.region ? 'Copied ✓' : `Copy ${c.region}`}
+                  </button>
+                  {c.voids.length > 0 && (
+                    <div className="hint dim">shapes: {c.voids.join(', ')}</div>
+                  )}
+                </div>
+              );
+            })}
+            <div className="row">
+              <button className="btn sm" onClick={onDismissCells} disabled={busy}>Close</button>
+            </div>
+          </div>
+        )}
+
+
+        {/* The two YAMLs. They live in the dataset folder — which everything
+            else here only reads — and they are shared, so the panel always says
+            the exact path, previews as a diff, and never creates a file by
+            itself. */}
+        <div className="slabel">Annotation notes</div>
+        {!notesInfo ? (
+          <div className="hint dim">looking in the dataset folder…</div>
+        ) : (
+          <>
+            <div className="mono">{notesInfo.files.notes.path}</div>
+            {!notesInfo.files.notes.found ? (
+              <>
+                <div className="hint lvl-warn">
+                  No annotation.notes.yaml in this folder. It is <b>shared per
+                  sample</b>, so if one exists elsewhere, open that folder rather
+                  than making a second copy here.
+                </div>
+                <button className="btn" onClick={onNotesCreate} disabled={busy}>
+                  Create it here
+                </button>
+              </>
+            ) : (
+              <>
+                <div className="hint dim">
+                  {(notesInfo.files.notes.regions || []).length} regions in the file
+                  {notesInfo.files.metadata.found
+                    ? ` · metadata.yml roster: ${(notesInfo.files.metadata.annotators || []).join(', ') || 'empty'}`
+                    : ' · no metadata.yml'}
+                </div>
+                <label className="field">
+                  <span>Annotator (written into the file)</span>
+                  <input
+                    type="text" value={(identity && identity.name) || ''}
+                    disabled={busy}
+                    placeholder={identity && identity.account
+                      ? `your name — not the "${identity.account}" account`
+                      : 'your name'}
+                    onChange={(e) => onIdentity && onIdentity(e.target.value, false)}
+                    onBlur={(e) => onIdentity && onIdentity(e.target.value, true)}
+                  />
+                </label>
+                {identity && !identity.name && (
+                  <div className="hint dim">
+                    Left blank, the annotator fields and the metadata.yml roster
+                    are not touched — only damage and voids are written. Your
+                    Windows account is never written into a shared file as a name.
+                  </div>
+                )}
+                <div className="row">
+                  <button className={`btn sm${notesScope === 'mine' ? ' on' : ''}`}
+                    disabled={busy} title="only the regions your edits touched"
+                    onClick={() => onNotesScope && onNotesScope('mine')}>
+                    Only what I edited
+                  </button>
+                  <button className={`btn sm${notesScope === 'all' ? ' on' : ''}`}
+                    disabled={busy} title="every region in the geometry"
+                    onClick={() => onNotesScope && onNotesScope('all')}>
+                    All regions
+                  </button>
+                </div>
+                <button className="btn" onClick={onNotesPreview} disabled={busy}>
+                  Preview notes changes…
+                </button>
+              </>
+            )}
+          </>
+        )}
+
+        {notesReport && (
+          <div className="geomrep">
+            {(notesReport.written || []).length > 0 && (
+              <div className="hint mono ok">
+                written: {notesReport.written.map((w) => w.path).join(', ')}
+              </div>
+            )}
+            {(notesReport.skipped || []).map((s, i) => (
+              <div className="hint lvl-warn" key={i}>
+                {s.file} not written — {
+                  s.reason === 'changed-on-disk'
+                    ? 'it changed on disk since this preview. Someone else has saved '
+                      + 'to it. Preview again to see their version first.'
+                    : s.reason === 'unexpected-changes'
+                      ? 'the round-trip would rewrite lines nobody edited, so the '
+                        + 'save was refused rather than reformatting a shared file.'
+                      : s.reason === 'nothing-to-write' ? 'nothing to change.'
+                        : s.reason}
+              </div>
+            ))}
+            {/* The commonest confusing case: scope is "mine", but this file
+                carries no edits of yours yet, so there is correctly nothing to
+                write. Say that, rather than a bare "no changes". */}
+            {notesScope === 'mine' && (notesReport.workedOn || []).length === 0 && (
+              <div className="hint dim">
+                Nothing in this file is recorded as yours yet — the trail it
+                carries names no edits from your account. Edit a region or draw
+                damage first, or switch to <b>All regions</b>.
+              </div>
+            )}
+            {Object.entries(notesReport.files || {}).map(([key, f]) => (
+              <div key={key} className="pts">
+                <div className="pts-head">{key === 'notes' ? 'annotation.notes.yaml' : 'metadata.yml'}</div>
+                <div className="mono">{f.path}</div>
+                {!f.found ? (
+                  <div className="hint dim">not in this folder — nothing written</div>
+                ) : f.unreadable ? (
+                  <div className="hint lvl-warn">
+                    This file is empty or not valid YAML, so nothing can be written
+                    to it. Open it and check before saving — it may have been
+                    truncated by an interrupted copy.
+                  </div>
+                ) : f.unchanged ? (
+                  <div className="hint dim">no changes</div>
+                ) : (
+                  <>
+                    <div className="hint dim">
+                      {(f.changes || []).length} change(s)
+                      {key === 'notes' && notesReport.workedOn
+                        ? ` · scope: ${notesScope === 'all' ? 'all regions'
+                          : `${notesReport.workedOn.length} region(s) you edited`}`
+                        : ''}
+                    </div>
+                    {(f.unexpected || []).length > 0 && (
+                      <div className="hint lvl-warn">
+                        {f.unexpected.length} line(s) changed that no edit accounts
+                        for — saving is refused. This means the round-trip is
+                        rewriting the file, not that your edit is wrong.
+                      </div>
+                    )}
+                    {(f.missingRegions || []).length > 0 && (
+                      <div className="hint lvl-warn">
+                        not in the YAML, so not written: {f.missingRegions.join(', ')}
+                      </div>
+                    )}
+                    <pre className="diff">
+                      {(f.diff || []).map((ln, i) => (
+                        <div key={i} className={
+                          ln.startsWith('+++') || ln.startsWith('---') ? 'dim'
+                            : ln.startsWith('+') ? 'add'
+                              : ln.startsWith('-') ? 'del'
+                                : ln.startsWith('@@') ? 'hunk' : ''
+                        }>{ln}</div>
+                      ))}
+                    </pre>
+                  </>
+                )}
+              </div>
+            ))}
+            <div className="row">
+              <button className="btn sm primary" onClick={() => onNotesSave && onNotesSave()}
+                disabled={busy || !Object.values(notesReport.files || {})
+                  .some((f) => f.found && !f.unchanged && !(f.unexpected || []).length)}>
+                Save to the dataset folder
+              </button>
+              <button className="btn sm" onClick={onDismissNotes} disabled={busy}>Close</button>
+            </div>
+          </div>
+        )}
+
         <div className="slabel">Export</div>
         {rotated && (
           <>
