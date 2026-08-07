@@ -265,7 +265,15 @@ def clean_geom(geom, spike=2.0, smooth=True):
         # smooth: prune relative shards (boolean crumbs next to a big region).
         # gentle: keep everything real, drop only sub-pixel specks -- a border move
         # can legitimately leave B as body+sliver sharing an edge.
-        cutoff = max(p.area for p in parts) * 0.002 if smooth else 25.0
+        #
+        # The relative cutoff is CAPPED in absolute terms. Uncapped it scales with
+        # the region, so the bigger a region is the bigger the islands it eats:
+        # 0.2% of a 9,000,000 px^2 structure is 18,000 px^2, which silently deleted
+        # real satellite lobes on every LOAD of the user's own file -- no error, no
+        # warning, and persisted by the next Save. A numerical crumb left by a
+        # boolean op is a handful of square pixels; anything appreciably larger is
+        # somebody's anatomy, and this function has no business deciding otherwise.
+        cutoff = min(max(p.area for p in parts) * 0.002, 100.0) if smooth else 25.0
         kept = [p for p in parts if p.area >= cutoff]
         if kept:
             g = unary_union(kept) if len(kept) > 1 else kept[0]
@@ -411,6 +419,55 @@ def region_gap(features, id_prop, region_a, region_b):
     if region_a not in idx or region_b not in idx:
         raise ValueError(f"region not found: {region_a!r}/{region_b!r}")
     return float(_body(features, idx[region_a]).distance(_body(features, idx[region_b])))
+
+
+# A region is "inside" another when this much of its area is swallowed. On real
+# data the separation is total: genuine side-by-side neighbours overlap 0% of the
+# smaller (they only touch), while a container swallows 94-100% of its contents.
+# Anywhere in between would do; 90% sits in the empty middle of that gap.
+CONTAINED_FRAC = 0.90
+
+
+def containment(features, id_prop, names, thresh=CONTAINED_FRAC):
+    """The first picked pair where one region simply contains the other.
+
+    Sharing a border assumes two regions that sit SIDE BY SIDE and meet along a
+    line. Given a container and its contents -- an outline of the whole hemisphere
+    and a structure within it -- there is no such line: the nearest-region
+    partition has nothing to divide and shreds the overlap into a fan of slivers.
+    It used to do that silently, and the only way to find out was to look at the
+    picture afterwards.
+
+    Returns {outer, inner, frac} for the worst offending pair, or None.
+    """
+    idx = _index_all(features, id_prop)
+    sel = [str(n) for n in names if str(n) in idx]
+    worst = None
+    for i in range(len(sel)):
+        for j in range(i + 1, len(sel)):
+            try:
+                A, B = _body(features, idx[sel[i]]), _body(features, idx[sel[j]])
+                a, b = sel[i], sel[j]
+                if A.area < B.area:                     # A is always the bigger
+                    A, B, a, b = B, A, b, a
+                if B.area <= 0 or not A.intersects(B):
+                    continue
+                frac = A.intersection(B).area / B.area
+            except Exception:
+                continue
+            if frac >= thresh and (worst is None or frac > worst["frac"]):
+                worst = {"outer": a, "inner": b, "frac": round(float(frac), 4)}
+    return worst
+
+
+def containment_message(c) -> str:
+    """Why the pick was refused, in the words the user would use."""
+    pct = f"{100 * c['frac']:.0f}%"
+    return (f'"{c["outer"]}" contains "{c["inner"]}"'
+            + (f" ({pct} of it)" if c["frac"] < 0.999 else "")
+            + " - one is inside the other, so there is no border between them. "
+              "Sharing a border needs two regions that sit side by side. "
+              f'Unpick "{c["outer"]}" and choose a neighbour of "{c["inner"]}".')
 
 
 def summary(features, id_prop="name", grid=4.0):
@@ -829,8 +886,31 @@ def _distribute(body, olds):
 
 
 def _write_body(out, features, ks, body):
-    """Write a recomputed region body back onto the features that carry its name."""
-    for k, g in _distribute(body, [(k, _geom_at(features, k)) for k in ks]).items():
+    """Write a recomputed region body back onto the features that carry its name.
+
+    Refuses to serialize an empty geometry over a feature that had one. Without
+    that check a lobe absorbed by a neighbour was written out as
+    {"type": "Polygon", "coordinates": []}: the region vanished from the map, an
+    empty husk stayed in the file, and the next Save persisted the loss. Every
+    whole-region operation (move_border, partition_regions, snap_to_edits) funnels
+    through here, and each guarded only the union body -- so a multi-lobe region
+    could lose a whole lobe with nothing raised anywhere.
+
+    Raising is right rather than skipping the write: the caller's body no longer
+    describes the same set of features, so a partial write would leave the file
+    internally inconsistent. Callers already surface ValueError to the user.
+    """
+    olds = [(k, _geom_at(features, k)) for k in ks]
+    shares = _distribute(body, olds)
+    prior = dict(olds)
+    for k, g in shares.items():
+        if (g is None or g.is_empty) and not prior.get(k, Polygon()).is_empty:
+            props = (features[k].get("properties") or {})
+            name = props.get("name") or props.get("acronym") or f"feature {k}"
+            raise ValueError(
+                f"that edit would erase {name!r} (one of its parts ends up empty); "
+                "nothing was changed")
+    for k, g in shares.items():
         out[k]["geometry"] = mapping(g)
 
 

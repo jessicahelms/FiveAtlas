@@ -10,6 +10,12 @@ from pathlib import Path
 BACKEND_DIR = Path(__file__).resolve().parent
 APP_DIR = BACKEND_DIR.parent                 # atlas_editor/
 
+# Stamped into every provenance entry, so a region file records which build made
+# each edit. build_release.ps1 exports FIVEATLAS_VERSION (FiveAtlas.spec reads the
+# same variable for the bundle version), so a build from source agrees with the
+# filename; the literal is the fallback for a plain `python -m uvicorn` run.
+VERSION = os.environ.get("FIVEATLAS_VERSION") or "0.4.1"
+
 # PyInstaller unpacks bundled data to sys._MEIPASS; from source it's the app dir.
 FROZEN = bool(getattr(sys, "frozen", False))
 BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", str(APP_DIR)))

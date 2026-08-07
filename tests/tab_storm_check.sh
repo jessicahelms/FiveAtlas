@@ -42,14 +42,25 @@ export ATLAS_PORT="8058"
 unset ATLAS_NO_BROWSER
 
 echo "launching $LAUNCHES times in quick succession..."
+PIDS=""
 for _ in $(seq 1 "$LAUNCHES"); do
     "$APP" >/dev/null 2>&1 &
-    sleep 0.5
+    PIDS="$PIDS $!"
+    # No sleep. A real storm launches in milliseconds, and the breaker's
+    # read-modify-write of its stamp file is not atomic -- spacing the launches
+    # out serialises exactly the race that defeats it, so a spaced-out harness
+    # passes while the thing it is guarding still fails in production.
 done
 
 # Give the last starter time to reach its browser-open point before counting.
-sleep 8
-pkill -f "$(basename "$APP")" 2>/dev/null || true
+sleep 10
+
+# Kill the PIDs we started, NOT `pkill -f FiveAtlas`: -f matches the whole
+# command line, and this script's own argv contains the app path, so pkill
+# SIGTERMed the script itself before it could count anything or run either
+# assertion. The check appeared to work and had never once completed.
+for p in $PIDS; do kill -9 "$p" 2>/dev/null || true; done
+wait 2>/dev/null || true
 sleep 1
 
 N=$(wc -l < "$TALLY" 2>/dev/null | tr -d '[:space:]')

@@ -32,6 +32,10 @@ from fastapi.staticfiles import StaticFiles
 import config
 import datasets as ds
 import geo
+from PIL import Image as PILImage
+
+import orientation as ORI
+import provenance
 import topology
 from transcripts import GeneDensity
 from stains import StainStack
@@ -42,7 +46,13 @@ DEFAULT_GENES = ["Slc17a7", "Calb2", "Pvalb"]
 app = FastAPI(title="FiveAtlas")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],          # dev: Vite serves on a different port
+    # Loopback only. This was "*", which on an unauthenticated local server means
+    # ANY page open in the user's browser could call this API while FiveAtlas is
+    # running -- read the dataset list, overwrite a working copy, or pop a native
+    # file dialog on their desktop. The regex still covers dev, where Vite serves
+    # the UI on :5173 and proxies /api here, and the packaged app, which picks a
+    # free port at startup.
+    allow_origin_regex=r"^http://(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$",
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -105,10 +115,28 @@ def list_datasets():
     return ds.all_datasets()
 
 
+def _evict(ds_id: str):
+    """Drop the cached readers for a dataset AND close their file handles.
+
+    Popping alone is not enough: tifffile's TiffFile, zipfile and zarr's ZipStore
+    have no __del__ and sit in reference cycles, so the OS handle survived until
+    some later GC. On Windows that leaves the dataset folder locked -- close a
+    dataset, try to move or delete the folder, and Explorer says it is open in
+    another program, with no way to release it short of quitting FiveAtlas.
+    """
+    for cache in (_PYR, _GENES, _STAINS):
+        obj = cache.pop(ds_id, None)
+        closer = getattr(obj, "close", None)
+        if callable(closer):
+            try:
+                closer()
+            except Exception as e:
+                print(f"[evict] {ds_id}: {type(e).__name__}: {e}", file=sys.stderr)
+
+
 @app.delete("/api/datasets/{ds_id}")
 def close_dataset(ds_id: str):
-    for cache in (_PYR, _GENES, _STAINS):
-        cache.pop(ds_id, None)
+    _evict(ds_id)
     ds.forget(ds_id)
     return {"closed": ds_id, "datasets": ds.all_datasets()}
 
@@ -181,9 +209,10 @@ async def open_dataset(request: Request):
         desc = ds.open_path(path)
     except Exception as e:
         raise HTTPException(400, f"scan failed: {e}")
-    # a re-scan can change file paths -> drop cached readers for this dataset
-    for cache in (_PYR, _GENES, _STAINS):
-        cache.pop(desc["id"], None)
+    # a re-scan can change file paths -> drop cached readers for this dataset.
+    # Close them, don't just drop them: re-opening a dataset whose files moved
+    # would otherwise leave the OLD paths locked for the rest of the session.
+    _evict(desc["id"])
     return {"id": desc["id"], "label": desc["label"],
             "sources": desc["sources"], "pixelSizeUm": desc.get("pixel_size_um")}
 
@@ -212,16 +241,39 @@ def _regions_extent(fc):
     return max(int(mx) + 100, 512), max(int(my) + 100, 512)
 
 
+def _frame_tag(frame: str, o) -> str:
+    """Filename suffix saying which frame an export is in.
+
+    Empty when nothing was rotated, so an ordinary export keeps the name it has
+    always had; otherwise the name itself distinguishes the two files, since the
+    same regions can be exported twice in different frames.
+    """
+    if ORI.is_identity(o):
+        return ""
+    if frame == "original":
+        return "_original"
+    o = ORI.normalise(o)
+    return (f"_rot{o['rot']}" if o["rot"] else "") \
+        + ("_flipH" if o["flipH"] else "") + ("_flipV" if o["flipV"] else "")
+
+
 @app.get("/api/datasets/{ds_id}/info")
 def info(ds_id: str):
     try:
         d = ds.get_dataset(ds_id)
     except KeyError:
         raise HTTPException(404, "unknown dataset")
+    o = ORI.get(ds_id)
     try:
         p = pyramid(ds_id)
+        nfo = p.info()
+        # The canvas is what the user SEES, so a quarter turn swaps the extent.
+        # Everything downstream (deck's view, the tile grid, region coords) works
+        # in that displayed frame.
+        w, h = ORI.out_size(nfo["width"], nfo["height"], o)
+        nfo["width"], nfo["height"] = int(w), int(h)
         return {"id": ds_id, "label": d["label"], "idProp": d["id_prop"],
-                "pixelSizeUm": d.get("pixel_size_um"), **p.info()}
+                "pixelSizeUm": d.get("pixel_size_um"), "orientation": o, **nfo}
     except Exception:
         # no imagery (offline drive / stub dataset): size the canvas to the regions
         fc, _ = geo.load_regions(ds_id)
@@ -240,7 +292,7 @@ def tile(ds_id: str, z: int, x: int, y: int, plane: Optional[int] = None):
     except KeyError:
         raise HTTPException(404, "unknown dataset")
     level = (p.nlevels - 1) - z
-    png = p.tile_png(level, x, y, plane)
+    png = p.tile_png(level, x, y, plane, orient=ORI.get(ds_id))
     if png is None:
         return Response(status_code=204)
     return Response(content=png, media_type="image/png",
@@ -273,10 +325,33 @@ async def put_regions(ds_id: str, request: Request):
         ds.get_dataset(ds_id)
     except KeyError:
         raise HTTPException(404, "unknown dataset")
-    fc = await request.json()
+    body = await request.json()
+    # Body is the FeatureCollection itself (original contract), or {fc, actions}
+    # where `actions` are the edits the client made without a round trip --
+    # renames, colour changes, deletions, dragged points. They have no endpoint
+    # to stamp them, so they are recorded here, at the save that commits them.
+    if isinstance(body, dict) and body.get("type") == "FeatureCollection":
+        fc, actions = body, []
+    else:
+        fc = (body or {}).get("fc") or {}
+        actions = (body or {}).get("actions") or []
+    # Refuse to save something that is not a FeatureCollection. Without this, a
+    # body of null/{}/[] resolved to fc={} and was written straight over the
+    # working copy: the frontend sets fc=null while a dataset loads and the Save
+    # button is live during that window, so switching datasets and clicking Save
+    # too early silently replaced that dataset's edits with an empty file.
+    if not isinstance(fc, dict) or not isinstance(fc.get("features"), list):
+        raise HTTPException(
+            400, "expected a FeatureCollection (or {fc, actions}) with a "
+                 "'features' list; refusing to overwrite the working copy")
+    for a in actions if isinstance(actions, list) else []:
+        if isinstance(a, dict) and a.get("action"):
+            provenance.stamp(fc, a["action"], a.get("detail"), a.get("regions"))
+    provenance.stamp(fc, "save", f"{len(fc.get('features', []))} regions")
     res = geo.save_edited(ds_id, fc)
     return {"saved": res["saved"], "version": res["version"],
-            "versions": res["versions"], "features": len(fc.get("features", []))}
+            "versions": res["versions"], "features": len(fc.get("features", [])),
+            "provenance": provenance.trail(fc)}
 
 
 @app.post("/api/datasets/{ds_id}/regions/restore-original")
@@ -293,8 +368,93 @@ def regions_restore_original(ds_id: str):
         raise HTTPException(422, str(e))
     except Exception as e:
         raise HTTPException(500, f"restore failed: {e}")
-    return {"type": "FeatureCollection", "features": res["fc"].get("features", []),
+    return {**provenance.stamped(res["fc"].get("features", []), res["fc"],
+                                 "restore-original", Path(res["source"]).name),
             "source": res["source"], "backup": res["backup"], "count": res["features"]}
+
+
+@app.get("/api/datasets/{ds_id}/orientation")
+def get_orientation(ds_id: str):
+    try:
+        ds.get_dataset(ds_id)
+    except KeyError:
+        raise HTTPException(404, "unknown dataset")
+    return ORI.get(ds_id)
+
+
+@app.put("/api/datasets/{ds_id}/orientation")
+async def put_orientation(ds_id: str, request: Request):
+    """Rotate/flip the whole dataset -- image AND regions -- because the slide was
+    imaged the wrong way up. Body: {rot, flipH, flipV, fc?}.
+
+    Regions are stored in the DISPLAYED frame, with `_orientation` recording which
+    frame that is. Changing orientation therefore takes them back to the original
+    frame and forward into the new one, rather than transforming twice.
+    """
+    try:
+        ds.get_dataset(ds_id)
+    except KeyError:
+        raise HTTPException(404, "unknown dataset")
+    body = await request.json()
+    want = ORI.normalise(body)
+    have = ORI.get(ds_id)
+
+    fc = (body or {}).get("fc") or geo.load_regions(ds_id)[0]
+    have = ORI.normalise(fc.get("_orientation") or have)
+
+    try:
+        p = pyramid(ds_id)
+        W0, H0 = p.info()["width"], p.info()["height"]
+    except Exception:                       # no imagery: size from the regions
+        w, h = _regions_extent(fc)
+        W0, H0 = ORI.out_size(w, h, ORI.invert(have))
+
+    feats = fc.get("features", [])
+    if not ORI.is_identity(have):           # back to the file's original frame
+        dw, dh = ORI.out_size(W0, H0, have)
+        feats = ORI.transform_features(feats, ORI.invert(have), dw, dh)
+    if not ORI.is_identity(want):           # forward into the new one
+        feats = ORI.transform_features(feats, want, W0, H0)
+
+    out = provenance.stamped(feats, fc, "orientation",
+                             f"rot {want['rot']}°"
+                             + (" flipH" if want["flipH"] else "")
+                             + (" flipV" if want["flipV"] else ""))
+    out["_orientation"] = want
+    ORI.put(ds_id, want)
+    geo.save_edited(ds_id, out)
+    w, h = ORI.out_size(W0, H0, want)
+    return {**out, "orientation": want, "width": int(w), "height": int(h)}
+
+
+@app.get("/api/identity")
+def get_identity():
+    """Who edits are attributed to. The account is read-only -- a display name on
+    its own could be anyone's, and a chain of custody has to say who really made
+    the change."""
+    return {"name": provenance.display_name(), "account": provenance.account_name()}
+
+
+@app.post("/api/identity")
+async def set_identity(request: Request):
+    body = await request.json()
+    name = (body or {}).get("name")
+    if name is None:
+        raise HTTPException(400, "need 'name'")
+    return {"name": provenance.set_display_name(name),
+            "account": provenance.account_name()}
+
+
+@app.post("/api/datasets/{ds_id}/regions/history")
+async def regions_history(ds_id: str, request: Request):
+    """The edit trail carried by the regions themselves. Body: {fc?}."""
+    try:
+        ds.get_dataset(ds_id)
+    except KeyError:
+        raise HTTPException(404, "unknown dataset")
+    body = await request.json()
+    fc = (body or {}).get("fc") or geo.load_regions(ds_id)[0]
+    return {**provenance.summary(fc), "entries": provenance.trail(fc)}
 
 
 @app.get("/api/datasets/{ds_id}/regions/versions")
@@ -324,6 +484,10 @@ async def snap(ds_id: str, request: Request):
         result = geo.run_snap(ds_id, before, after, moved=moved, tol=tol)
     except Exception as e:  # surface engine errors to the client
         raise HTTPException(500, f"snap failed: {e}")
+    provenance.carry(result, after)
+    provenance.stamp(result, "snap-neighbours",
+                     ", ".join(str(m) for m in moved) or None,
+                     moved)
     return JSONResponse(result)
 
 
@@ -347,12 +511,20 @@ async def shared_border(ds_id: str, request: Request):
         gap_px = topology.region_gap(fc["features"], d["id_prop"], str(a), str(b))
     except ValueError as e:
         raise HTTPException(422, str(e))
+    # Picking is not an edit, so this reports rather than refuses -- the user finds
+    # out the moment they pick the pair, instead of after the geometry is wrecked.
+    # The endpoints that actually change geometry refuse outright.
+    contained = topology.containment(fc["features"], d["id_prop"], [str(a), str(b)])
     pair_meta = {
         "regionA": a, "regionB": b,
         "gapPx": round(gap_px, 2),
         "touching": gap_px <= touch_tol,
         "touchTol": touch_tol,
     }
+    if contained:
+        return {**pair_meta, "arcs": [], "bridged": False,
+                "contained": contained,
+                "message": topology.containment_message(contained)}
     if not body.get("bridge", True):
         # exact coincident border only (no geometry change)
         arcs = topology.border_between(fc["features"], d["id_prop"], str(a), str(b), grid)
@@ -389,13 +561,17 @@ async def move_border(ds_id: str, request: Request):
         drag_start = body.get("orig")     # legacy name; still means this drag's start arc
     if not fc or not a or not b or not pts:
         raise HTTPException(400, "need 'fc', 'regionA', 'regionB', 'points'")
+    contained = topology.containment(fc["features"], d["id_prop"], [str(a), str(b)])
+    if contained:
+        raise HTTPException(422, topology.containment_message(contained))
     try:
         feats = topology.move_border(fc["features"], d["id_prop"], str(a), str(b), pts, drag_start=drag_start)
     except ValueError as e:  # geometry couldn't be divided -> client-fixable
         raise HTTPException(422, str(e))
     except Exception as e:
         raise HTTPException(500, f"move-border failed: {e}")
-    return {"type": "FeatureCollection", "features": feats}
+    return provenance.stamped(feats, fc, "move-border",
+                              f"{a} / {b}", [str(a), str(b)])
 
 
 @app.post("/api/datasets/{ds_id}/regions/partition")
@@ -414,13 +590,19 @@ async def regions_partition(ds_id: str, request: Request):
         raise HTTPException(400, "need 'regions': at least two region names")
     fc = body.get("fc") or geo.load_regions(ds_id)[0]
     tol = float(body.get("tol", 40.0))
+    # Refuse a container/content pick rather than shredding the overlap into
+    # slivers. This is the mutating call, so it changes nothing and says why.
+    contained = topology.containment(fc["features"], d["id_prop"], names)
+    if contained:
+        raise HTTPException(422, topology.containment_message(contained))
     try:
         res = topology.partition_regions(fc["features"], d["id_prop"], names, tol=tol)
     except ValueError as e:
         raise HTTPException(422, str(e))
     except Exception as e:
         raise HTTPException(500, f"partition failed: {e}")
-    return {"type": "FeatureCollection", "features": res["features"],
+    return {**provenance.stamped(res["features"], fc, "share-borders",
+                                 " + ".join(str(n) for n in names), names),
             "borders": res["borders"]}
 
 
@@ -445,7 +627,9 @@ async def regions_resample(ds_id: str, request: Request):
         raise HTTPException(422, str(e))
     except Exception as e:
         raise HTTPException(500, f"resample failed: {e}")
-    return {"type": "FeatureCollection", "features": res["features"],
+    return {**provenance.stamped(res["features"], fc, "resample",
+                                 f"{' + '.join(str(n) for n in names)} at {res['tol']:g} px",
+                                 names),
             "counts": res["counts"], "tol": res["tol"],
             "handles": res.get("handles"), "arcPoints": res.get("arcPoints")}
 
@@ -468,7 +652,10 @@ async def regions_merge(ds_id: str, request: Request):
         raise HTTPException(422, str(e))
     except Exception as e:
         raise HTTPException(500, f"merge failed: {e}")
-    return {"type": "FeatureCollection", "features": res["features"], "name": res["name"]}
+    return {**provenance.stamped(res["features"], fc, "merge",
+                                 f"{' + '.join(str(n) for n in names)} -> {res['name']}",
+                                 names),
+            "name": res["name"]}
 
 
 @app.post("/api/datasets/{ds_id}/regions/split")
@@ -489,7 +676,10 @@ async def regions_split(ds_id: str, request: Request):
         raise HTTPException(422, str(e))
     except Exception as e:
         raise HTTPException(500, f"split failed: {e}")
-    return {"type": "FeatureCollection", "features": res["features"], "names": res["names"],
+    return {**provenance.stamped(res["features"], fc, "split",
+                                 f"{region} -> {' + '.join(str(n) for n in res['names'])}",
+                                 res["names"]),
+            "names": res["names"],
             "areas": res.get("areas"), "parts": res.get("parts")}
 
 
@@ -515,7 +705,10 @@ async def regions_dissolve_gap(ds_id: str, request: Request):
         raise HTTPException(422, str(e))
     except Exception as e:
         raise HTTPException(500, f"dissolve-gap failed: {e}")
-    return {"type": "FeatureCollection", "features": res["features"],
+    return {**provenance.stamped(res["features"], fc, "dissolve-gap",
+                                 f"{res['area']:,.0f} px² into "
+                                 f"{' + '.join(str(n) for n in res['regions'])}",
+                                 res["regions"]),
             "gap": res["gap"], "area": res["area"], "kind": res["kind"],
             "regions": res["regions"]}
 
@@ -536,6 +729,10 @@ async def regions_load(ds_id: str, request: Request):
         fc = geo.load_regions_file(ds_id, path)
     except Exception as e:
         raise HTTPException(400, f"load failed: {e}")
+    # Stamped AFTER the load so the entry joins whatever trail the incoming file
+    # already carried -- that is the hand-off being recorded.
+    provenance.stamp(fc, "load-regions", Path(str(path)).name)
+    geo.save_edited(ds_id, fc)
     return JSONResponse(fc)
 
 
@@ -561,7 +758,10 @@ async def regions_add(ds_id: str, request: Request):
         raise HTTPException(422, str(e))
     except Exception as e:
         raise HTTPException(500, f"add-region failed: {e}")
-    return {"type": "FeatureCollection", "features": res["features"],
+    return {**provenance.stamped(res["features"], fc, "add-region",
+                                 f"{res['name']}, {res['area']:,.0f} px²"
+                                 + (f", taken from {', '.join(res['ceded'])}" if res["ceded"] else ""),
+                                 [res["name"]]),
             "name": res["name"], "area": res["area"], "ceded": res["ceded"]}
 
 
@@ -587,7 +787,8 @@ async def regions_fill_gap(ds_id: str, request: Request):
         raise HTTPException(422, str(e))
     except Exception as e:
         raise HTTPException(500, f"fill-gap failed: {e}")
-    return {"type": "FeatureCollection", "features": res["features"],
+    return {**provenance.stamped(res["features"], fc, "fill-gap",
+                                 f"{res['name']}, {res['area']:,.0f} px²", [res["name"]]),
             "name": res["name"], "area": res["area"], "kind": res["kind"],
             "gap": res["gap"]}
 
@@ -622,13 +823,25 @@ async def regions_repair(ds_id: str, request: Request):
         res = topology.repair_features(fc.get("features", []), d["id_prop"])
     except Exception as e:
         raise HTTPException(500, f"repair failed: {e}")
-    return {"type": "FeatureCollection", "features": res["features"], "fixed": res["fixed"]}
+    if not res["fixed"]:
+        return {**provenance.carry({"type": "FeatureCollection", "features": res["features"]}, fc),
+                "fixed": res["fixed"]}
+    return {**provenance.stamped(res["features"], fc, "repair",
+                                 f"{len(res['fixed'])} fixed: {', '.join(res['fixed'][:6])}",
+                                 res["fixed"]),
+            "fixed": res["fixed"]}
 
 
 @app.post("/api/datasets/{ds_id}/regions/export")
 async def regions_export(ds_id: str, request: Request):
     """Export the current regions either as ONE merged .geojson (all features in a
     single FeatureCollection) or as SEPARATE per-region files bundled in a .zip.
+
+    `frame` picks which coordinates get written when the view has been rotated or
+    flipped: "displayed" (default) writes what is on screen, "original" rotates and
+    flips every edit back into the frame the dataset's own file used. Either way the
+    file says which frame it is in -- "displayed" keeps `_orientation`, "original"
+    drops it, because the original frame is by definition unrotated.
 
     Refuses to write broken geometry: self-intersections, empty or non-polygon
     features, missing names. Send force=true to export anyway. (A repeated name is
@@ -641,6 +854,33 @@ async def regions_export(ds_id: str, request: Request):
     mode = (body or {}).get("mode", "merged")
     fc = body.get("fc") or geo.load_regions(ds_id)[0]
     feats = fc.get("features", [])
+
+    # If the view has been rotated/flipped, the caller chooses which frame to
+    # write: what they see, or the coordinates the original file used. Default is
+    # what they see -- that is what they have been editing against.
+    o = ORI.normalise(fc.get("_orientation") or ORI.get(ds_id))
+    frame = "original" if str((body or {}).get("frame") or "").lower() == "original" \
+            else "displayed"
+    if frame == "original":
+        if not ORI.is_identity(o):
+            try:
+                p = pyramid(ds_id)
+                W0, H0 = p.info()["width"], p.info()["height"]
+            except Exception:
+                w, h = _regions_extent(fc)
+                W0, H0 = ORI.out_size(w, h, ORI.invert(o))
+            dw, dh = ORI.out_size(W0, H0, o)
+            feats = ORI.transform_features(feats, ORI.invert(o), dw, dh)
+        fc = {**fc, "features": feats}
+        fc.pop("_orientation", None)
+    else:
+        # A client can post an fc that never carried the marker -- the frame is
+        # still rotated, so say so, or the recipient has no way to know.
+        fc = {**fc, "features": feats}
+        if ORI.is_identity(o):
+            fc.pop("_orientation", None)
+        else:
+            fc["_orientation"] = o
 
     if not body.get("force"):
         try:
@@ -656,9 +896,18 @@ async def regions_export(ds_id: str, request: Request):
                 "counts": report["counts"],
             }))
 
+    # Two exports of the same regions in different frames must not arrive as two
+    # files with the same name -- the second would land as "(1)" and there would be
+    # nothing to say which was which.
+    tag = _frame_tag(frame, o)
+
     if mode == "separate":
         buf = io.BytesIO()
         used: dict[str, int] = {}
+        # The file-level members belong to the FILE, not to the merged collection:
+        # a per-region file out of a rotated export has to carry the frame marker
+        # and the trail too, or it is an unlabelled bag of coordinates.
+        shell = {k: v for k, v in fc.items() if k not in ("type", "features")}
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
             for f in feats:
                 nm = str((f.get("properties") or {}).get(d["id_prop"]) or "region")
@@ -667,13 +916,14 @@ async def regions_export(ds_id: str, request: Request):
                 used[safe] = k + 1
                 fname = f"{safe}.geojson" if k == 0 else f"{safe}_{k}.geojson"
                 z.writestr(fname, json.dumps(
-                    {"type": "FeatureCollection", "features": [f]}, indent=1))
+                    {**shell, "type": "FeatureCollection", "features": [f]}, indent=1))
         buf.seek(0)
         return Response(buf.read(), media_type="application/zip", headers={
-            "Content-Disposition": 'attachment; filename="regions_separate.zip"'})
+            "Content-Disposition": f'attachment; filename="regions_separate{tag}.zip"'})
 
     return Response(json.dumps(fc, indent=1), media_type="application/geo+json",
-                    headers={"Content-Disposition": 'attachment; filename="regions_merged.geojson"'})
+                    headers={"Content-Disposition":
+                             f'attachment; filename="regions_merged{tag}.geojson"'})
 
 
 @app.post("/api/browse-file")
@@ -691,7 +941,19 @@ def genes_info(ds_id: str):
     defaults = [g for g in DEFAULT_GENES if g in gd.gene_names]
     if not defaults:
         defaults = gd.gene_list()[:3]
-    return gd.info(defaults)
+    nfo = gd.info(defaults)
+    # The gene layer is one bitmap placed by world bounds. Left un-rotated it
+    # stays put while the morphology turns underneath it -- two pictures of the
+    # same section on screen at once.
+    o = ORI.get(ds_id)
+    if not ORI.is_identity(o):
+        left, bottom, right, top = nfo["bounds"]
+        w, h = ORI.out_size(abs(right - left), abs(bottom - top), o)
+        nfo["bounds"] = [0, h, w, 0]
+        if ORI.normalise(o)["rot"] in (90, 270):
+            nfo["grid"] = [nfo["grid"][1], nfo["grid"][0]]
+    nfo["orientation"] = o
+    return nfo
 
 
 @app.get("/api/datasets/{ds_id}/genes/contrast")
@@ -715,7 +977,14 @@ async def genes_composite(ds_id: str, request: Request):
     spec = await request.json()
     if not isinstance(spec, list):
         raise HTTPException(400, "body must be a list of channel specs")
-    return Response(content=gd.composite_png(spec), media_type="image/png")
+    o = ORI.get(ds_id)
+    if ORI.is_identity(o):
+        return Response(content=gd.composite_png(spec), media_type="image/png")
+    # Turn the composite itself, so it lands on the rotated bounds /genes reports.
+    rgba = ORI.transform_image(gd.composite(spec), o)
+    buf = io.BytesIO()
+    PILImage.fromarray(rgba, mode="RGBA").save(buf, format="PNG")
+    return Response(content=buf.getvalue(), media_type="image/png")
 
 
 @app.get("/api/datasets/{ds_id}/stains")
@@ -724,7 +993,14 @@ def stains_info(ds_id: str):
         ss = stainstack(ds_id)
     except KeyError:
         raise HTTPException(404, "no morphology_focus stains")
-    return ss.info()
+    nfo = ss.info()
+    # Same displayed frame as the morphology, or the stain layer would be laid out
+    # on the un-rotated extent and slide off the image.
+    o = ORI.get(ds_id)
+    w, h = ORI.out_size(nfo["width"], nfo["height"], o)
+    nfo["width"], nfo["height"] = int(w), int(h)
+    nfo["orientation"] = o
+    return nfo
 
 
 @app.get("/api/datasets/{ds_id}/stains/contrast")
@@ -751,7 +1027,14 @@ def stains_tile(ds_id: str, z: int, x: int, y: int, s: str = ""):
         spec = json.loads(base64.b64decode(s).decode()) if s else []
     except Exception:
         spec = []
-    png = ss.composite_tile(spec, level, x, y)
+    # A mangled spec must degrade to "nothing to draw", not a 500. Decoding can
+    # succeed and still hand back a dict or a list of strings -- '+' and '/' in
+    # base64 are re-read as spaces in a query string -- and blending would then
+    # blow up per tile, which reads as the whole stain layer being broken.
+    if not isinstance(spec, list):
+        spec = []
+    spec = [c for c in spec if isinstance(c, dict)]
+    png = ss.composite_tile(spec, level, x, y, orient=ORI.get(ds_id))
     if png is None:
         return Response(status_code=204)
     return Response(content=png, media_type="image/png",
@@ -775,7 +1058,16 @@ if _DIST.exists():
     def _spa_fallback(path: str):
         if path.startswith("api/"):
             raise HTTPException(404, "not found")
-        f = _DIST / path
+        # `_DIST / path` is NOT safe on its own: pathlib discards the left side
+        # when the right is absolute, so a request for "/C:/Windows/win.ini" (or
+        # "//etc/passwd" on macOS) resolved to that file and served it. Neither
+        # uvicorn nor Starlette collapses ".." for us either. Resolve, then
+        # require the result to be inside _DIST before serving it.
+        try:
+            f = (_DIST / path).resolve()
+            f.relative_to(_DIST.resolve())
+        except (ValueError, OSError):
+            return FileResponse(str(_DIST / "index.html"))
         if f.is_file():
             return FileResponse(str(f))
         return FileResponse(str(_DIST / "index.html"))   # SPA fallback

@@ -105,13 +105,25 @@ def _alert(message: str):
         return
     try:
         import subprocess
-        body = message.replace("\\", "\\\\").replace('"', '\\"')
-        subprocess.run(
+        # Newlines MUST become the two-character escape \n. An AppleScript string
+        # literal cannot span lines, and osascript treats a real newline inside
+        # -e as a script line break -- so the whole thing failed to compile and
+        # exited 1 without ever drawing a dialog. Both callers pass a message
+        # containing "\n\n", so this alert had never once appeared: every fatal
+        # macOS startup error vanished in exactly the silence it exists to avoid.
+        body = (message.replace("\\", "\\\\")
+                       .replace('"', '\\"')
+                       .replace("\r", "")
+                       .replace("\n", "\\n"))
+        res = subprocess.run(
             ["osascript", "-e",
              f'display alert "FiveAtlas could not start" message "{body}" as critical'],
-            timeout=15)
-    except Exception:
-        pass
+            capture_output=True, text=True, timeout=15)
+        if res.returncode != 0:
+            print(f"[alert] osascript failed ({res.returncode}): "
+                  f"{(res.stderr or '').strip()}", file=sys.stderr)
+    except Exception as e:
+        print(f"[alert] could not display the alert: {e}", file=sys.stderr)
 
 
 def _run_picker_mode() -> bool:
@@ -255,6 +267,33 @@ def main():
               file=sys.stderr)
         return
 
+    # Allowlist argv: serve only for arguments we actually recognise.
+    #
+    # This is the storm. A frozen app has no importable __main__, so CPython
+    # re-executes sys.executable to build helper processes -- and
+    # multiprocessing.resource_tracker does it as:
+    #     [FiveAtlas, '-c', 'from multiprocessing.resource_tracker import main;main(N)']
+    # freeze_support() does NOT intercept that: it only claims argv starting
+    # '--multiprocessing-fork'. So that child reached main(), started its own
+    # server, opened its own browser tab, and could spawn another the same way.
+    # Every generation is an independent process, which is why killing one did
+    # not help -- the next was already running.
+    #
+    # resource_tracker is POSIX-only and macOS defaults to the "spawn" start
+    # method, so this could only ever fire on the Mac. Windows never had it.
+    # Any dependency touching a multiprocessing Lock/Semaphore/Queue is enough.
+    #
+    # Such a child cannot do its job here anyway (the bootloader ignores -c and
+    # runs the bundled script), so exiting is the whole fix. The cost is that
+    # POSIX semaphores may not be cleaned up at exit; that is a leak of a few
+    # bytes, against an app that could not be shut down.
+    argv1 = sys.argv[1] if len(sys.argv) > 1 else ""
+    if argv1.startswith("-"):
+        print(f"[launcher] not serving for argv {sys.argv[1:]!r} -- this process "
+              "was spawned by interpreter machinery, not by the user.",
+              file=sys.stderr)
+        return
+
     import uvicorn
     import config
 
@@ -306,6 +345,19 @@ def main():
         print("  (not opening a browser -- go to the address above)")
     try:
         uvicorn.run(backend.app, host="127.0.0.1", port=port, log_level="warning")
+    except SystemExit as e:
+        # uvicorn does NOT raise on a failed bind: Server.startup catches the
+        # OSError, logs one line, and calls sys.exit(1). SystemExit derives from
+        # BaseException, so the `except Exception` below never saw the single
+        # most likely way for this server to die, and the user got no message at
+        # all -- on macOS, no console either.
+        code = e.code if isinstance(e.code, int) else 1
+        if code:
+            msg = (f"the server could not start on port {port} "
+                   "(most likely something else is already using it)")
+            print(f"[fatal] {msg}", file=sys.stderr)
+            _alert(f"{msg}\n\nSee {config.WORKDIR / 'FiveAtlas.log'}")
+        raise
     except Exception as e:
         print(f"[fatal] server stopped: {e}", file=sys.stderr)
         _alert(f"{type(e).__name__}: {e}\n\nSee {config.WORKDIR / 'FiveAtlas.log'}")

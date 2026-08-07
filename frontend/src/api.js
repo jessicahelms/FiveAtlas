@@ -158,6 +158,19 @@ export async function restoreOriginal(ds) {
   return r.json(); // { type, features, source, backup, count }
 }
 
+// Rotate/flip the whole dataset -- image AND regions together, for a slide that
+// was imaged the wrong way up. Returns the re-oriented FeatureCollection plus the
+// new canvas size, so the client can refit the view.
+export async function setOrientation(ds, o, fc) {
+  const r = await fetch(`${API}/datasets/${ds}/orientation`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...o, fc }),
+  });
+  if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+  return r.json(); // { type, features, _orientation, orientation, width, height }
+}
+
 // Every snapshot Save has written, newest first.
 export async function listVersions(ds) {
   const r = await fetch(`${API}/datasets/${ds}/regions/versions`);
@@ -200,12 +213,13 @@ export class GeometryError extends Error {
 
 // Export as one merged .geojson or a .zip of separate per-region files; the
 // response is a file the browser downloads. Broken geometry blocks the write
-// unless `force` is set.
-export async function exportRegions(ds, mode, fc, { force = false } = {}) {
+// unless `force` is set. `frame` is 'displayed' (the rotated/flipped coordinates
+// on screen) or 'original' (everything rotated back to the as-imaged frame).
+export async function exportRegions(ds, mode, fc, { force = false, frame = 'displayed' } = {}) {
   const r = await fetch(`${API}/datasets/${ds}/regions/export`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ mode, fc, force }),
+    body: JSON.stringify({ mode, fc, force, frame }),
   });
   if (r.status === 422) {
     const text = await r.text();

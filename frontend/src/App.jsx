@@ -79,6 +79,26 @@ function borderArcsFc(arcs) {
   };
 }
 
+// Endpoints hand back a fresh feature list, and rebuilding { type, features } by
+// hand quietly drops the FeatureCollection's OWN members -- above all
+// `_provenance`, the edit trail that has to travel with the file through the
+// hand-off chain. Every rebuild goes through here: the trail comes from the
+// response when the server stamped one, otherwise from the collection we had.
+function asFc(res, prev) {
+  // Carry every file-level member, not just the ones we can name: `_provenance`
+  // (the edit trail) and `_orientation` (which frame the coordinates are in), and
+  // whatever gets added later. Losing _orientation means an edit made while
+  // rotated produces a file that no longer says it is rotated.
+  const keep = (o) => Object.fromEntries(
+    Object.entries(o || {}).filter(([k]) => k !== 'type' && k !== 'features'));
+  return {
+    ...keep(prev),
+    ...keep(res),
+    type: 'FeatureCollection',
+    features: (res && res.features) || [],
+  };
+}
+
 function copyArcCoords(coords) {
   return coords && coords.length ? coords.map((p) => [+p[0], +p[1]]) : null;
 }
@@ -532,6 +552,15 @@ export default function App() {
   }, [dsId]);
 
   // debounced gene composite
+  //
+  // The orientation is a dependency even though it is not used in the body: the
+  // server returns the composite already turned to match the bounds /genes
+  // reports, so a rotation changes the IMAGE without changing `channels`. Keyed
+  // on channels alone, the old un-rotated bitmap stayed and was drawn on the new
+  // rotated bounds -- the ghost section.
+  const geneOrientKey = info && info.orientation
+    ? `${info.orientation.rot}${info.orientation.flipH ? 'h' : ''}${info.orientation.flipV ? 'v' : ''}`
+    : '';
   useEffect(() => {
     if (!channels) return;
     let cancel = false;
@@ -540,7 +569,7 @@ export default function App() {
       catch (e) { /* ignore */ }
     }, 120);
     return () => { cancel = true; clearTimeout(t); };
-  }, [channels, dsId]);
+  }, [channels, dsId, geneOrientKey]);
 
   const loadStainContrast = useCallback(async (idx, tries = 0) => {
     try {
@@ -762,6 +791,13 @@ export default function App() {
         // picking stays snappy. If the outlines are merely near each other, prompt
         // the user to Share borders before exposing a draggable shared edge.
         const res = await api.sharedBorder(dsId, next[0], next[1], fc, { bridge: false });
+        // One region inside the other: there is no border to share, and the
+        // partition would shred the overlap into slivers. Say so on the pick.
+        if (res && res.contained) {
+          setBorderArc(null); setBorderSegments([]);
+          setBorderMsg(res.message);
+          return;
+        }
         const arcs = normalizeBorderArcs(res && res.arcs);
         if (!arcs.length) {
           setBorderArc(null);
@@ -836,7 +872,7 @@ export default function App() {
       const segNote = segmentNote || (borderSegments.length > 1 ? ` ${borderSegments.length} interrupted segments shown.` : '');
       setBorderMsg(`Border moved ✓.${segNote} Drag again, or Clear to pick another pair.`);
     } catch (e) {
-      setBorderMsg(`Couldn't move border: ${String(e).replace(/^Error:\s*/, '')}`);
+      setBorderMsg(`Couldn't move border: ${apiDetail(e)}`);
     } finally { setBusy(false); dragStartArcRef.current = null; }
   }, [dsId, borderPicks, borderSegmentIndex, borderSegments, commit]);
 
@@ -925,7 +961,7 @@ export default function App() {
     setBusy(true); setError(null);
     try {
       const res = await api.partitionRegions(dsId, borderPicks, fc);
-      let newFc = { type: 'FeatureCollection', features: res.features };
+      let newFc = asFc(res, fc);
 
       // Sharing leaves a Voronoi-dense, unevenly spaced border, so even it out
       // straight away rather than making the user reach for the slider. The
@@ -934,7 +970,7 @@ export default function App() {
       try {
         const rs = await api.resampleRegions(dsId, borderPicks, newFc, resampleTol);
         if (rs && rs.features && rs.handles) {
-          newFc = { type: 'FeatureCollection', features: rs.features };
+          newFc = asFc(rs, newFc);
           repointed = rs;
         }
       } catch (e) { /* keep the un-resampled result rather than failing the share */ }
@@ -969,7 +1005,9 @@ export default function App() {
         setBorderMsg(`Shared borders across ${borderPicks.length} regions ✓ (${(res.borders || []).length} borders). Save / Export when done.`);
       }
     } catch (e) {
-      setBorderMsg(`Share failed: ${String(e).replace(/^Error:\s*/, '')}`);
+      // apiDetail unwraps FastAPI's {"detail": …} so a refusal reads as the
+      // sentence the backend wrote, not as `Error: 422: {"detail":"…"}`.
+      setBorderMsg(`Share failed: ${apiDetail(e)}`);
     } finally { setBusy(false); }
   }, [dsId, fc, borderPicks, commit, resampleTol]);
 
@@ -999,7 +1037,7 @@ export default function App() {
         }
         setResample({ counts: res.counts, tol: res.tol, handles: res.handles,
                       baseFc: source,
-                      fc: { type: 'FeatureCollection', features: res.features } });
+                      fc: asFc(res, fc) });
       } catch (e) {
         setBorderMsg(apiDetail(e));
       } finally { setBusy(false); }
@@ -1036,7 +1074,7 @@ export default function App() {
     setBusy(true); setError(null);
     try {
       const res = await api.mergeRegions(dsId, borderPicks, fc);
-      const newFc = { type: 'FeatureCollection', features: res.features };
+      const newFc = asFc(res, fc);
       commit(newFc); setBaseline(newFc);
       setBorderPicks([]); setBorderArc(null);
       setBorderMsg(`Merged ${borderPicks.length} regions into “${res.name}” ✓`);
@@ -1185,7 +1223,7 @@ export default function App() {
     setBusy(true); setError(null);
     try {
       const res = await api.splitRegion(dsId, selectedName, fc, coords);
-      const newFc = { type: 'FeatureCollection', features: res.features };
+      const newFc = asFc(res, fc);
       commit(newFc); setBaseline(newFc);
       setMoved((prev) => { const n = new Set(prev); res.names.forEach((x) => n.add(x)); return n; });
       setSelected([]);
@@ -1218,7 +1256,7 @@ export default function App() {
       setGapFind({
         gap: res.gap, area: res.area, kind: res.kind, regions: res.regions,
         point: [coord[0], coord[1]],     // kept so "New region" can reuse the click
-        fc: { type: 'FeatureCollection', features: res.features },
+        fc: asFc(res, fc),
       });
       const who = (res.regions || []).join(' + ') || 'its neighbour';
       setGapMsg(`Gap found — ${Math.round(res.area).toLocaleString()} px². Dissolve it into ${who}, or make it a new region.`);
@@ -1235,7 +1273,7 @@ export default function App() {
     setBusy(true); setError(null);
     try {
       const res = await api.fillGap(dsId, fc, gapFind.point);
-      const newFc = { type: 'FeatureCollection', features: res.features };
+      const newFc = asFc(res, fc);
       commit(newFc); setBaseline(newFc);
       setMoved((prev) => { const n = new Set(prev); n.add(res.name); return n; });
       setGapFind(null);
@@ -1266,7 +1304,7 @@ export default function App() {
     setDrawMsg('creating…');
     try {
       const res = await api.addRegion(dsId, fc, coords);
-      const newFc = { type: 'FeatureCollection', features: res.features };
+      const newFc = asFc(res, fc);
       commit(newFc); setBaseline(newFc);
       setMoved((prev) => {
         const n = new Set(prev);
@@ -1368,7 +1406,7 @@ export default function App() {
     setBusy(true); setError(null);
     try {
       const res = await api.snap(dsId, snapBaseline, fc, movedList);
-      const clean = { type: 'FeatureCollection', features: res.features };
+      const clean = asFc(res, fc);
       commit(clean); setBaseline(clean); setMoved(new Set());
       setSnapInfo({ movers: res._movers, notes: res._notes });
     } catch (e) { setError(String(e)); } finally { setBusy(false); }
@@ -1392,7 +1430,7 @@ export default function App() {
     setBusy(true); setError(null);
     try {
       const res = await api.restoreOriginal(dsId);
-      const newFc = { type: 'FeatureCollection', features: res.features };
+      const newFc = asFc(res, fc);
       commit(newFc); setBaseline(newFc);
       setSelected([]); setMoved(new Set()); setMode('view');
       clearBorder(); clearSplit(); clearGap(); clearDraw();
@@ -1403,6 +1441,49 @@ export default function App() {
       setError(apiDetail(e));
     } finally { setBusy(false); }
   }, [dsId, commit, clearBorder, clearSplit, clearGap, clearDraw]);
+
+  // Rotate/flip the whole dataset because the slide was imaged the wrong way up.
+  // The backend moves the image AND the regions together and hands back both the
+  // re-oriented FeatureCollection and the new canvas size; `info` has to be
+  // updated too or deck keeps fitting the view to the old extent.
+  const applyOrientation = useCallback(async (change) => {
+    if (!dsId) return;
+    setBusy(true); setError(null);
+    try {
+      const now = (info && info.orientation) || { rot: 0, flipH: false, flipV: false };
+      const next = typeof change === 'function' ? change(now) : { ...now, ...change };
+      const res = await api.setOrientation(dsId, next, fc);
+      const newFc = asFc(res, fc);
+      commit(newFc); setBaseline(newFc);
+      setInfo((prev) => (prev ? { ...prev, width: res.width, height: res.height,
+        orientation: res.orientation } : prev));
+      // The gene and stain layers are placed from info fetched once when the
+      // dataset loaded. Leave that stale and the gene bitmap keeps sitting on the
+      // UN-rotated bounds while everything else turns -- the section appears
+      // twice, once correct and once as a ghost. Both endpoints already report
+      // the rotated extent, so just ask them again.
+      try {
+        const g = await api.getGenes(dsId);
+        if (g && g.bounds) {
+          setGeneInfo(g);
+          setGeneBounds(g.bounds);
+        }
+      } catch (e) { /* dataset has no transcripts */ }
+      try {
+        const st = await api.getStains(dsId);
+        if (st && st.channels && st.channels.length) setStainInfo(st);
+      } catch (e) { /* dataset has no morphology_focus */ }
+      setSelected([]); setMoved(new Set()); setMode('view');
+      clearBorder(); clearSplit(); clearGap(); clearDraw();
+      const o = res.orientation;
+      setSnapInfo({ saved: `view is now ${o.rot}°`
+        + (o.flipH ? ' + flipped left/right' : '')
+        + (o.flipV ? ' + flipped top/bottom' : '')
+        + ' — Export asks which frame to write' });
+    } catch (e) {
+      setError(apiDetail(e));
+    } finally { setBusy(false); }
+  }, [dsId, info, fc, commit, clearBorder, clearSplit, clearGap, clearDraw]);
 
   const doReset = useCallback(async () => {
     setBusy(true); setError(null);
@@ -1427,15 +1508,18 @@ export default function App() {
 
   // Export refuses to write broken geometry. On a block we surface the problem
   // list and let the user Repair, force it through, or go fix it by hand.
-  const doExport = useCallback(async (exportMode, { force = false } = {}) => {
+  const doExport = useCallback(async (exportMode, { force = false, frame = 'displayed' } = {}) => {
     setBusy(true); setError(null);
     try {
-      const name = await api.exportRegions(dsId, exportMode, fcRef.current || fc, { force });
+      const name = await api.exportRegions(dsId, exportMode, fcRef.current || fc,
+                                           { force, frame });
       setGeomReport(null);
       setSnapInfo((s) => ({ ...(s || {}), saved: `exported ${name}` }));
     } catch (e) {
       if (e instanceof api.GeometryError) {
-        setGeomReport({ problems: e.problems, counts: e.counts, mode: exportMode,
+        // Keep the frame on the report: "Export anyway" has to write the frame
+        // that was asked for, not silently fall back to the displayed one.
+        setGeomReport({ problems: e.problems, counts: e.counts, mode: exportMode, frame,
                         title: 'Export blocked — fix these first' });
       } else {
         setError(String(e));
@@ -1460,7 +1544,7 @@ export default function App() {
     setBusy(true); setError(null);
     try {
       const res = await api.repairRegions(dsId, fcRef.current || fc);
-      const newFc = { type: 'FeatureCollection', features: res.features };
+      const newFc = asFc(res, fc);
       commit(newFc);
       const fixed = res.fixed || [];
       setGeomReport(null);
@@ -1521,8 +1605,10 @@ export default function App() {
                 onPropEditChange={setProportionalEditing}
                 geomReport={geomReport} onValidate={doValidate} onRepair={doRepair}
                 onDismissReport={() => setGeomReport(null)}
-                onForceExport={(m) => doExport(m, { force: true })}
+                onForceExport={(m, frame) => doExport(m, { force: true, frame })}
                 onRestoreOriginal={doRestoreOriginal}
+                orientation={(info && info.orientation) || null}
+                onOrientation={applyOrientation}
                 onLoadFile={loadRegionsFromFile} onExport={doExport}
                 snapInfo={snapInfo} busy={busy} error={error}
               />
@@ -1536,7 +1622,15 @@ export default function App() {
             </aside>
             <div className="canvas-wrap">
               <Viewer
-                key={dsId} dsId={dsId} info={info} fc={fc} mode={mode} idProp={idProp}
+                // Remount on an orientation change. A quarter turn swaps the
+                // canvas extent, and deck keeps both its tile cache and its
+                // viewport across a prop change -- so the old image stayed on
+                // screen next to the new one and the view stayed fitted to the
+                // old shape. Rotating is rare, so a fresh viewer is the honest fix.
+                key={`${dsId}|${info && info.orientation
+                  ? `${info.orientation.rot}${info.orientation.flipH ? 'h' : ''}${info.orientation.flipV ? 'v' : ''}`
+                  : ''}`}
+                dsId={dsId} info={info} fc={fc} mode={mode} idProp={idProp}
                 selectedIndexes={selected} onEdit={onEdit} onClickFeature={onClickFeature}
                 borderPicks={borderPicks}
                 borderArc={borderArc} onBorderEdit={onBorderEdit}
