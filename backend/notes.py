@@ -73,6 +73,28 @@ def _preamble(text: str):
     return "", text
 
 
+def _has_marker(body: str, marker: str) -> bool:
+    """True if `body` carries a real document marker (`---` / `...`) LINE.
+
+    Judged line by line at column 0, because that is what a marker is. Deciding
+    it from the ends of the whole text instead misreads ordinary content:
+    `notes: torn at the edge, see slide 4...` is an unquoted scalar and
+    `# ask Sam about the caudal sections...` is a comment, but both end the file
+    in three dots, and both used to make render() append a `...` the file never
+    had -- which then either got refused as an unexpected line forever, or was
+    written into a shared file silently. It fails the other way too: a real
+    `...` followed by a trailing comment was not seen, and the marker was
+    dropped on write.
+    """
+    for ln in body.splitlines():
+        if not ln.startswith(marker):
+            continue
+        rest = ln[len(marker):]
+        if rest == "" or rest[:1] in (" ", "\t", "#"):
+            return True
+    return False
+
+
 def _yaml_for(text: str) -> YAML:
     """A round-tripper configured from the file it is about to read back.
 
@@ -83,8 +105,8 @@ def _yaml_for(text: str) -> YAML:
     y = YAML()                       # round-trip by default
     y.preserve_quotes = True
     y.width = 4096                   # never re-wrap a long note into a new line
-    y.explicit_start = body.lstrip().startswith("---")
-    y.explicit_end = body.rstrip().endswith("...")
+    y.explicit_start = _has_marker(body, "---")
+    y.explicit_end = _has_marker(body, "...")
     return y
 
 
@@ -173,7 +195,7 @@ def apply_regions(data, updates, annotator=None, only=None):
 
     Returns a list of {region, key, before, after} for the preview.
     """
-    changes = []
+    changes, kept = [], []
     for region in list(updates):
         if only is not None and region not in only:
             continue
@@ -191,6 +213,17 @@ def apply_regions(data, updates, annotator=None, only=None):
             after = _as_written(before, want[key])
             if before == after:
                 continue
+            # NEVER clear a value the file already holds. The geometry in front
+            # of this annotator is one view of the sample; the YAML accumulates
+            # across annotators, machines and working copies, and damage
+            # recorded from a shape that is not in THIS copy is not gone -- it
+            # is just not here. Writing "" over it would delete a colleague's
+            # record, which is exactly what a fresh workdir (or Restore
+            # original) produces: 23 regions, zero damage shapes. Reported, so
+            # the difference is visible rather than silently either way.
+            if not want[key] and not is_unset(before):
+                kept.append({"region": region, "key": key, "value": before})
+                continue
             entry[key] = after
             changes.append({"region": region, "key": key,
                             "before": "" if before is None else before,
@@ -203,7 +236,7 @@ def apply_regions(data, updates, annotator=None, only=None):
                 changes.append({"region": region, "key": "annotator",
                                 "before": "" if before is None else before,
                                 "after": entry["annotator"]})
-    return changes
+    return {"changes": changes, "kept": kept}
 
 
 def missing_regions(data, region_names):
@@ -279,9 +312,21 @@ def _blocks(text: str) -> list:
     A region's lines are indented under `ISO:`, and a roster entry is a bare
     `- name` under `annotators:` — neither carries the name it belongs to, so
     matching a changed line by its own text would misjudge both.
+
+    The document markers and anything after the `...` end marker belong to NO
+    key. That has to be explicit: `annotators` is the last top-level key in
+    every real metadata.yml, so carrying the last-seen key forward would file
+    the end marker and any trailing comment under the one key we edit, and
+    `unexpected_lines` would pre-forgive the whole tail of the file.
     """
-    out, cur = [], None
+    out, cur, ended = [], None, False
     for ln in text.splitlines():
+        s = ln.strip()
+        if ended or s.startswith(("---", "...")):
+            if s.startswith("..."):
+                ended = True
+            out.append(None)
+            continue
         m = _TOP_KEY.match(ln)
         if m:
             cur = m.group(1).strip().strip('"\'')

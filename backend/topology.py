@@ -1987,16 +1987,26 @@ def section_outline(features, id_prop, name="hemi", method="bubble", radius=200.
         out = body.buffer(r, join_style=1).buffer(-r, join_style=1)
     if not out.is_valid:
         out = out.buffer(0)
-    # Only the outer coastline: a closing can leave interior holes where a void
-    # was too big to swallow, and an outline with holes is not an outline.
+    # Only the outer coastline of each part: a closing can leave interior holes
+    # where a void was too big to swallow, and an outline with holes is not an
+    # outline.
+    #
+    # EVERY part is kept, not just the biggest. A section that is not one
+    # connected blob -- part-way through annotation, a detached piece of tissue,
+    # or a region switched off mid-file -- closes into several components, and
+    # keeping only the largest silently drops whole regions outside the outline
+    # while still reporting that it wrapped them. `parts` is returned so the
+    # caller can say so.
     parts = _polys(out)
     if not parts:
         raise ValueError("the outline came out empty -- try a larger radius")
-    out = max(parts, key=lambda p: p.area)
-    out = Polygon(out.exterior)
+    rings = [Polygon(p.exterior) for p in parts]
+    out = rings[0] if len(rings) == 1 else unary_union(rings)
+    if not out.is_valid:
+        out = out.buffer(0)
     return {"geometry": mapping(_snap_polys(out)), "area": float(out.area),
             "method": ("hull" if method == "hull" else "bubble"),
-            "sources": sorted(used)}
+            "parts": len(rings), "sources": sorted(used)}
 
 
 def fill_gap_with_region(features, id_prop, point, name=None, tol=40.0, grab=None):

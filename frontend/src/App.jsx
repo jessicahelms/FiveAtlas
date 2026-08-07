@@ -580,6 +580,12 @@ export default function App() {
         setInfo(i); setFc(r); setBaseline(r); setSources(s); initHistory(r);
         setSelected([]); setMoved(new Set()); setSnapInfo(null); setMode('view');
         setBorderPicks([]); setBorderArc(null); setBorderSegments([]); setBorderSegmentIndex(0); setBorderMsg(null);
+        // Every panel that holds a report ABOUT a dataset has to go with it.
+        // Left standing, each one still has live buttons that write the old
+        // dataset's answer into the new dataset's regions.
+        setResample(null); resampleUndoRef.current = null;
+        setCellsReport(null); setDamageAsk(null); setOutlinePreview(null);
+        setGeomReport(null); setRegionsOff(new Set());
         try {
           const g = await api.getGenes(dsId);
           if (!cancel && g && g.defaults) {
@@ -791,6 +797,11 @@ export default function App() {
     setBorderSegments([]); setBorderSegmentIndex(0);
     dragStartArcRef.current = null;
     pendingBridgeRef.current = null;
+    // A resample preview belongs to the pair it was built for. Left behind, its
+    // Apply button comes back to life the moment the NEXT pair is shared, and
+    // applying it commits that earlier FeatureCollection over the current one —
+    // discarding every edit since, across datasets if the panel survived one.
+    setResample(null);
   }, []);
   const clearSplit = useCallback(() => {
     setSplitDraw({ type: 'FeatureCollection', features: [] }); setSplitMsg(null);
@@ -1094,8 +1105,11 @@ export default function App() {
         if (arcs.length) {
           setBorderSegments(arcs); setBorderSegmentIndex(0); setBorderArc(borderArcsFc(arcs));
         }
+        // Stamp what this preview belongs to. Apply refuses if either has moved
+        // since -- the preview is only valid for the pair and dataset it was
+        // built from.
         setResample({ counts: res.counts, tol: res.tol, handles: res.handles,
-                      baseFc: source,
+                      baseFc: source, dsId, picks: [...borderPicks],
                       fc: asFc(res, fc) });
       } catch (e) {
         setBorderMsg(apiDetail(e));
@@ -1116,6 +1130,17 @@ export default function App() {
 
   const applyResample = useCallback(() => {
     if (!resample || !resample.fc) return;
+    // Belt and braces on top of clearing it: committing a preview built for
+    // another pair -- or another dataset -- would silently revert everything
+    // done since, and Save would write that to disk.
+    const samePicks = (resample.picks || []).length === borderPicks.length
+      && (resample.picks || []).every((n, i) => n === borderPicks[i]);
+    if (resample.dsId !== dsId || !samePicks) {
+      setResample(null);
+      setBorderMsg('That resample preview was for a different selection — '
+        + 'nudge the slider again to preview this one.');
+      return;
+    }
     // the handles on screen are already the previewed ones, so this just makes
     // the geometry behind them permanent (and undoable)
     commit(resample.fc); setBaseline(resample.fc);
@@ -1126,7 +1151,7 @@ export default function App() {
     setBorderMsg(kept != null
       ? `Resampled — ${kept} drag points on the border.`
       : 'Resampled.');
-  }, [resample, borderPicks, commit]);
+  }, [resample, borderPicks, commit, dsId]);
 
   const doMerge = useCallback(async () => {
     if (borderPicks.length < 2) return;
@@ -1717,9 +1742,11 @@ export default function App() {
     if (!dsId || !fc) return;
     setBusy(true); setError(null);
     try {
-      const res = await api.sectionOutline(dsId, {
-        fc, exclude: offList(), ...(opts || {}),
-      });
+      // NOT offList(). Switching a region off is a viewing/gap-hunting control;
+      // it must not decide what the section is made of. Excluding one silently
+      // shrinks the outline — switching OLF off leaves 99.9% of it outside —
+      // and the outline already excludes its own previous version.
+      const res = await api.sectionOutline(dsId, { fc, ...(opts || {}) });
       if (!(opts || {}).apply) {
         setOutlinePreview({ ...res, ...(opts || {}) });
         return;
@@ -1731,10 +1758,11 @@ export default function App() {
       setSnapInfo((s) => ({
         ...(s || {}),
         saved: `“${res.name}” ${res.replaced ? 'rebuilt' : 'created'} by ${res.method}`
-          + ` — ${Math.round(res.area).toLocaleString()} px² around ${res.sources.length} regions`,
+          + ` — ${Math.round(res.area).toLocaleString()} px² around ${res.sources.length} regions`
+          + (res.parts > 1 ? `, in ${res.parts} separate pieces` : ''),
       }));
     } catch (e) { setError(apiDetail(e)); } finally { setBusy(false); }
-  }, [dsId, fc, commit, offList]);
+  }, [dsId, fc, commit]);
 
   // The whole-row TSV export is gone from the UI (the sheet's Damage column is a
   // multi-select, so the per-region cells replaced it). `regions/smartsheet.tsv`
