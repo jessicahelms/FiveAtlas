@@ -1,20 +1,33 @@
+import { useEffect, useRef, useState } from 'react';
+
 const toHex = (rgb) =>
   '#' + rgb.map((v) => Math.max(0, Math.min(255, v | 0)).toString(16).padStart(2, '0')).join('');
 const fromHex = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
 
-function ChannelRow({ c, i, keyName, onChange, onRemove, ctrlsDisabled = false }) {
+function ChannelRow({ c, i, keyName, onChange, onRemove }) {
   const dataMax = Math.max(1, Number(c.dataMax) || 1);
   const step = Math.max(1, Math.round(dataMax / 500));
   const minCeil = Math.max(0, dataMax - step);
-  const safeMin = Math.min(Math.max(0, Number(c.min) || 0), minCeil);
-  const safeMax = Math.min(Math.max(safeMin + step, Number(c.max) || dataMax), dataMax);
-  const setMin = (value) => {
-    const min = Math.min(Math.max(0, value), minCeil);
-    onChange(i, { min, max: Math.max(safeMax, min + step) });
-  };
-  const setMax = (value) => {
-    const max = Math.min(Math.max(value, safeMin + step), dataMax);
-    onChange(i, { min: safeMin, max });
+
+  // The slider tracks the hand; the CHANNEL only takes the value once the hand
+  // pauses. Committing per tick re-requests the whole tile pyramid for every
+  // pixel of drag — which is why these sliders used to be greyed out entirely.
+  const [pend, setPend] = useState(null);          // {min,max} while dragging
+  const timer = useRef(null);
+  useEffect(() => () => clearTimeout(timer.current), []);
+  useEffect(() => { setPend(null); }, [c.min, c.max]);   // outside update wins
+
+  const shownMin = Math.min(Math.max(0, Number(pend ? pend.min : c.min) || 0), minCeil);
+  const shownMax = Math.min(Math.max(shownMin + step,
+    Number(pend ? pend.max : c.max) || dataMax), dataMax);
+
+  const drag = (patch) => {
+    const next = { min: shownMin, max: shownMax, ...patch };
+    next.min = Math.min(Math.max(0, next.min), minCeil);
+    next.max = Math.min(Math.max(next.max, next.min + step), dataMax);
+    setPend(next);
+    clearTimeout(timer.current);
+    timer.current = setTimeout(() => onChange(i, next), 250);
   };
 
   return (
@@ -32,20 +45,20 @@ function ChannelRow({ c, i, keyName, onChange, onRemove, ctrlsDisabled = false }
         </span>
       </div>
       {c.visible && (
-        <div className={'channel-ctrls' + (ctrlsDisabled ? ' disabled' : '')}>
+        <div className="channel-ctrls">
           <div className="rng">
             <span>min</span>
             <input type="range" min="0" max={minCeil}
-              step={step} value={safeMin} disabled={ctrlsDisabled}
-              onChange={(e) => setMin(parseFloat(e.target.value))} />
-            <span className="v">{Math.round(safeMin)}</span>
+              step={step} value={shownMin}
+              onChange={(e) => drag({ min: parseFloat(e.target.value) })} />
+            <span className="v">{Math.round(shownMin)}</span>
           </div>
           <div className="rng">
             <span>max</span>
             <input type="range" min={step} max={dataMax}
-              step={step} value={safeMax} disabled={ctrlsDisabled}
-              onChange={(e) => setMax(parseFloat(e.target.value))} />
-            <span className="v">{Math.round(safeMax)}</span>
+              step={step} value={shownMax}
+              onChange={(e) => drag({ max: parseFloat(e.target.value) })} />
+            <span className="v">{Math.round(shownMax)}</span>
           </div>
         </div>
       )}
@@ -106,12 +119,9 @@ export default function ChannelPanel({
       {stainInfo && stainChannels && (
         <div className="section">
           <div className="section-title">Stains — morphology_focus ({stainChannels.length})</div>
-          {/* min/max greyed out for now — visibility and colour still work */}
           {stainChannels.map((c, i) => (
-            <ChannelRow key={c.index} c={c} i={i} keyName="name" onChange={onStainChange}
-              ctrlsDisabled />
+            <ChannelRow key={c.index} c={c} i={i} keyName="name" onChange={onStainChange} />
           ))}
-          <div className="hint dim">Brightness sliders are disabled for now.</div>
         </div>
       )}
 
