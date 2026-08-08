@@ -407,11 +407,11 @@ export default function Sidebar({
         {mode === 'clean' && (
           <div className="border-pick">
             <div className="hint dim">
-              Trace a loop around the leftover hairlines — click each point,
-              then <b>right-click to finish</b> (or Enter). Everything
-              sliver-thin inside is removed and the ground goes to the healthy
-              neighbours. Fat, healthy regions are never touched, and neither
-              are damage shapes.
+              <b>Hold the left button and sweep a circle</b> around the leftover
+              hairlines — release to finish, <b>Esc</b> to throw it away.
+              Everything sliver-thin inside is removed and the ground goes to
+              the healthy neighbours. Fat, healthy regions are never touched,
+              and neither are damage shapes.
             </div>
             {cleanFound && (
               <>

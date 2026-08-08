@@ -13,6 +13,7 @@ import {
   ModifyMode,
   DrawLineStringMode,
   DrawPolygonMode,
+  DrawPolygonByDraggingMode,
 } from '@deck.gl-community/editable-layers';
 
 const MODES = { view: ViewMode, modify: ModifyMode };
@@ -185,8 +186,13 @@ export default function Viewer({
   if (!splitModeRef.current) splitModeRef.current = new FinishableLineMode();
   const drawModeRef = useRef(null);
   if (!drawModeRef.current) drawModeRef.current = new FinishablePolygonMode();
+  // Clean mode draws by DRAGGING -- you circle a stray line the way you would
+  // with a pen, and releasing the button closes the loop. Click-per-vertex was
+  // wrong here: "circle the lines" means a sweep, and a left-drag in a click
+  // mode is a pan, which read as the tool not working at all. The mode cancels
+  // the pan itself while the button is down.
   const cleanModeRef = useRef(null);
-  if (!cleanModeRef.current) cleanModeRef.current = new FinishablePolygonMode();
+  if (!cleanModeRef.current) cleanModeRef.current = new DrawPolygonByDraggingMode();
 
   const initialViewState = useMemo(() => {
     const vw = Math.max(window.innerWidth - 340, 300);
@@ -380,6 +386,7 @@ export default function Viewer({
         id: 'clean-draw',
         data: cleanPoly || { type: 'FeatureCollection', features: [] },
         mode: cleanModeRef.current,
+        modeConfig: { throttleMs: 50 },   // ~20 vertices/s is plenty for a loop
         coordinateSystem: COORDINATE_SYSTEM.CARTESIAN,
         selectedFeatureIndexes: [],       // required -- see the draw layer above
         pickable: true,
@@ -515,9 +522,10 @@ export default function Viewer({
   const hostRef = useRef(null);
   const ctxHandlerRef = useRef(null);
   const sketchModeRef = useRef(null);
+  // clean mode is NOT here: it draws by dragging and finishes on release, so
+  // right-click has no finishing job to do (and the drag mode has no finishNow).
   sketchModeRef.current = mode === 'split' ? splitModeRef.current
-    : mode === 'draw' ? drawModeRef.current
-    : mode === 'clean' ? cleanModeRef.current : null;
+    : mode === 'draw' ? drawModeRef.current : null;
 
   useEffect(() => {
     const el = hostRef.current;
