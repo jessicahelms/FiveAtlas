@@ -45,7 +45,7 @@ from tiles import Pyramid
 
 DEFAULT_GENES = ["Slc17a7", "Calb2", "Pvalb"]
 
-app = FastAPI(title="FiveAtlas")
+app = FastAPI(title="FiveAtlas", version=config.VERSION)
 app.add_middleware(
     CORSMiddleware,
     # Loopback only. This was "*", which on an unauthenticated local server means
