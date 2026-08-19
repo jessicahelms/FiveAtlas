@@ -229,6 +229,59 @@ jobs:
           ./tests/tab_storm_check.sh \
             "$HOME/Library/Caches/FiveAtlas_build/release/FiveAtlas.app/Contents/MacOS/FiveAtlas"
 
+      # Pictures, not just green ticks. Nobody on this project owns a Mac, so
+      # this is the only way to SEE the app run on one: the built bundle is
+      # started on the runner, the UI is screenshotted two ways, and the
+      # images ride along in the artifact (and, on a tag, in the Release page).
+      #   ui-chrome.png   headless Chrome rendering http://127.0.0.1:PORT/
+      #                   -- deterministic, what the SPA looks like on a Mac
+      #   ui-screen.png   the runner's whole screen ~20 s after launching the
+      #                   app THE NORMAL WAY (no ATLAS_NO_BROWSER), i.e. after
+      #                   the app itself has opened the default browser on it.
+      #                   This is what a colleague sees. Best effort: Safari on
+      #                   a fresh runner may put a first-run sheet over it.
+      # Never gates the release: a blank picture is information, not failure.
+      - name: Screenshot the running app
+        id: shots
+        continue-on-error: true
+        env:
+          CHROME: /Applications/Google Chrome.app/Contents/MacOS/Google Chrome
+        run: |
+          set +e
+          APP="$HOME/Library/Caches/FiveAtlas_build/release/FiveAtlas.app"
+          OUT="$HOME/Library/Caches/FiveAtlas_build/release"
+          wait_up() { for i in $(seq 1 45); do curl -fsS "http://127.0.0.1:$1/api/health" >/dev/null 2>&1 && return 0; sleep 1; done; return 1; }
+
+          # --- 1. headless Chrome, app started headless ------------------------
+          # Fresh workdirs: the tab-storm step just launched the app ten times,
+          # and the browser-open breaker lives in the workdir -- reuse it and the
+          # "normal launch" below would open no browser for the wrong reason.
+          ATLAS_NO_BROWSER=1 ATLAS_PORT=8071 ATLAS_WORKDIR="$RUNNER_TEMP/shot1-wd"             "$APP/Contents/MacOS/FiveAtlas" >"$RUNNER_TEMP/shot1.txt" 2>&1 &
+          P1=$!
+          if wait_up 8071 && [ -x "$CHROME" ]; then
+            "$CHROME" --headless=new --disable-gpu --hide-scrollbars \
+              --window-size=1440,900 --virtual-time-budget=10000 \
+              --screenshot="$OUT/ui-chrome.png" "http://127.0.0.1:8071/" >/dev/null 2>&1
+            ls -l "$OUT/ui-chrome.png" 2>/dev/null || echo "::warning title=screenshot::Chrome produced no image"
+          else
+            echo "::warning title=screenshot::app did not come up on 8071, or no Chrome at $CHROME"
+          fi
+          kill $P1 2>/dev/null
+
+          # --- 2. the real launch path: app opens the browser itself ------------
+          ATLAS_PORT=8072 ATLAS_WORKDIR="$RUNNER_TEMP/shot2-wd"             "$APP/Contents/MacOS/FiveAtlas" >"$RUNNER_TEMP/shot2.txt" 2>&1 &
+          P2=$!
+          if wait_up 8072; then
+            sleep 20                                   # browser start + first paint
+            screencapture -x "$OUT/ui-screen.png" 2>/dev/null \
+              && ls -l "$OUT/ui-screen.png" \
+              || echo "::warning title=screenshot::screencapture failed (no window server?)"
+          fi
+          kill $P2 2>/dev/null
+          osascript -e 'tell application "Safari" to quit' >/dev/null 2>&1 || true
+          echo "app output (normal launch):"; cat "$RUNNER_TEMP/shot2.txt" 2>/dev/null | head -20
+          exit 0
+
       # if: always() -- the whole point is to get the .dmg and the logs out even
       # when the app misbehaves.
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -240,6 +293,8 @@ jobs:
             ~/Library/Caches/FiveAtlas_build/release/*.zip
             ~/Library/Caches/FiveAtlas_build/release/README.txt
             ~/Library/Caches/FiveAtlas_build/release/SHA256SUMS
+            ~/Library/Caches/FiveAtlas_build/release/ui-chrome.png
+            ~/Library/Caches/FiveAtlas_build/release/ui-screen.png
             ${{ runner.temp }}/requirements-built.txt
             ${{ runner.temp }}/app-stdout.txt
             ${{ runner.temp }}/fiveatlas.log
@@ -264,6 +319,47 @@ jobs:
               --notes-file "$R/README.txt"
           fi
           gh release upload "$GITHUB_REF_NAME" "$R"/*.dmg "$R"/*.zip "$R/SHA256SUMS" --clobber
+          # The screenshots go up as assets too, and the release notes embed
+          # them -- so the download page shows the app running on a Mac, not
+          # just a list of files.
+          shots=""
+          for f in ui-chrome.png ui-screen.png; do
+            [ -s "$R/$f" ] && gh release upload "$GITHUB_REF_NAME" "$R/$f" --clobber && shots="$shots $f"
+          done
+          if [ -n "$shots" ]; then
+            base="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME"
+            { echo '```'; cat "$R/README.txt"; echo '```'; echo
+              echo "### Built and run on GitHub's macOS (Apple Silicon) runner"
+              for f in $shots; do
+                case "$f" in
+                  ui-chrome.png) echo "The UI as rendered by Chrome on the runner:" ;;
+                  ui-screen.png) echo "The runner's screen ~20 s after double-click-style launch (the app opened the browser itself):" ;;
+                esac
+                echo; echo "![$f]($base/$f)"; echo
+              done
+            } > "$RUNNER_TEMP/notes.md"
+            gh release edit "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md"
+          fi
+
+      - name: Job summary
+        if: always()
+        run: |
+          R="$HOME/Library/Caches/FiveAtlas_build/release"
+          {
+            echo "## FiveAtlas macOS build"
+            echo
+            echo "| check | result |"
+            echo "|---|---|"
+            echo "| build | ${{ job.status }} |"
+            echo "| min-macOS / version gate | ${{ steps.smoke.outcome == 'success' && 'ran' || 'see step' }} |"
+            echo "| smoke (health, SPA, /api/selftest) | ${{ steps.smoke.outcome }} |"
+            echo "| tab-storm bound | ${{ steps.storm.outcome }} |"
+            echo "| screenshots | ${{ steps.shots.outcome }} (in the artifact: ui-chrome.png, ui-screen.png) |"
+            echo
+            if [ -s "$R/SHA256SUMS" ]; then echo '```'; cat "$R/SHA256SUMS"; echo '```'; fi
+            echo
+            echo "Download the **FiveAtlas-macos-arm64** artifact at the bottom of this page to see the screenshots and get the .dmg."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Fail if any check failed
         if: steps.smoke.outcome != 'success' || steps.storm.outcome != 'success'
