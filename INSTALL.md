@@ -10,7 +10,7 @@ Everything runs on your own machine. **Your data never leaves your computer.**
 
 ## Requirements
 
-- **Windows**, or **macOS 11+** (see [macOS](#macos) below)
+- **Windows**, or **macOS 11+ on Apple Silicon** (see [macOS](#macos) below)
 - **Python 3.10–3.12** — install from <https://www.python.org/downloads/> and tick
   *"Add python.exe to PATH"* during install.
 
@@ -41,22 +41,35 @@ every feature below works identically. Only the install differs.
 
 **From a packaged `.dmg`:**
 
-1. Open the `.dmg` and drag **FiveAtlas** into **Applications**.
-2. **First launch only**, macOS will refuse to open it — "FiveAtlas cannot be
-   opened because the developer cannot be verified", or "FiveAtlas is damaged".
-   This is Gatekeeper reacting to an app that did not come from the App Store,
-   not a problem with the app. Either **right-click FiveAtlas → Open → Open**, or
-   run this once in Terminal:
+0. It needs an **Apple Silicon** Mac (M1 or later) on **macOS 11 or newer**.
+   There is no Intel build. Download the `.dmg` **on the Mac itself** — a copy
+   that has been through a Windows machine or a shared drive can lose the
+   symlinks and permissions the app needs and macOS will call it "damaged".
+1. Open the `.dmg` and drag **FiveAtlas** into **Applications**, then eject the
+   disk image. Always start it from Applications.
+2. **First launch only**, macOS will refuse to open it — "FiveAtlas is damaged
+   and can't be opened", or "Apple could not verify FiveAtlas is free of
+   malware". This is Gatekeeper reacting to an app that did not come from the
+   App Store, not a problem with the app. The fix that works on every macOS
+   version, once — open Terminal (Cmd+Space, type `Terminal`) and run:
 
    ```bash
    xattr -dr com.apple.quarantine /Applications/FiveAtlas.app
    ```
 
-3. Double-click FiveAtlas. It has no window of its own: it starts the local
-   server and opens your browser. **Quit it from the Dock** when you are done.
+   (On macOS 15 Sequoia you can instead use System Settings → Privacy &
+   Security → scroll to "FiveAtlas was blocked" → **Open Anyway**. Right-click →
+   Open no longer bypasses Gatekeeper there.)
 
-Pick the download that matches your Mac — `arm64` for Apple Silicon (M1 and
-later), `x86_64` for an Intel Mac. An arm64 build will not start on an Intel Mac.
+3. Double-click FiveAtlas. It has no window of its own and no Dock icon: after a
+   few seconds (up to a minute the first time, while macOS verifies it) a tab
+   opens in your browser at <http://127.0.0.1:8050>. If no tab appears, type
+   that address into your browser. **To stop it, press "Quit FiveAtlas" at the
+   bottom of the sidebar**; it also stops on its own about ten minutes after the
+   last tab is closed.
+4. Your data is on the lab share: connect to it in Finder first (Go → Connect to
+   Server). Then **Open Folder** in FiveAtlas and pick the experiment folder
+   under *Locations*. A pasted path must look like `/Volumes/…`, not `smb://…`.
 
 Edits, the opened-dataset list and `FiveAtlas.log` live in
 `~/Library/Application Support/FiveAtlas`. Your original files are never touched.
@@ -74,9 +87,10 @@ architecture you are shipping to, because PyInstaller cannot cross-compile:
 cd atlas_editor && ./build_release_mac.sh --version 0.2.0
 ```
 
-No Mac to hand? Push to GitHub and run the **Build FiveAtlas (macOS)** workflow
-from the Actions tab — it builds both architectures on GitHub's Mac runners and
-gives you the `.dmg` files as downloads.
+No Mac to hand? Push a `v*` tag (or run the **Build FiveAtlas (macOS)** workflow
+from the Actions tab) — it builds the Apple Silicon app on GitHub's Mac runner,
+smoke-tests it (including a real JPEG2000 decode), and attaches the `.dmg`,
+`.zip` and `SHA256SUMS` to a Release whose notes are the install steps above.
 
 ## Editing regions — quick guide
 

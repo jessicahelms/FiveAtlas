@@ -1,6 +1,10 @@
 # FiveAtlas - backend dependencies
 # (starlette is pulled in by fastapi; tkinter ships with Python)
-fastapi==0.128.8
+fastapi==0.141.1
+# starlette is fastapi's dependency, pinned here so the advisories against
+# 0.52.x (request.url host/path handling, form limits) do not ride along
+# unnoticed. Verified with the route suites on Python 3.13 before bumping.
+starlette==1.6.0
 uvicorn==0.39.0
 shapely==2.0.7
 tifffile==2024.8.30
@@ -14,8 +18,8 @@ zarr==2.18.2
 # the version the working Windows environment has.
 numcodecs==0.12.1
 numpy==2.0.2
-pillow==11.3.0
-python-multipart==0.0.20
+pillow==12.3.0
+python-multipart==0.0.32
 # ruamel, NOT PyYAML: annotation.notes.yaml and metadata.yml are hand-maintained
 # by several people, and only a round-tripper preserves their comments, key
 # order, quoting and ---/... markers. PyYAML would reformat every file it wrote.

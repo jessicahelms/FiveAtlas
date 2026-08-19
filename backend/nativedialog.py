@@ -150,11 +150,20 @@ def _pick_mac(kind, initial=None, title=None):
     # `default location` needs a real absolute directory; AppleScript errors on a
     # relative one, and "" would resolve to the server's CWD.
     if initial and Path(initial).is_absolute() and Path(initial).is_dir():
-        parts += ["default location POSIX file", _as_str(initial)]
+        # `default location` wants an alias. A bare `POSIX file "..."` is a
+        # file URL class that AppleScript usually coerces -- but this is the one
+        # clause that only runs on the SECOND pick (the first has no last
+        # folder), so it is the part nobody has ever seen succeed. Coerce it
+        # explicitly; if it still fails, the error is real and the caller falls
+        # back to the Tk picker.
+        parts += ["default location (POSIX file", _as_str(initial), "as alias)"]
 
     script = "activate\nset _c to (%s)\nreturn POSIX path of _c" % " ".join(parts)
+    # Shorter than the parent's 600 s: when the server gives up on the picker
+    # it kills this helper, and if our own timeout were equal the grandchild
+    # osascript could be left holding a dialog nobody can answer.
     res = subprocess.run(["osascript", "-e", script],
-                         capture_output=True, text=True, timeout=600)
+                         capture_output=True, text=True, timeout=540)
     if res.returncode != 0:
         # Cancelling raises "User canceled. (-128)" -- that is a normal outcome,
         # not an error, and must not fall through to the tkinter retry.

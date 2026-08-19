@@ -2,9 +2,9 @@
 #
 # This exists so you can ship a Mac build without owning a Mac: PyInstaller
 # cannot cross-compile, so the app has to be built on the OS *and* the CPU
-# architecture it will run on. The matrix covers both:
-#   macos-14 -> Apple Silicon (arm64)   -- what almost every Mac bought since 2021 is
-#   macos-13 -> Intel (x86_64)          -- drop this job once nobody is on an Intel Mac
+# architecture it will run on:
+#   macos-14 -> Apple Silicon (arm64)   -- what every Mac sold since 2021 is
+# (Intel is not built; see the matrix comment below.)
 #
 # Run it from the Actions tab ("Run workflow"), or push a tag like v0.2.0.
 # The .dmg and .zip come out as downloadable build artifacts; a tag push also
@@ -17,7 +17,7 @@ on:
       version:
         description: "Version string baked into the app and filenames"
         required: false
-        default: "0.1.0"
+        default: "0.0.0-dev"
   push:
     tags:
       - "v*"
@@ -50,16 +50,24 @@ jobs:
     timeout-minutes: 45
 
     steps:
-      - uses: actions/checkout@v4
+      # Every action is pinned to a commit SHA, not a floating tag: a tag can be
+      # moved to different code after the fact, a SHA cannot. (Versions noted
+      # beside each are what the SHA resolves to.)
+      #
+      # persist-credentials: false -- the checkout token must not sit in
+      # .git/config while `npm ci` runs packages' install scripts.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       # 3.11, not the 3.9 the Windows venv uses: 3.9 is past end-of-life and
       # several of these packages no longer publish macOS arm64 wheels for it,
       # which would mean compiling GEOS and the imagecodecs stack from source.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.11"
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "20"
           cache: npm
@@ -72,25 +80,60 @@ jobs:
       # requirements.txt is the pinned set (backend/requirements.txt is the loose
       # one, and it lists rasterio, which nothing imports -- it would drag in
       # GDAL for nothing).
+      # numpy FIRST, as the explicit macosx_11_0_arm64 wheel. PyPI has both an
+      # 11.0 (OpenBLAS) and a 14.0 (Accelerate) wheel for it, and pip on this
+      # macos-14 runner prefers the 14.0 one -- which made v0.5.1 the only
+      # build whose numpy needed Sonoma while its plist promised Big Sur, so
+      # on macOS 11-13 it launched and died importing numpy. Installing the
+      # 11.0 wheel by name means `-r requirements.txt` sees numpy satisfied and
+      # leaves it alone; check_min_os.py below proves the whole bundle agrees.
       - name: Install backend deps
         run: |
           python -m pip install --upgrade pip
+          NUMPY_PIN="$(grep -E '^numpy==' requirements.txt)"
+          pip download "$NUMPY_PIN" --only-binary=:all: \
+              --platform macosx_11_0_arm64 --python-version 3.11 \
+              --implementation cp --abi cp311 -d "$RUNNER_TEMP/wheels"
+          pip install "$RUNNER_TEMP"/wheels/numpy-*.whl
           pip install -r requirements.txt
-          pip install pyinstaller
+          pip install "pyinstaller==6.21.0"
+          pip freeze > "$RUNNER_TEMP/requirements-built.txt"
+          echo "---- resolved set ----"; cat "$RUNNER_TEMP/requirements-built.txt"
 
       - name: Resolve version
         id: ver
+        env:
+          VER_IN: ${{ inputs.version }}
         run: |
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+            v="${GITHUB_REF_NAME#v}"
           else
-            echo "value=${{ inputs.version || '0.1.0' }}" >> "$GITHUB_OUTPUT"
+            v="${VER_IN:-0.0.0-dev}"
           fi
+          # It ends up in a filename, Info.plist and a generated Python module.
+          if ! printf '%s' "$v" | grep -Eq '^[0-9][0-9A-Za-z.+-]*$'; then
+            echo "::error::version '$v' is not a plain version string"; exit 1
+          fi
+          echo "value=$v" >> "$GITHUB_OUTPUT"
 
       - name: Build
+        env:
+          VER: ${{ steps.ver.outputs.value }}
         run: |
           chmod +x build_release_mac.sh
-          ./build_release_mac.sh --version "${{ steps.ver.outputs.value }}"
+          ./build_release_mac.sh --version "$VER"
+
+      # The plist must not promise an older macOS than the binaries inside can
+      # run on, and the version baked in must be the one on the tag.
+      - name: Check bundle minimum macOS and version
+        env:
+          VER: ${{ steps.ver.outputs.value }}
+        run: |
+          APP="$HOME/Library/Caches/FiveAtlas_build/release/FiveAtlas.app"
+          python3 tests/check_min_os.py "$APP"
+          got="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$APP/Contents/Info.plist")"
+          echo "plist version: $got  (expected $VER)"
+          [ "$got" = "$VER" ] || { echo "::error::Info.plist says $got, tag says $VER"; exit 1; }
 
       # Proves the bundle actually starts and serves the UI on this runner --
       # a missing hidden import or codec dylib fails here rather than on a
@@ -127,9 +170,25 @@ jobs:
           for i in $(seq 1 45); do
             if curl -fsS "http://127.0.0.1:8051/api/health" >/dev/null 2>&1; then
               echo "health OK after ${i}s"
-              curl -fsS "http://127.0.0.1:8051/" | head -c 200; echo
+              ok=1
+              # The UI root must be the built SPA, and its script must be served.
+              idx=$(curl -fsS "http://127.0.0.1:8051/" || true)
+              echo "$idx" | grep -q 'id="root"' || { echo "::error title=ui::/ is not the SPA index"; ok=0; }
+              js=$(echo "$idx" | grep -o '/assets/index-[^"]*\.js' | head -1)
+              if [ -n "$js" ]; then
+                curl -fsS -o /dev/null "http://127.0.0.1:8051$js" || { echo "::error title=ui::$js not served"; ok=0; }
+              else
+                echo "::error title=ui::no /assets/index-*.js in index.html"; ok=0
+              fi
+              # The native stack, exercised for real: JPEG2000 decode, blosc,
+              # GEOS, YAML, Pillow, Tk. /api/health cannot see a missing dylib.
+              st=$(curl -fsS "http://127.0.0.1:8051/api/selftest" || echo '{"ok":false}')
+              echo "$st" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(json.dumps(d, indent=1)); sys.exit(0 if d.get("ok") else 1)' \
+                || { echo "::error title=selftest::$(echo "$st" | head -c 1500)"; ok=0; }
               kill $PID 2>/dev/null
-              exit 0
+              [ "$ok" = 1 ] && exit 0
+              echo "::error title=smoke::the app serves, but a check above failed"
+              exit 1
             fi
             if ! kill -0 $PID 2>/dev/null; then
               wait $PID; rc=$?
@@ -172,7 +231,7 @@ jobs:
 
       # if: always() -- the whole point is to get the .dmg and the logs out even
       # when the app misbehaves.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: FiveAtlas-macos-${{ matrix.arch }}
@@ -180,6 +239,8 @@ jobs:
             ~/Library/Caches/FiveAtlas_build/release/*.dmg
             ~/Library/Caches/FiveAtlas_build/release/*.zip
             ~/Library/Caches/FiveAtlas_build/release/README.txt
+            ~/Library/Caches/FiveAtlas_build/release/SHA256SUMS
+            ${{ runner.temp }}/requirements-built.txt
             ${{ runner.temp }}/app-stdout.txt
             ${{ runner.temp }}/fiveatlas.log
             ${{ runner.temp }}/listening.txt
@@ -188,13 +249,21 @@ jobs:
 
       # Only publish a Release from a build that actually ran. A .dmg that fails
       # its own smoke test should not become the download people are handed.
+      # Published with the gh CLI that is already on the runner, not a
+      # third-party action holding the write token. The release body is the
+      # same README that is inside the .dmg, so the download page itself says
+      # how to get past Gatekeeper and what Macs it runs on.
       - name: Attach to release
         if: github.ref_type == 'tag' && steps.smoke.outcome == 'success' && steps.storm.outcome == 'success'
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            ~/Library/Caches/FiveAtlas_build/release/*.dmg
-            ~/Library/Caches/FiveAtlas_build/release/*.zip
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          R="$HOME/Library/Caches/FiveAtlas_build/release"
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --title "FiveAtlas $GITHUB_REF_NAME" \
+              --notes-file "$R/README.txt"
+          fi
+          gh release upload "$GITHUB_REF_NAME" "$R"/*.dmg "$R"/*.zip "$R/SHA256SUMS" --clobber
 
       - name: Fail if any check failed
         if: steps.smoke.outcome != 'success' || steps.storm.outcome != 'success'

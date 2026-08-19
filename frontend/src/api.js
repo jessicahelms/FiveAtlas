@@ -12,6 +12,20 @@ export async function getRegions(ds) {
   return r.json();
 }
 
+// Heartbeat. The packaged app (macOS especially) has no window of its own, so
+// the server has no other way to know a UI is still attached; it stops itself
+// after a long silence. Fire-and-forget -- a failed ping is not an error.
+export function ping() {
+  return fetch(`${API}/ping`, { method: 'POST' }).catch(() => {});
+}
+
+// Stop the server on purpose. The response comes back before it exits.
+export async function quitApp() {
+  const r = await fetch(`${API}/quit`, { method: 'POST' });
+  if (!r.ok) throw new Error(`quit ${r.status}`);
+  return r.json();
+}
+
 export async function saveRegions(ds, fc) {
   const r = await fetch(`${API}/datasets/${ds}/regions`, {
     method: 'PUT',

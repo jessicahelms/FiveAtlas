@@ -75,15 +75,41 @@ class _Tee:
         except Exception:
             return False
 
+    # Libraries poke at these on sys.stdout (click/uvicorn read .encoding,
+    # subprocess asks for .fileno() when stdout is passed through). A missing
+    # attribute there is an AttributeError deep inside someone else's code.
+    encoding = "utf-8"
+    errors = "replace"
+
+    def fileno(self):
+        if self._stream is None:
+            raise OSError("no underlying stream")
+        return self._stream.fileno()
+
 
 def _start_logging(workdir: Path):
-    """Mirror stdout/stderr into <workdir>/FiveAtlas.log. Best effort: if the log
-    cannot be opened we carry on with whatever streams we already had."""
+    """Mirror stdout/stderr into <workdir>/FiveAtlas.log.
+
+    The streams are ALWAYS wrapped, even when the log cannot be opened: in a
+    windowed bundle sys.stdout is None, and uvicorn calls sys.stdout.isatty()
+    while building its log formatter -- so "could not open the log" used to
+    turn into an AttributeError that killed the server before it served a
+    request. The log is best effort; a usable stdout is not.
+    """
+    handle = None
     try:
         workdir.mkdir(parents=True, exist_ok=True)
-        handle = open(workdir / "FiveAtlas.log", "a", encoding="utf-8", buffering=1)
+        path = workdir / "FiveAtlas.log"
+        # Keep it from growing without bound: past ~5 MB, start over and keep
+        # the previous one beside it.
+        try:
+            if path.exists() and path.stat().st_size > 5 * 1024 * 1024:
+                path.replace(path.with_suffix(".log.1"))
+        except Exception:
+            pass
+        handle = open(path, "a", encoding="utf-8", buffering=1)
     except Exception:
-        return
+        handle = None
     sys.stdout = _Tee(sys.stdout, handle)
     sys.stderr = _Tee(sys.stderr, handle)
 
@@ -115,10 +141,15 @@ def _alert(message: str):
                        .replace('"', '\\"')
                        .replace("\r", "")
                        .replace("\n", "\\n"))
+        # `activate` first so the alert is not behind the browser; "giving up
+        # after" keeps it on screen long enough to be read (the old 15 s
+        # timeout killed osascript -- and the dialog -- before most people had
+        # found it), while still guaranteeing the process cannot hang on it.
         res = subprocess.run(
-            ["osascript", "-e",
-             f'display alert "FiveAtlas could not start" message "{body}" as critical'],
-            capture_output=True, text=True, timeout=15)
+            ["osascript", "-e", "activate", "-e",
+             f'display alert "FiveAtlas could not start" message "{body}" '
+             f'as critical giving up after 300'],
+            capture_output=True, text=True, timeout=310)
         if res.returncode != 0:
             print(f"[alert] osascript failed ({res.returncode}): "
                   f"{(res.stderr or '').strip()}", file=sys.stderr)
@@ -190,10 +221,22 @@ def _open_when_up(url: str, timeout: float = 30.0):
             time.sleep(0.2)
         finally:
             s.close()
+    opened = False
     try:
-        webbrowser.open(url)
+        opened = bool(webbrowser.open(url))
     except Exception:
-        pass
+        opened = False
+    if not opened and sys.platform == "darwin":
+        # webbrowser on macOS goes through osascript; if that is blocked (MDM,
+        # a missing default browser entry) fall back to the system opener.
+        try:
+            import subprocess
+            subprocess.run(["open", url], check=False, timeout=10)
+            opened = True
+        except Exception:
+            pass
+    print(f"[browser] {'opened' if opened else 'could NOT open'} {url}"
+          + ("" if opened else " -- open it by hand"))
 
 
 def _already_running(port: int) -> bool:
@@ -206,7 +249,9 @@ def _already_running(port: int) -> bool:
     import json
     import urllib.request
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=1.0) as r:
+        # 4 s, not 1: an instance busy decoding tiles can take longer than a
+        # second to answer, and a miss here means a second server + second tab.
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=4.0) as r:
             return bool(json.loads(r.read().decode()).get("ok"))
     except Exception:
         return False
@@ -233,27 +278,89 @@ def _claim_browser_open(workdir: Path, window: float = 60.0, burst: int = 3) -> 
     stamp = workdir / ".browser-opens"
     now = time.time()
     started, count = now, 0
+    # The read-modify-write below is what the breaker IS, so N processes racing
+    # through it could all read "0" and all open a tab. Hold an advisory lock
+    # across it where the OS has one (the storm was POSIX-only to begin with);
+    # if locking fails for any reason, carry on unlocked -- fail open.
+    lock_fh = None
     try:
-        if stamp.exists():
-            parts = stamp.read_text(encoding="utf-8").split()
-            if len(parts) == 2:
-                started, count = float(parts[0]), int(parts[1])
-                if now - started > window:          # old burst, start a fresh one
-                    started, count = now, 0
+        import fcntl
+        lock_fh = open(workdir / ".browser-opens.lock", "a+")
+        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
     except Exception:
-        started, count = now, 0
-
-    if count >= burst:
-        print(f"[browser] {count} launches in {int(now - started)}s -- not opening "
-              f"another tab. Open the address above by hand if you need it.",
-              file=sys.stderr)
-        return False
-
+        lock_fh = None
     try:
-        stamp.write_text(f"{started} {count + 1}", encoding="utf-8")
-    except Exception:
-        pass
-    return True
+        try:
+            if stamp.exists():
+                parts = stamp.read_text(encoding="utf-8").split()
+                if len(parts) == 2:
+                    started, count = float(parts[0]), int(parts[1])
+                    if now - started > window:          # old burst, start a fresh one
+                        started, count = now, 0
+        except Exception:
+            started, count = now, 0
+
+        if count >= burst:
+            print(f"[browser] {count} launches in {int(now - started)}s -- not opening "
+                  f"another tab. Open the address above by hand if you need it.",
+                  file=sys.stderr)
+            return False
+
+        try:
+            stamp.write_text(f"{started} {count + 1}", encoding="utf-8")
+        except Exception:
+            pass
+        return True
+    finally:
+        if lock_fh is not None:
+            try:
+                import fcntl
+                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+                lock_fh.close()
+            except Exception:
+                pass
+
+
+def _watchdog(backend, every: float = 15.0, silence: float = 600.0):
+    """Stop the server once the UI has been gone for a long while.
+
+    The packaged Mac app has no window, no console and -- because the process
+    has no Cocoa event loop -- nothing the Dock can quit. If the user simply
+    closes the browser tab, the server would otherwise live until logout, and
+    double-clicking the app again does nothing visible (LaunchServices sends a
+    reopen event to the running process instead of starting a new one). So the
+    UI sends a heartbeat, and when it has been silent for `silence` seconds the
+    server exits, which lets the next double-click start a fresh one.
+
+    Two things make this safe rather than trigger-happy:
+      * it does not start counting until a UI has connected at least once, so
+        starting the app and not opening the tab is not a death sentence, and
+        CI's headless smoke tests are untouched;
+      * `silence` is generous (10 min) and is measured in consecutive MISSED
+        TICKS, not wall clock -- browsers throttle a background tab's timers to
+        about once a minute, which still resets the count every tick or two,
+        and a laptop asleep neither ticks nor counts.
+    Quitting on purpose is the Quit button in the sidebar (POST /api/quit).
+    """
+    import signal
+    ticks_needed = max(1, int(silence / every))
+    missed = 0
+    while True:
+        time.sleep(every)
+        last = getattr(backend, "LAST_PING", None)
+        if last is None:
+            continue                          # no UI has ever connected
+        if time.monotonic() - last < every * 2:
+            missed = 0
+        else:
+            missed += 1
+        if missed >= ticks_needed:
+            print(f"[watchdog] no UI heartbeat for ~{int(silence)}s -- stopping.")
+            try:
+                os.kill(os.getpid(), signal.SIGTERM)
+            except Exception:
+                os._exit(0)
+            return
 
 
 def main():
@@ -288,7 +395,10 @@ def main():
     # POSIX semaphores may not be cleaned up at exit; that is a leak of a few
     # bytes, against an app that could not be shut down.
     argv1 = sys.argv[1] if len(sys.argv) > 1 else ""
-    if argv1.startswith("-"):
+    # (-psn_0_... is the process serial number old LaunchServices passed to
+    # every app it started. Modern macOS no longer does, but refusing to serve
+    # on it would be refusing a Finder launch, so it is the one dash exception.)
+    if argv1.startswith("-") and not argv1.startswith("-psn_"):
         print(f"[launcher] not serving for argv {sys.argv[1:]!r} -- this process "
               "was spawned by interpreter machinery, not by the user.",
               file=sys.stderr)
@@ -328,7 +438,8 @@ def main():
     url = f"http://127.0.0.1:{port}"
 
     # There is no console window to close on macOS -- say how to stop it there.
-    stop = ("Quit FiveAtlas from the Dock to stop the app."
+    stop = ("Stop it with the Quit button at the bottom of the sidebar "
+            "(it also stops by itself about ten minutes after the tab is closed)."
             if sys.platform == "darwin"
             else "Keep this window open while you use the app; close it to stop.")
 
@@ -343,6 +454,8 @@ def main():
         threading.Thread(target=_open_when_up, args=(url,), daemon=True).start()
     else:
         print("  (not opening a browser -- go to the address above)")
+    if sys.platform == "darwin":
+        threading.Thread(target=_watchdog, args=(backend,), daemon=True).start()
     try:
         uvicorn.run(backend.app, host="127.0.0.1", port=port, log_level="warning")
     except SystemExit as e:
