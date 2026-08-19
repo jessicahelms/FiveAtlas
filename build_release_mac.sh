@@ -12,8 +12,8 @@
 # trees never show up in git status.
 #
 # PyInstaller cannot cross-compile: this must run ON a Mac, and the app it makes
-# is for the arch of that Mac. Apple Silicon Mac -> arm64 app. Intel Mac (or a
-# macos-13 CI runner) -> x86_64 app. To ship both, build twice.
+# is for the arch of that Mac. Apple Silicon Mac -> arm64 app. (Intel is not
+# built or shipped; every Mac sold since 2021 is Apple Silicon.)
 #
 # Usage:
 #     ./build_release_mac.sh
@@ -22,7 +22,10 @@
 #
 set -euo pipefail
 
-VERSION="0.1.0"
+# Default: the git tag this tree is at, so a local build is labelled the same
+# way CI labels it. --version overrides; 0.0.0-dev if there is no tag at all.
+VERSION="$(git -C "$(dirname "${BASH_SOURCE[0]}")" describe --tags --dirty --always 2>/dev/null | sed 's/^v//')"
+VERSION="${VERSION:-0.0.0-dev}"
 OUT_ROOT="${HOME}/Library/Caches/FiveAtlas_build"
 SKIP_FRONTEND=0
 
@@ -104,7 +107,14 @@ if [[ -n "${CODESIGN_ID:-}" ]]; then
 else
     echo "      leaving PyInstaller's ad-hoc signature alone"
 fi
-codesign --verify --strict "$BUILT" && echo "      signature verifies"
+# Under `set -e`, `cmd && echo` does NOT stop the script when cmd fails, so a
+# broken signature used to be printed past rather than acted on.
+if codesign --verify --strict "$BUILT"; then
+    echo "      signature verifies"
+else
+    echo "the bundle signature does not verify -- refusing to package it" >&2
+    exit 1
+fi
 
 # Verifying is not the same as running: a bundle whose inner signatures have been
 # clobbered verifies fine and is SIGKILLed the moment the kernel loads it. So
@@ -147,29 +157,53 @@ rm -rf "$STAGED"
 ditto "$BUILT" "$STAGED"
 
 cat > "$RELEASE/README.txt" <<EOF
-FiveAtlas $VERSION  (macOS, $ARCH)
+FiveAtlas $VERSION  (macOS, Apple Silicon / $ARCH)
 
-To install:  open the .dmg and drag FiveAtlas into Applications.
+WHAT IT RUNS ON
+  An Apple Silicon Mac (M1, M2, M3, M4...) on macOS 11 Big Sur or newer.
+  Check: Apple menu -> About This Mac -> "Chip". If it says Intel, this build
+  will not open -- there is no Intel build.
+  Download the .dmg ON THE MAC ITSELF. Passing it through a Windows computer or
+  a shared drive can strip the parts macOS needs and you will get "damaged".
 
-To run:  double-click FiveAtlas. No window of its own appears -- it starts a
-local server and opens your browser on it. Quit it from the Dock when done.
+INSTALL
+  Double-click the .dmg, drag FiveAtlas onto the Applications folder in that
+  window, then eject the disk image. Always start it from Applications.
 
-FIRST LAUNCH: macOS will say FiveAtlas "cannot be opened because the developer
-cannot be verified", or that it is damaged. That is Gatekeeper reacting to an
-app downloaded from outside the App Store, not a problem with the app. Either:
-  * right-click FiveAtlas -> Open -> Open   (only needed once), or
-  * open Terminal and run:
-        xattr -dr com.apple.quarantine /Applications/FiveAtlas.app
+FIRST LAUNCH -- macOS will refuse it once
+  It will say FiveAtlas "is damaged and can't be opened", or "Apple could not
+  verify FiveAtlas is free of malware". That is Gatekeeper reacting to an app
+  that did not come through the App Store, not a fault in the app. The fix
+  that always works, once:
+     1. Press Cmd+Space, type  Terminal  and press Return.
+     2. Paste this one line exactly and press Return:
+            xattr -dr com.apple.quarantine /Applications/FiveAtlas.app
+        (nothing is printed when it worked)
+     3. Open FiveAtlas again.
+  On macOS 15 Sequoia you can instead open System Settings -> Privacy &
+  Security, scroll down to where it says FiveAtlas was blocked, and press
+  "Open Anyway". Right-click -> Open no longer works there.
 
-Apple Silicon vs Intel: this build is for $ARCH. An arm64 build will not run on
-an Intel Mac; an x86_64 build runs on Apple Silicon through Rosetta, slower.
+RUNNING IT
+  FiveAtlas has no window of its own. Open it and, after a few seconds (up to a
+  minute the very first time, while macOS checks it), a tab opens in your
+  browser at  http://127.0.0.1:8050  -- if no tab appears, type that address
+  into your browser yourself. It keeps serving while that tab is open.
+  To stop it: press "Quit FiveAtlas" at the bottom of the sidebar. It also
+  stops by itself about ten minutes after the last browser tab is closed.
+  (Quit FiveAtlas from the Dock does nothing -- it is not a windowed app.)
 
-To load your data: click the folder button at the top, or "Open folder..." in
-the sidebar, and pick the folder that holds your experiment.xenium file.
+YOUR DATA
+  Connect to the lab share in Finder first (Go -> Connect to Server). Then in
+  FiveAtlas press Open Folder and pick the experiment folder under Locations.
+  Pasting a path works too: it must look like /Volumes/... (not smb://...).
 
-Your original files are never modified. Edits and the log are saved under:
-   ~/Library/Application Support/FiveAtlas
-Use Export in the sidebar to write GeoJSON out where you want it.
+WHERE THINGS GO
+  Your original files are never modified. Edits, the dated backups of every
+  Save, and the log (FiveAtlas.log) live in
+     ~/Library/Application Support/FiveAtlas
+  (Finder: Shift+Cmd+G and paste that path.) If FiveAtlas will not start, that
+  log is what to send. Use Export in the sidebar to write GeoJSON out.
 EOF
 
 # 4. dmg ---------------------------------------------------------------------
@@ -183,12 +217,24 @@ cp "$RELEASE/README.txt" "$STAGE/README.txt"
 ln -s /Applications "$STAGE/Applications"      # the familiar drag-to-install layout
 hdiutil create -volname "FiveAtlas $VERSION" -srcfolder "$STAGE" \
     -ov -format UDZO "$DMG" >/dev/null
+hdiutil verify "$DMG" >/dev/null || { echo "dmg does not verify" >&2; exit 1; }
 
 # 5. zip ---------------------------------------------------------------------
+# The zip carries the README too: the .dmg had it and the .zip did not, so
+# whoever took the zip got no install or Gatekeeper instructions at all. A
+# parent folder, so it unzips tidily rather than spraying into Downloads.
 echo "[5/5] zipping..."
 ZIP="$RELEASE/FiveAtlas-$VERSION-macos-$ARCH.zip"
 rm -f "$ZIP"
-ditto -c -k --sequesterRsrc --keepParent "$STAGED" "$ZIP"
+ZSTAGE="$(mktemp -d)/FiveAtlas-$VERSION"
+mkdir -p "$ZSTAGE"
+ditto "$STAGED" "$ZSTAGE/FiveAtlas.app"
+cp "$RELEASE/README.txt" "$ZSTAGE/README.txt"
+ditto -c -k --sequesterRsrc --keepParent "$ZSTAGE" "$ZIP"
+rm -rf "$(dirname "$ZSTAGE")"
+
+# checksums, so a download can be checked against what CI produced
+( cd "$RELEASE" && shasum -a 256 "$(basename "$DMG")" "$(basename "$ZIP")" > SHA256SUMS )
 
 echo
 echo "Done. In $RELEASE :"

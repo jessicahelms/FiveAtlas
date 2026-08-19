@@ -112,6 +112,50 @@ def health():
     return {"ok": True}
 
 
+@app.get("/api/selftest")
+def selftest():
+    """Exercise the native stack (JPEG2000, blosc/zarr, GEOS, YAML, Pillow, Tk)
+    on embedded data and report per feature. CI refuses to publish a build where
+    any row fails; a colleague can open it to see what their copy can do."""
+    import selftest as _st
+    return _st.run()
+
+
+# -- lifecycle -----------------------------------------------------------------
+# The packaged app on macOS has no window and no console, and the process has no
+# Cocoa event loop, so the Dock cannot quit it. The UI is the only handle the
+# user has on it. `ping` is the UI's heartbeat; `quit` is the UI's Quit button.
+LAST_PING = None          # monotonic time of the last heartbeat, None until the
+                          # first UI ever connects -- the launcher's watchdog
+                          # only starts counting after that
+
+
+@app.post("/api/ping")
+def ping():
+    import time
+    global LAST_PING
+    LAST_PING = time.monotonic()
+    return {"ok": True}
+
+
+@app.post("/api/quit")
+def quit_app():
+    """Stop the server -- after this response has gone out, so the UI can show
+    "stopped" rather than a connection error. SIGTERM, because that is what
+    uvicorn already handles for a graceful exit (and on Windows os.kill with
+    SIGTERM ends the process outright, which is also what the user asked for)."""
+    import signal
+    import threading
+
+    def _stop():
+        try:
+            os.kill(os.getpid(), signal.SIGTERM)
+        except Exception:
+            os._exit(0)
+    threading.Timer(0.4, _stop).start()
+    return {"ok": True, "stopping": True}
+
+
 @app.get("/api/datasets")
 def list_datasets():
     return ds.all_datasets()

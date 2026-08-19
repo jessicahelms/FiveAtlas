@@ -17,12 +17,24 @@
         powershell -ExecutionPolicy Bypass -File build_release.ps1 -OutRoot D:\builds
 #>
 param(
-    [string]$Version = "0.1.0",
+    [string]$Version = "",
     [string]$OutRoot = "$env:LOCALAPPDATA\FiveAtlas_build",
     [switch]$SkipFrontend
 )
 
 $ErrorActionPreference = "Stop"
+
+# No -Version given: use the git tag this tree is at, the same way the macOS
+# CI labels its build from the tag. It was a fixed "0.1.0" here, which is how
+# the Windows zip of the very same commit as the Mac's 0.5.1 went out labelled
+# 0.1.0 -- and stamped 0.1.0 into the provenance of every file it edited.
+if (-not $Version) {
+    try {
+        $Version = (& git -C $PSScriptRoot describe --tags --dirty --always 2>$null)
+    } catch { $Version = $null }
+    if ($Version) { $Version = ($Version -replace '^v', '').Trim() }
+    if (-not $Version) { $Version = "0.0.0-dev" }
+}
 $App = $PSScriptRoot
 # Prefer the repo-local venv (what setup.bat creates, and what requirements.txt
 # governs) over the one in the parent directory. It used to look ONLY in the

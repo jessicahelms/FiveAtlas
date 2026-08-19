@@ -556,6 +556,25 @@ export default function App() {
     })();
   }, []);
 
+  // Heartbeat: tells the server a UI is attached. On a Mac the app has no
+  // window and nothing the Dock can quit, so the server stops itself once this
+  // has been silent for ~10 minutes (the browser throttles a background tab's
+  // timers to about once a minute, which is still plenty). One ping straight
+  // away so "a UI has connected" is true from the first paint.
+  const [stopped, setStopped] = useState(false);
+  useEffect(() => {
+    api.ping();
+    const t = setInterval(() => { if (!stopped) api.ping(); }, 15000);
+    return () => clearInterval(t);
+  }, [stopped]);
+
+  const doQuit = useCallback(async () => {
+    // eslint-disable-next-line no-alert
+    if (!window.confirm('Stop FiveAtlas? Anything not saved with Save will be lost.')) return;
+    try { await api.quitApp(); } catch (e) { /* it may already be gone */ }
+    setStopped(true);
+  }, []);
+
   // The damage vocabulary. Static and dataset-independent, so once is enough.
   // Null until it arrives — the draw panel then offers regions only, rather than
   // showing an empty damage list as though there were no designations.
@@ -1929,6 +1948,18 @@ export default function App() {
   );
   const canSnap = hasMovedGeometryDelta(snapBaseline, fc, movedList, idProp);
 
+  if (stopped) {
+    return (
+      <div className="root">
+        <div className="empty">
+          <b>FiveAtlas has stopped.</b> You can close this tab. To use it again,
+          open FiveAtlas from Applications (Mac) or double-click FiveAtlas.exe
+          (Windows).
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="root">
       <DatasetBar
@@ -1996,6 +2027,7 @@ export default function App() {
                 identity={identity} onIdentity={doSetIdentity}
                 onLoadFile={loadRegionsFromFile} onExport={doExport}
                 snapInfo={snapInfo} busy={busy} error={error}
+                onQuit={doQuit}
               />
               <ChannelPanel
                 geneInfo={geneInfo} channels={channels} onChannelChange={onChannelChange}

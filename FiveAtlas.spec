@@ -116,6 +116,12 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=["matplotlib", "scipy", "pandas", "IPython", "notebook", "pytest"],
+    # Our backend/datasets.py shares its name with the HuggingFace `datasets`
+    # package, and pyinstaller-hooks-contrib's hook for THAT package tells
+    # PyInstaller to ship the module as plain source beside the bytecode. It
+    # was harmless (no secrets in it) but it is the only .py in the bundle and
+    # a standing invitation to wonder why. Bytecode only, like everything else.
+    module_collection_mode={"datasets": "pyz"},
     noarchive=False,
     optimize=0,
 )
@@ -167,10 +173,15 @@ if MACOS:
             "CFBundleShortVersionString": VERSION,
             "CFBundleVersion": VERSION,
             "NSHighResolutionCapable": True,
+            # 11.0 is only honest if every binary inside agrees -- CI runs
+            # tests/check_min_os.py against the built bundle to make sure.
             "LSMinimumSystemVersion": "11.0",
-            # The app opens the user's browser and reads data folders they pick;
-            # it never needs to be the frontmost app on its own.
-            "LSBackgroundOnly": False,
+            # An agent app: no Dock icon, no Dock menu. The process has no
+            # Cocoa event loop (it is a uvicorn server that opens your browser),
+            # so with a Dock icon it would bounce, then read "Not Responding",
+            # and the Dock's Quit could not stop it. The UI is the handle: the
+            # sidebar's Quit button, and a heartbeat watchdog for a closed tab.
+            "LSUIElement": True,
             "NSHumanReadableCopyright": "Five Lab",
         },
     )
