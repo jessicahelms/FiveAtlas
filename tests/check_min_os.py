@@ -40,7 +40,10 @@ def _minos_thin(data, off=0):
     for _ in range(ncmds):
         cmd, size = struct.unpack_from(end + "II", data, p)
         if cmd == LC_BUILD_VERSION:
-            _, _, m, _, _ = struct.unpack_from(end + "IIIII", data, p)
+            # cmd, cmdsize, platform, minos, sdk -- minos is the FOURTH field.
+            # (Reading the third gave platform=1 -> "0.0.1" for everything, and
+            # the check passed a bundle it should have failed.)
+            _, _, _platform, m, _sdk = struct.unpack_from(end + "IIIII", data, p)
             minos = m
         elif cmd == LC_VERSION_MIN_MACOSX and minos is None:
             _, _, m, _ = struct.unpack_from(end + "IIII", data, p)
