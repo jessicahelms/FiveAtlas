@@ -513,9 +513,17 @@ def move_border(features, id_prop, region_a, region_b, points, drag_start=None, 
     B = _body(features, idx[region_b])
     pair = set(idx[region_a]) | set(idx[region_b])
     pair_base = unary_union([A, B]).buffer(0)
+    # The whole-section outline is NOT an obstacle. hemi covers the pair and a
+    # band beyond them, so counting it among the "others" made that band -- and
+    # with it the coastline -- protected ground the border could never move
+    # into. Real neighbours still are protected; the wrap-everything region is
+    # the one thing a border drag is allowed to poke past.
+    blanket_names = set(blankets(features, id_prop, keep=[region_a, region_b]))
     other_geoms = []
     for k, f in enumerate(features):
         if k in pair:
+            continue
+        if str((f.get("properties") or {}).get(id_prop)) in blanket_names:
             continue
         try:
             g = shape(f["geometry"])
@@ -573,6 +581,13 @@ def move_border(features, id_prop, region_a, region_b, points, drag_start=None, 
             U = pair_base.buffer(1.5, join_style=2).buffer(-1.5, join_style=2)
         if not protected.is_empty:
             U = unary_union([pair_base, _safe_difference(U, protected)]).buffer(0)
+        # A drag may reach PAST the pair's outer boundary -- past the section
+        # outline itself. The swept ground outside the pair joins the couple's
+        # territory as long as no real neighbour owns it, so the dragged region
+        # keeps the bulge instead of having it clipped back to the old coast.
+        grow = _safe_difference(sliver, unary_union([pair_base, protected]))
+        if not grow.is_empty and grow.area > 1e-6:
+            U = unary_union([U, grow]).buffer(0)
         U = _fill_new_unprotected_holes(U, protected=protected, preserve=pair_base)
         gA = _safe_intersection(gA, U)
         gB = _safe_difference(U, gA)       # exact complement -> conserved, zero overlap

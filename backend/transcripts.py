@@ -98,6 +98,32 @@ class GeneDensity:
             self._cache[gene] = (grid, [lo, max(hi, lo + 1), float(max(grid.max(), 1))])
         return self._cache[gene]
 
+    def _pooled(self, gene, factor):
+        """The gene's grid MEAN-pooled into factor x factor squares, plus its
+        own contrast. Mean, not sum: the value stays 'density per 10 um cell'
+        whatever the bin size, so the channel sliders keep their meaning when
+        the bin size changes."""
+        if factor <= 1:
+            return self._grid(gene)
+        key = (gene, int(factor))
+        if key not in self._cache:
+            gc = self._grid(gene)
+            if not gc:
+                return None
+            grid, _ = gc
+            f = int(factor)
+            R = (self.rows + f - 1) // f
+            C = (self.cols + f - 1) // f
+            pad = np.zeros((R * f, C * f), np.float32)
+            pad[:self.rows, :self.cols] = grid
+            pooled = pad.reshape(R, f, C, f).mean(axis=(1, 3))
+            pos = pooled[pooled > 0]
+            lo = float(np.percentile(pos, 1.0)) if pos.size else 0.0
+            hi = float(np.percentile(pos, 99.5)) if pos.size else 1.0
+            self._cache[key] = (pooled, [lo, max(hi, lo + 1e-6),
+                                         float(max(pooled.max(), 1e-6))])
+        return self._cache[key]
+
     def contrast(self, gene):
         gc = self._grid(gene)
         if not gc:
@@ -114,30 +140,68 @@ class GeneDensity:
                         "min": c[0], "max": c[1], "dataMax": c[2]})
         return out
 
-    def composite(self, spec):
-        out = np.zeros((self.rows, self.cols, 3), np.float32)
+    def composite(self, spec, mode="glow", bin_um=None):
+        """Two renderings of the same densities:
+
+        * "glow" (the original): additive RGB, black-transparent lows -- genes
+          shine over the dark imagery.
+        * "ink": paper model. Each bin is a solid square; a gene reads as its
+          colour diluted toward white when sparse and saturated-dark when
+          dense, and two genes MULTIPLY like inks -- dense blue over dense red
+          goes dark purple. This is the one that behaves like a printed
+          heat map, and it is meant to be drawn with nearest-neighbour
+          sampling so the squares stay squares.
+
+        `bin_um` re-bins the native 10 um grid into larger squares (mean
+        density, so the sliders keep their scale).
+        """
+        factor = max(1, int(round(float(bin_um) / self.grid_x))) if bin_um else 1
+        R = (self.rows + factor - 1) // factor if factor > 1 else self.rows
+        C = (self.cols + factor - 1) // factor if factor > 1 else self.cols
+        ink = str(mode or "glow").lower() == "ink"
+
+        paper = np.ones((R, C, 3), np.float32)      # ink: white paper
+        out = np.zeros((R, C, 3), np.float32)       # glow: black void
+        miss = np.ones((R, C), np.float32)          # prod(1 - s) over genes
+        any_gene = False
         for ch in spec:
             if not ch.get("visible", True):
                 continue
-            gc = self._grid(ch.get("gene"))
+            gc = self._pooled(ch.get("gene"), factor)
             if not gc:
                 continue
+            any_gene = True
             grid, c = gc
             lo = float(ch.get("min", c[0]))
             hi = float(ch.get("max", c[1]))
             if hi <= lo:
                 hi = lo + 1
             norm = np.clip((grid - lo) / (hi - lo), 0, 1)
-            col = ch.get("color", [255, 255, 255])
-            for k in range(3):
-                out[..., k] += norm * col[k]
+            col = np.asarray(ch.get("color", [255, 255, 255]), np.float32)
+            if ink:
+                # each gene is an ink layer: absorb (1 - tint) scaled by s
+                tint = col / 255.0
+                paper *= 1.0 - norm[..., None] * (1.0 - tint[None, None, :])
+                miss *= 1.0 - norm
+            else:
+                for k in range(3):
+                    out[..., k] += norm * col[k]
+        if ink:
+            if not any_gene:
+                return np.zeros((R, C, 4), np.uint8)
+            cover = 1.0 - miss                       # any ink at all?
+            # rint, not truncation: 0.999*60 must come back as 60, or a pure
+            # ink at full density is one shade off its own swatch
+            rgb = np.clip(np.rint(paper * 255.0), 0, 255).astype(np.uint8)
+            alpha = (np.sqrt(np.clip(cover, 0, 1)) * 255).astype(np.uint8)
+            return np.dstack([rgb, alpha])
         rgb = np.clip(out, 0, 255).astype(np.uint8)
         alpha = rgb.max(axis=2).astype(np.uint8)
         return np.dstack([rgb, alpha])
 
-    def composite_png(self, spec):
+    def composite_png(self, spec, mode="glow", bin_um=None):
         with self._lock:
-            rgba = self.composite(spec)
+            rgba = self.composite(spec, mode=mode, bin_um=bin_um)
         buf = io.BytesIO()
         Image.fromarray(rgba).save(buf, format="PNG")
         return buf.getvalue()

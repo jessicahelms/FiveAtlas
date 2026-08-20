@@ -146,7 +146,7 @@ def _pick_mac(kind, initial=None, title=None):
     if kind != "folder":
         # UTIs rather than extensions: "public.json" covers .json, and .geojson is
         # not a registered type on every macOS version, so allow plain text too.
-        parts += ['of type {"public.json", "public.plain-text", "public.data"}']
+        parts += ['of type {"public.json", "public.comma-separated-values-text", "public.plain-text", "public.data"}']
     # `default location` needs a real absolute directory; AppleScript errors on a
     # relative one, and "" would resolve to the server's CWD.
     if initial and Path(initial).is_absolute() and Path(initial).is_dir():
@@ -189,7 +189,8 @@ def _pick_tk(kind, initial=None, title=None):
     if kind == "folder":
         return filedialog.askdirectory(**kw) or ""
     return filedialog.askopenfilename(
-        filetypes=[("GeoJSON", "*.geojson *.json"), ("All files", "*.*")], **kw) or ""
+        filetypes=[("Regions (GeoJSON / CSV)", "*.geojson *.json *.csv *.tsv"),
+                   ("All files", "*.*")], **kw) or ""
 
 
 def pick(kind="folder", initial=None, title=None):
@@ -213,5 +214,5 @@ if __name__ == "__main__":
     which = sys.argv[1] if len(sys.argv) > 1 else "folder"
     start = sys.argv[2] if len(sys.argv) > 2 else None
     heading = ("Select dataset folder" if which == "folder"
-               else "Select a GeoJSON region file")
+               else "Select a region file (GeoJSON or CSV)")
     print(pick(which, start or None, heading))

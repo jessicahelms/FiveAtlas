@@ -26,6 +26,14 @@ body {
   padding: 16px;
   overflow-y: auto;
 }
+/* the drag handle between the sidebar and the canvas */
+.splitter {
+  flex: 0 0 6px;
+  cursor: col-resize;
+  background: #10141b;
+  border-right: 1px solid #232a35;
+}
+.splitter:hover { background: #2f3a4c; }
 .sidebar h1 { font-size: 16px; margin: 0 0 4px; }
 .ds { font-size: 13px; color: #9aa4b2; }
 .dims { font-size: 11px; color: #6b7482; margin-bottom: 8px; }

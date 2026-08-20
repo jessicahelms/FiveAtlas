@@ -70,7 +70,7 @@ ITEMS = [
     "already be in one folder based on how Xenium exports their data. If there "
     "is a .geojson file in that folder, it will load in automatically. If you "
     "want to load in a different one, you can scroll down on the sidebar and "
-    "press “Load regions file”. This may take a few seconds, and if it "
+    "press “Load regions file” — it takes GeoJSON, or a CSV of vertices (one row per vertex with name,x,y columns; Xenium's micron column names are converted automatically). This may take a few seconds, and if it "
     "does not pop up, look at your task bar (Windows) or your browser (Mac) for "
     "a new tab! If you prefer to paste a path on a Mac, it must start with "
     "/Volumes/… (not smb://…). Your edits, the dated backup from every Save, "
@@ -79,7 +79,9 @@ ITEMS = [
     "files are never changed.",
 
     "If you are ever unsure about how to use certain features, there are "
-    "instructions that pop up after you click on a feature.",
+    "instructions that pop up after you click on a feature. The sidebar can be "
+    "made wider or narrower by dragging the thin strip between it and the "
+    "image.",
 
     # -- stains and brightness -------------------------------------------------------
     "The Stains panel lists every morphology_focus channel (DAPI, 18S, "
@@ -89,6 +91,15 @@ ITEMS = [
     "narrowing the range brightens the faint staining in between. The image "
     "updates when you pause dragging for a moment. Gene channels have the "
     "same controls.",
+
+    # -- transcript heat map ------------------------------------------------------------
+    "Gene expression has two looks, switched at the top of the Genes panel. "
+    "Glow is the familiar additive one. Heat map draws the transcripts as "
+    "perfect squares: pick the square size (10, 20, 40 or 80 microns), and "
+    "each gene reads light where it is sparse and dark where it is dense — "
+    "a blue gene runs pale-blue to deep blue. Add a second gene in red and "
+    "the two mix like inks: where both are dense the squares go dark purple. "
+    "The min/max sliders still set what counts as sparse and dense.",
 
     "All of your regions are listed in the sidebar. Click one to select it. "
     "Right click a region (two-finger click on a Mac trackpad), either in the "
@@ -126,7 +137,10 @@ ITEMS = [
 
     "Edit shared borders works on the line between two regions. Click two "
     "regions that touch and you can drag the border between them, and both "
-    "sides update together so you never open up a gap.",
+    "sides update together so you never open up a gap. A drag may also reach "
+    "PAST the section outline — the region grows into the empty ground "
+    "beyond it (rebuild “hemi” afterwards if you want the outline to "
+    "catch up). Other regions' territory is never taken this way.",
 
     "Pick two or more regions and press Share borders to tidy up all the "
     "boundaries at once: small gaps get filled, overlaps get removed, and "
@@ -235,7 +249,9 @@ ITEMS = [
 
     "When you are done, press Export. Merged gives you one .geojson with "
     "every region in it, and Separate gives you a zip with one file per "
-    "region.",
+    "region. AnnData (.h5ad) exports a regions × genes count table for "
+    "scanpy — the transcript density summed inside each region, with areas "
+    "and centroids — ready for Python analysis.",
 ]
 
 

@@ -171,7 +171,7 @@ export default function Viewer({
   gapPreview, onPickGap,
   propRing, onRegionMenu,
   onGrabVertex, onReleaseDrag,
-  geneBitmap, geneBounds, stainInfo, stainChannels, layers, regionsOff,
+  geneBitmap, geneBounds, geneMode, stainInfo, stainChannels, layers, regionsOff,
   bordersOff, fillsOff,
 }) {
   const L = layers || DEFAULT_LAYERS;
@@ -259,8 +259,19 @@ export default function Viewer({
       })
     : null;
 
+  // Ink mode is SQUARE BINS: nearest sampling keeps them square. The default
+  // linear filter smears each hot bin into a soft plus-shape -- the "crosses".
   const genes = geneBitmap && geneBounds
-    ? new BitmapLayer({ id: 'genes', image: geneBitmap, bounds: geneBounds, opacity: L.geneOpacity, pickable: false })
+    ? new BitmapLayer({
+        id: `genes-${geneMode || 'glow'}`,
+        image: geneBitmap,
+        bounds: geneBounds,
+        opacity: L.geneOpacity,
+        pickable: false,
+        textureParameters: geneMode === 'ink'
+          ? { minFilter: 'nearest', magFilter: 'nearest' }
+          : undefined,
+      })
     : null;
 
   const regions = new EditableGeoJsonLayer({
