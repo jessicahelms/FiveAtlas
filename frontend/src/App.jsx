@@ -410,20 +410,19 @@ export default function App() {
     try {
       const v = JSON.parse(localStorage.getItem('fiveatlas.settings') || '{}');
       return { zoom: Number(v.zoom) || 1,
-               hidden: new Set(Array.isArray(v.hidden) ? v.hidden : []) };
-    } catch (e) { return { zoom: 1, hidden: new Set() }; }
+               collapsed: new Set(Array.isArray(v.collapsed) ? v.collapsed : []) };
+    } catch (e) { return { zoom: 1, collapsed: new Set() }; }
   });
   const applyUiSettings = useCallback((next) => {
     setUiSettings(next);
     try {
       localStorage.setItem('fiveatlas.settings',
-        JSON.stringify({ zoom: next.zoom, hidden: [...next.hidden] }));
+        JSON.stringify({ zoom: next.zoom, collapsed: [...next.collapsed] }));
     } catch (e) { /* ok */ }
-    // Hiding the tool you are inside would strand the mode with no button to
-    // leave by -- fall back to view.
-    const modeKey = { modify: 'editPoints', border: 'borders', split: 'split',
-                      draw: 'draw', dissolve: 'gap', clean: 'clean' };
-    setMode((m) => (modeKey[m] && next.hidden.has(modeKey[m]) ? 'view' : m));
+    // Folding the Edit section away while inside one of its modes would leave
+    // the mode running with no visible way out -- fall back to view.
+    const editModes = new Set(['modify', 'border', 'split', 'draw', 'dissolve', 'clean']);
+    setMode((m) => (editModes.has(m) && next.collapsed.has('edit') ? 'view' : m));
   }, []);
 
   // sidebar width, draggable via the splitter; remembered across sessions

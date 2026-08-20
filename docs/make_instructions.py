@@ -81,10 +81,10 @@ ITEMS = [
     "If you are ever unsure about how to use certain features, there are "
     "instructions that pop up after you click on a feature. The sidebar can be "
     "made wider or narrower by dragging the thin strip between it and the "
-    "image, and the gear button at the top opens Settings: pick a bigger or "
-    "smaller text size, and untick any tools you never use to hide them from "
-    "the sidebar (nothing else changes — Undo, Save, Export and Quit always "
-    "stay). When a newer FiveAtlas is on the download page, a line at the top "
+    "image. Every section title has a little arrow — click it to fold that "
+    "section away and the sidebar stays short; click again to bring it back. "
+    "The gear button at the top opens Settings for a bigger or smaller text "
+    "size. When a newer FiveAtlas is on the download page, a line at the top "
     "of the sidebar says so and links to it — updating is always your choice, "
     "nothing downloads itself.",
 
