@@ -1252,15 +1252,51 @@ def _rename_props(feature, id_prop, name):
     return feature
 
 
-def merge_regions(features, id_prop, names, new_name=None):
-    """Combine the named regions into ONE feature (geometric union; disjoint parts
-    become a MultiPolygon). Keeps the first region's properties/colour, renamed to
-    `new_name` or a common base name. Returns {features, name}."""
+def merge_regions(features, id_prop, names, new_name=None, seam_tol=40.0):
+    """Combine the named regions into ONE region -- the shared border DISSOLVES.
+
+    A geometric union alone is not enough for that: in these files adjacent
+    regions abut without exactly coinciding, so the union keeps the lobes as
+    separate parts of a MultiPolygon and the "merged" region still draws the
+    old border down its middle. So after the union, the hairline seams between
+    the merged bodies are sealed: close over the gap, keep only the sliver
+    corridors that touch at least two of the merged bodies (the coastline and
+    genuine distance between detached pieces are never bridged), and take them
+    in. Regions that truly do not touch stay a MultiPolygon on purpose --
+    merging TH with a detached islet must not invent tissue between them.
+
+    Keeps the first region's properties/colour, renamed to `new_name` or a
+    common base name. Returns {features, name, parts, sealed}.
+    """
     idx = _index_all(features, id_prop)
     sel = [str(n) for n in names if str(n) in idx]
     if len(sel) < 2:
         raise ValueError("pick at least two regions to merge")
-    merged = unary_union([_body(features, idx[n]) for n in sel]).buffer(0)
+    bodies = [_body(features, idx[n]) for n in sel]
+    merged = unary_union(bodies).buffer(0)
+
+    sealed = 0.0
+    parts = _polys(merged)
+    if len(parts) > 1 or any(p.interiors for p in parts):
+        w = max(float(seam_tol) / 2.0, 1.0)
+        try:
+            closed = merged.buffer(w, join_style=2).buffer(-w, join_style=2).buffer(0)
+            raw = _safe_difference(closed, merged)
+        except Exception:
+            raw = None
+        fill = []
+        for c in (_polys(raw) if raw is not None and not raw.is_empty else []):
+            if not c.buffer(-w / 2.0).is_empty:
+                continue                      # a fat pocket, not a hairline seam
+            collar = c.buffer(1.0)
+            if sum(1 for b in bodies if b.intersects(collar)) >= 2:
+                fill.append(c)
+        if fill:
+            merged = unary_union([merged] + fill).buffer(0)
+            merged = _snap_polys(merged, 0.01)     # fuse the hairline join
+            merged = clean_geom(merged, smooth=False)
+            sealed = float(sum(c.area for c in fill))
+
     name = str(new_name).strip() if new_name else _common_base_name(sel)
     keep = idx[sel[0]][0]
     first = _rename_props(json.loads(json.dumps(features[keep])), id_prop, name)
@@ -1274,7 +1310,8 @@ def merge_regions(features, id_prop, names, new_name=None):
             continue
         else:
             out.append(json.loads(json.dumps(f)))
-    return {"features": out, "name": name}
+    return {"features": out, "name": name,
+            "parts": len(_polys(merged)), "sealed": sealed}
 
 
 def _side_of_path(path_coords, pt):

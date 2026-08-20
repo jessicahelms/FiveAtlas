@@ -1131,10 +1131,12 @@ async def regions_merge(ds_id: str, request: Request):
         raise HTTPException(422, str(e))
     except Exception as e:
         raise HTTPException(500, f"merge failed: {e}")
-    return {**provenance.stamped(res["features"], fc, "merge",
-                                 f"{' + '.join(str(n) for n in names)} -> {res['name']}",
-                                 names),
-            "name": res["name"]}
+    detail = (f"{' + '.join(str(n) for n in names)} -> {res['name']}"
+              + (f", seam sealed ({res['sealed']:,.0f} px²)" if res.get("sealed") else "")
+              + (f" -- still {res['parts']} separate pieces" if res.get("parts", 1) > 1 else ""))
+    return {**provenance.stamped(res["features"], fc, "merge", detail, names),
+            "name": res["name"], "parts": res.get("parts"),
+            "sealed": res.get("sealed")}
 
 
 @app.post("/api/datasets/{ds_id}/regions/split")

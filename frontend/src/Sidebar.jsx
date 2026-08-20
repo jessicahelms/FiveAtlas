@@ -22,6 +22,7 @@ export default function Sidebar({
   onRestoreOriginal, orientation, onOrientation,
   onAnswerReportDamage,
   regionsOff, onToggleRegionOff, outlinePreview, onOutline, onDismissOutline,
+  bordersOff, onToggleBorderOff, fillsOff, onToggleFillOff, onAllFaces,
   onToggleClean, cleanFound, cleanMsg, onApplyClean, onCancelClean,
   cellsReport, cellSep, cellsAll, onLoadCells, onDismissCells, onCellSep,
   onCellsAll, onRegionDamage,
@@ -60,6 +61,8 @@ export default function Sidebar({
     ? formatName(drawKind, nextNumber(names, drawKind, aliases))
     : null;
   const off = regionsOff || new Set();
+  const bOff = bordersOff || new Set();
+  const fOff = fillsOff || new Set();
 
   return (
     <div className="pane">
@@ -92,6 +95,20 @@ export default function Sidebar({
       <div className="section">
         <div className="section-title">
           Regions ({names.length}){mode === 'border' ? ' — click to pick' : ''}
+        </div>
+        {/* faces all at once: the common move while gap-filling is "hide every
+            face, keep every border", and 23 clicks is not a control */}
+        <div className="row">
+          <button className="btn sm" disabled={busy}
+            title="hide every region's face — borders stay; nothing else changes"
+            onClick={() => onAllFaces && onAllFaces(false)}>
+            Faces off
+          </button>
+          <button className="btn sm" disabled={busy}
+            title="show every region's face again"
+            onClick={() => onAllFaces && onAllFaces(true)}>
+            Faces on
+          </button>
         </div>
         {off.size > 0 && (
           <div className="hint dim">
@@ -131,6 +148,28 @@ export default function Sidebar({
                 </span>
                 <span className="rowend">
                   {pi >= 0 ? pickTag(pi) : (moved.has(nm) ? '●' : '')}
+                  {/* display-only: face and border. Operations see the region
+                      exactly as before -- unlike the eye. */}
+                  <button
+                    className="eye" disabled={busy}
+                    title={fOff.has(nm)
+                      ? 'face hidden — click to fill it in again'
+                      : 'hide the face: keep the border, see the imagery through it'}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onToggleFillOff && onToggleFillOff(nm);
+                    }}
+                  >{fOff.has(nm) ? '▢' : '▩'}</button>
+                  <button
+                    className="eye" disabled={busy}
+                    title={bOff.has(nm)
+                      ? 'border hidden — click to draw it again'
+                      : 'hide the border: keep the face, no outline'}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onToggleBorderOff && onToggleBorderOff(nm);
+                    }}
+                  >{bOff.has(nm) ? '◌' : '◯'}</button>
                   {/* Switch a region off: it stays in the file, but the
                       operations that assume a clean partition stop seeing it.
                       Without this, `hemi` covering everything means no gap can
