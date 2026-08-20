@@ -58,9 +58,8 @@ ITEMS = [
     "it (up to a minute the very first time, while macOS checks it) a new tab "
     "opens in your browser at http://127.0.0.1:8050 — if no tab appears, type "
     "that address into your browser yourself. It keeps running while you work, "
-    "even if you close the tab. To stop it, press “Quit FiveAtlas” at the "
-    "bottom of the sidebar; it also stops by itself about ten minutes after "
-    "you close the tab. On Windows the black window that opens is the app: "
+    "even if you close the tab for a while. To stop it, just close the tab — "
+    "it stops by itself about ten minutes later. On Windows the black window that opens is the app: "
     "keep it open while you work and close it to stop.",
 
     "Your data lives on the shared drive. On a Mac, connect to it in the Finder "

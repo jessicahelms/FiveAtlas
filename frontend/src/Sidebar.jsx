@@ -29,7 +29,7 @@ export default function Sidebar({
   notesInfo, notesReport, notesScope, onNotesScope, onNotesPreview, onNotesSave,
   onNotesCreate, onDismissNotes, identity, onIdentity,
   onLoadFile, onExport, onExportAnnData,
-  snapInfo, busy, error, onQuit,
+  snapInfo, busy, error,
   uiSettings, onUiSettings, updateInfo,
 }) {
   const [confirmRestore, setConfirmRestore] = useState(false);
@@ -1104,15 +1104,6 @@ export default function Sidebar({
 
       {error && <div className="err">{error}</div>}
       {busy && <div className="busy">working…</div>}
-
-      {/* The app has no window of its own; on a Mac there is not even a
-          console to close. This is how it stops. */}
-      <div className="section">
-        <button className="btn" disabled={busy} onClick={onQuit}
-          title="Stop the FiveAtlas server. Save first -- unsaved edits are lost.">
-          ⏻ Quit FiveAtlas
-        </button>
-      </div>
     </div>
   );
 }
