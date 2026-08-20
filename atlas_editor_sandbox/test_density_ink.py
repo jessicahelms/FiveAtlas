@@ -71,6 +71,22 @@ check("half density reads as LIGHTER blue (toward white)",
       and sum(map(int, half[:3])) > sum(map(int, b[:3])) and half[3] < 255,
       str(half.tolist()))
 
+print("\nevery occupied square is at least slightly the gene's colour")
+faint = np.zeros((1, 8, 8), np.float32)
+faint[0, 0, 0] = 1.0          # far below the slider's low end
+faint[0, 4, 4] = 100.0        # the hot bin that sets the range
+gdf = make_gd(faint)
+img_f = gdf.composite([{"gene": "g0", "color": BLUE, "min": 10, "max": 100}],
+                      mode="ink")
+lowpx = img_f[0, 0]
+check("a bin below the slider's low end is still visibly tinted",
+      lowpx[3] > 60 and int(lowpx[2]) > int(lowpx[0]),
+      str(lowpx.tolist()))
+check("an empty bin stays fully clear", img_f[7, 7, 3] == 0)
+check("the hot bin is far darker than the faint one",
+      int(img_f[4, 4, 0]) < int(lowpx[0]) - 80,
+      f"hot {img_f[4, 4].tolist()} vs faint {lowpx.tolist()}")
+
 print("\ntwo inks multiply")
 overlap = np.zeros((2, 4, 4), np.float32)
 overlap[0, :, :] = 10.0

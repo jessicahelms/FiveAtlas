@@ -179,10 +179,16 @@ class GeneDensity:
             norm = np.clip((grid - lo) / (hi - lo), 0, 1)
             col = np.asarray(ch.get("color", [255, 255, 255]), np.float32)
             if ink:
+                # Every OCCUPIED square is at least slightly the gene's colour:
+                # a bin holding two transcripts must not vanish just because the
+                # slider's low end sits above it. The floor is a fifth of full
+                # ink; density ramps the rest. Truly empty bins stay clear.
+                occ = grid > 0
+                s_eff = np.where(occ, 0.2 + 0.8 * norm, 0.0).astype(np.float32)
                 # each gene is an ink layer: absorb (1 - tint) scaled by s
                 tint = col / 255.0
-                paper *= 1.0 - norm[..., None] * (1.0 - tint[None, None, :])
-                miss *= 1.0 - norm
+                paper *= 1.0 - s_eff[..., None] * (1.0 - tint[None, None, :])
+                miss *= 1.0 - s_eff
             else:
                 for k in range(3):
                     out[..., k] += norm * col[k]
