@@ -71,6 +71,7 @@ export default function ChannelPanel({
   stainInfo, stainChannels, onStainChange,
   layers, onLayerChange,
   geneMode, onGeneMode, geneBin, onGeneBin,
+  genePalette, onGenePalette,
 }) {
   const addGene = (input) => {
     const value = input.value.trim();
@@ -145,6 +146,18 @@ export default function ChannelPanel({
               onClick={() => onGeneMode && onGeneMode('ink')}>
               Heat map
             </button>
+            {geneMode === 'ink' && (
+              <select value={genePalette || 'genes'}
+                title="colour scale: your per-gene colours mixing like inks, or one scientific map over the combined density"
+                onChange={(e) => onGenePalette && onGenePalette(e.target.value)}>
+                <option value="genes">Gene colours</option>
+                <option value="viridis">Viridis</option>
+                <option value="inferno">Inferno</option>
+                <option value="magma">Magma</option>
+                <option value="plasma">Plasma</option>
+                <option value="turbo">Turbo</option>
+              </select>
+            )}
             <select value={geneBin || 10}
               title="bin size — the squares' size in microns (10 is the data's native grid)"
               onChange={(e) => onGeneBin && onGeneBin(parseInt(e.target.value, 10))}>

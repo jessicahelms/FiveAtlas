@@ -140,7 +140,7 @@ class GeneDensity:
                         "min": c[0], "max": c[1], "dataMax": c[2]})
         return out
 
-    def composite(self, spec, mode="glow", bin_um=None):
+    def composite(self, spec, mode="glow", bin_um=None, palette=None):
         """Two renderings of the same densities:
 
         * "glow" (the original): additive RGB, black-transparent lows -- genes
@@ -159,6 +159,40 @@ class GeneDensity:
         R = (self.rows + factor - 1) // factor if factor > 1 else self.rows
         C = (self.cols + factor - 1) // factor if factor > 1 else self.cols
         ink = str(mode or "glow").lower() == "ink"
+
+        # A named scientific palette (viridis, inferno...) renders the COMBINED
+        # density of the visible genes through one colour map, the way the
+        # Xenium Explorer draws its density maps. Ink/glow ignore it.
+        if ink and palette and str(palette).lower() != "genes":
+            import palettes
+            table = palettes.lut(palette)
+            if table is not None:
+                total = np.zeros((R, C), np.float32)
+                occ = np.zeros((R, C), bool)
+                used = False
+                for ch in spec:
+                    if not ch.get("visible", True):
+                        continue
+                    gc = self._pooled(ch.get("gene"), factor)
+                    if not gc:
+                        continue
+                    used = True
+                    grid, c = gc
+                    lo = float(ch.get("min", c[0]))
+                    hi = float(ch.get("max", c[1]))
+                    if hi <= lo:
+                        hi = lo + 1
+                    total += np.clip((grid - lo) / (hi - lo), 0, 1)
+                    occ |= grid > 0
+                if not used:
+                    return np.zeros((R, C, 4), np.uint8)
+                sat = np.clip(total, 0, 1)
+                # occupied bins never fall off the bottom of the map
+                sat = np.where(occ, 0.06 + 0.94 * sat, 0.0)
+                idx = np.clip(np.rint(sat * 255), 0, 255).astype(np.uint8)
+                rgb = table[idx]
+                alpha = np.where(occ, 235, 0).astype(np.uint8)
+                return np.dstack([rgb, alpha])
 
         paper = np.ones((R, C, 3), np.float32)      # ink: white paper
         out = np.zeros((R, C, 3), np.float32)       # glow: black void
@@ -205,9 +239,9 @@ class GeneDensity:
         alpha = rgb.max(axis=2).astype(np.uint8)
         return np.dstack([rgb, alpha])
 
-    def composite_png(self, spec, mode="glow", bin_um=None):
+    def composite_png(self, spec, mode="glow", bin_um=None, palette=None):
         with self._lock:
-            rgba = self.composite(spec, mode=mode, bin_um=bin_um)
+            rgba = self.composite(spec, mode=mode, bin_um=bin_um, palette=palette)
         buf = io.BytesIO()
         Image.fromarray(rgba).save(buf, format="PNG")
         return buf.getvalue()

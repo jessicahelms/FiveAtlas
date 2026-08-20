@@ -417,11 +417,17 @@ export async function exportAnnData(ds, fc) {
   return r.blob();
 }
 
-export async function compositeBitmap(ds, spec, { mode = 'glow', binUm = null } = {}) {
+export async function updateCheck() {
+  const r = await fetch(`${API}/update-check`);
+  if (!r.ok) throw new Error(`update-check ${r.status}`);
+  return r.json(); // { current, latest?, url?, newer?, error? }
+}
+
+export async function compositeBitmap(ds, spec, { mode = 'glow', binUm = null, palette = null } = {}) {
   const r = await fetch(`${API}/datasets/${ds}/genes/composite.png`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ channels: spec, mode, binUm }),
+    body: JSON.stringify({ channels: spec, mode, binUm, palette }),
   });
   if (!r.ok) throw new Error(`composite ${r.status}`);
   const blob = await r.blob();

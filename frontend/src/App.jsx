@@ -403,6 +403,29 @@ export default function App() {
   // can be found — and Check geometry reports 22 overlaps that are all correct.
   // Switching a region off leaves it in the file, untouched; it is only ignored
   // by the operations that assume a clean partition, and hidden on the map.
+  // UI settings: sidebar scale and which tools are shown. Hiding is DISPLAY
+  // only -- a hidden tool's backend routes still exist; the button is just not
+  // rendered for the person who never uses it.
+  const [uiSettings, setUiSettings] = useState(() => {
+    try {
+      const v = JSON.parse(localStorage.getItem('fiveatlas.settings') || '{}');
+      return { zoom: Number(v.zoom) || 1,
+               hidden: new Set(Array.isArray(v.hidden) ? v.hidden : []) };
+    } catch (e) { return { zoom: 1, hidden: new Set() }; }
+  });
+  const applyUiSettings = useCallback((next) => {
+    setUiSettings(next);
+    try {
+      localStorage.setItem('fiveatlas.settings',
+        JSON.stringify({ zoom: next.zoom, hidden: [...next.hidden] }));
+    } catch (e) { /* ok */ }
+    // Hiding the tool you are inside would strand the mode with no button to
+    // leave by -- fall back to view.
+    const modeKey = { modify: 'editPoints', border: 'borders', split: 'split',
+                      draw: 'draw', dissolve: 'gap', clean: 'clean' };
+    setMode((m) => (modeKey[m] && next.hidden.has(modeKey[m]) ? 'view' : m));
+  }, []);
+
   // sidebar width, draggable via the splitter; remembered across sessions
   const [paneW, setPaneW] = useState(() => {
     try {
@@ -535,6 +558,7 @@ export default function App() {
   // bin size in microns (10 = the grid's native resolution)
   const [geneMode, setGeneMode] = useState('glow');
   const [geneBin, setGeneBin] = useState(10);
+  const [genePalette, setGenePalette] = useState('genes');
   const [geneBounds, setGeneBounds] = useState(null);
   // stains (morphology_focus, full-res tiled)
   const [stainInfo, setStainInfo] = useState(null);
@@ -583,6 +607,18 @@ export default function App() {
         setDatasets(list);
         setDsId((cur) => cur || (list[0] && list[0].id) || null);
       } catch (e) { /* ignore */ }
+    })();
+  }, []);
+
+  // A newer release on GitHub? Checked once per app load, shown as a quiet
+  // line in the sidebar. Never downloads anything by itself.
+  const [updateInfo, setUpdateInfo] = useState(null);
+  useEffect(() => {
+    (async () => {
+      try {
+        const u = await api.updateCheck();
+        if (u && u.newer) setUpdateInfo(u);
+      } catch (e) { /* offline is fine */ }
     })();
   }, []);
 
@@ -683,12 +719,12 @@ export default function App() {
     const t = setTimeout(async () => {
       try {
         const bmp = await api.compositeBitmap(dsId, channels,
-          { mode: geneMode, binUm: geneBin });
+          { mode: geneMode, binUm: geneBin, palette: genePalette });
         if (!cancel) setGeneBitmap(bmp);
       } catch (e) { /* ignore */ }
     }, 120);
     return () => { cancel = true; clearTimeout(t); };
-  }, [channels, dsId, geneOrientKey, geneMode, geneBin]);
+  }, [channels, dsId, geneOrientKey, geneMode, geneBin, genePalette]);
 
   const loadStainContrast = useCallback(async (idx, tries = 0) => {
     try {
@@ -2023,7 +2059,8 @@ export default function App() {
         {dsId && !error && (!info || !fc) && <div className="loading">Loading dataset…</div>}
         {dsId && info && fc && (
           <>
-            <aside className="sidebar" style={{ flexBasis: paneW, width: paneW }}>
+            <aside className="sidebar"
+              style={{ flexBasis: paneW, width: paneW, zoom: uiSettings.zoom }}>
               <Sidebar
                 info={info} fc={fc} sources={sources} selected={selected}
                 onRegionMenu={openRegionMenu}
@@ -2079,6 +2116,8 @@ export default function App() {
                 onNotesPreview={() => doNotesPreview()} onNotesSave={doNotesSave}
                 onNotesCreate={doNotesCreate} onDismissNotes={() => setNotesReport(null)}
                 identity={identity} onIdentity={doSetIdentity}
+                uiSettings={uiSettings} onUiSettings={applyUiSettings}
+                updateInfo={updateInfo}
                 onLoadFile={loadRegionsFromFile} onExport={doExport}
                 onExportAnnData={sources && sources.sources
                   && sources.sources.transcripts ? doExportAnnData : null}
@@ -2093,6 +2132,7 @@ export default function App() {
                 layers={layers} onLayerChange={onLayerChange}
                 geneMode={geneMode} onGeneMode={setGeneMode}
                 geneBin={geneBin} onGeneBin={setGeneBin}
+                genePalette={genePalette} onGenePalette={setGenePalette}
               />
             </aside>
             <div

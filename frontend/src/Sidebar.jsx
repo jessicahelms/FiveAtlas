@@ -30,8 +30,18 @@ export default function Sidebar({
   onNotesCreate, onDismissNotes, identity, onIdentity,
   onLoadFile, onExport, onExportAnnData,
   snapInfo, busy, error, onQuit,
+  uiSettings, onUiSettings, updateInfo,
 }) {
   const [confirmRestore, setConfirmRestore] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const ui = uiSettings || { zoom: 1, hidden: new Set() };
+  const show = (key) => !ui.hidden.has(key);
+  const toggleHidden = (key) => {
+    if (!onUiSettings) return;
+    const hidden = new Set(ui.hidden);
+    hidden.has(key) ? hidden.delete(key) : hidden.add(key);
+    onUiSettings({ ...ui, hidden });
+  };
   const [copiedCell, setCopiedCell] = useState(null);
   // Which coordinates to write when the view is rotated/flipped. Default is what
   // is on screen -- that is what has been edited against.
@@ -72,10 +82,64 @@ export default function Sidebar({
         {info.width.toLocaleString()}×{info.height.toLocaleString()} px · {info.levels} levels · {info.nZ} z
       </div>
 
+      {updateInfo && updateInfo.newer && (
+        <div className="hint">
+          FiveAtlas {updateInfo.latest} is out (you have {updateInfo.current}).{' '}
+          <a href={updateInfo.url} target="_blank" rel="noreferrer">
+            Open the download page
+          </a>
+        </div>
+      )}
+
       <div className="row histrow">
         <button className="btn" onClick={onUndo} disabled={!canUndo} title="Undo (Ctrl+Z)">↶ Undo</button>
         <button className="btn" onClick={onRedo} disabled={!canRedo} title="Redo (Ctrl+Shift+Z)">↷ Redo</button>
+        <button className={`btn${showSettings ? ' on' : ''}`}
+          title="settings: text size, and which tools the sidebar shows"
+          onClick={() => setShowSettings((v) => !v)}>⚙</button>
       </div>
+
+      {showSettings && (
+        <div className="section">
+          <div className="section-title">Settings</div>
+          <label className="field">
+            <span>Text and button size</span>
+            <select value={String(ui.zoom)}
+              onChange={(e) => onUiSettings
+                && onUiSettings({ ...ui, zoom: parseFloat(e.target.value) })}>
+              <option value="0.85">Compact</option>
+              <option value="1">Normal</option>
+              <option value="1.15">Large</option>
+              <option value="1.3">Extra large</option>
+            </select>
+          </label>
+          <div className="slabel">Show in the sidebar</div>
+          {[['editPoints', 'Edit points'],
+            ['borders', 'Edit shared borders / merge'],
+            ['split', 'Split a region'],
+            ['draw', 'Add a new region or damage'],
+            ['outline', 'Build the hemisection outline'],
+            ['gap', 'Fix a gap'],
+            ['clean', 'Clean up stray lines'],
+            ['orientation', 'Orientation'],
+            ['validate', 'Check geometry'],
+            ['restore', 'Restore original GeoJSON'],
+            ['cells', 'SmartSheet damage'],
+            ['notes', 'Annotation notes'],
+          ].map(([key, label]) => (
+            <label className="chk" key={key}>
+              <input type="checkbox" checked={show(key)}
+                onChange={() => toggleHidden(key)} />
+              <span>{label}</span>
+            </label>
+          ))}
+          <div className="hint dim">
+            Hiding a tool only tidies the sidebar — nothing about the file or
+            the other tools changes. Undo, Save, Export and Quit always stay.
+          </div>
+          <button className="btn sm" onClick={() => setShowSettings(false)}>Done</button>
+        </div>
+      )}
 
       {sources && sources.sources && (
         <div className="section">
@@ -194,13 +258,16 @@ export default function Sidebar({
       <div className="section">
         <div className="section-title">Edit</div>
 
+        {show('editPoints') && (
         <button className={mode === 'modify' ? 'btn on' : 'btn'} onClick={onToggleModify} disabled={!selectedName && mode !== 'modify'}>
           {mode === 'modify' ? '✎ Editing points' : 'Edit points'}
           {selectedName ? ` · ${selectedName}` : ''}
         </button>
+        )}
 
         {/* vertex-count control (arrow keys / +−) disabled — paused per request */}
 
+        {show('borders') && (<>
         <button className={mode === 'border' ? 'btn on' : 'btn'} onClick={onToggleBorder}>
           {mode === 'border' ? '⇹ Editing shared borders' : 'Edit shared borders'}
         </button>
@@ -277,6 +344,9 @@ export default function Sidebar({
           </div>
         )}
 
+        </>)}
+
+        {show('split') && (<>
         <button className={mode === 'split' ? 'btn on' : 'btn'} onClick={onToggleSplit}>
           {mode === 'split' ? '✂ Splitting a region' : 'Split a region'}
         </button>
@@ -294,6 +364,9 @@ export default function Sidebar({
           </div>
         )}
 
+        </>)}
+
+        {show('draw') && (<>
         <button className={mode === 'draw' ? 'btn on' : 'btn'} onClick={onToggleDraw}>
           {mode === 'draw'
             ? (nextDamageName ? `✚ Drawing ${labelOf[drawKind] || drawKind}` : '✚ Drawing a new region')
@@ -398,8 +471,11 @@ export default function Sidebar({
           </div>
         )}
 
+        </>)}
+
         {/* The hemisection outline, built from the regions rather than traced by
             hand around all 22 of them. */}
+        {show('outline') && (<>
         <button className="btn" disabled={busy || !onOutline}
           onClick={() => onOutline && onOutline({})}>
           ⬭ Build the hemisection outline…
@@ -435,10 +511,16 @@ export default function Sidebar({
           </div>
         )}
 
+        </>)}
+
+        {show('gap') && (<>
         <button className={mode === 'dissolve' ? 'btn on' : 'btn'} onClick={onToggleDissolve}>
           {mode === 'dissolve' ? '⬤ Fixing gaps' : 'Fix a gap'}
         </button>
 
+        </>)}
+
+        {show('clean') && (<>
         <button className={mode === 'clean' ? 'btn on' : 'btn'} onClick={onToggleClean}>
           {mode === 'clean' ? '◌ Circling stray lines' : 'Clean up stray lines'}
         </button>
@@ -520,6 +602,8 @@ export default function Sidebar({
           </div>
         )}
 
+        </>)}
+
         {mode !== 'border' && mode !== 'split' && mode !== 'dissolve' && mode !== 'draw'
           && mode !== 'clean' && (
           <div className="hint">
@@ -555,6 +639,7 @@ export default function Sidebar({
         </div>
       </div>
 
+      {show('orientation') && (
       <div className="section">
         <div className="section-title">Orientation</div>
         <div className="hint dim">
@@ -597,12 +682,16 @@ export default function Sidebar({
         ) : null}
       </div>
 
+      )}
+
       <div className="section">
         <div className="section-title">Data</div>
         <button className="btn" onClick={onLoadFile} disabled={busy}>📂 Load regions file…</button>
+        {show('validate') && (
         <button className="btn" onClick={onValidate} disabled={busy}>✓ Check geometry</button>
+        )}
 
-        {!confirmRestore ? (
+        {show('restore') && (!confirmRestore ? (
           <button className="btn" onClick={() => setConfirmRestore(true)} disabled={busy}>
             ↺ Restore original GeoJSON
           </button>
@@ -623,11 +712,12 @@ export default function Sidebar({
               </button>
             </div>
           </div>
-        )}
+        ))}
         {/* The sheet's Damage column is a MULTI-SELECT dropdown — one cell holds
             several chips — so what is worth copying is a cell per region, not a
             row. `Done` rides in the same cell; it is the annotator's tick, not a
             designation, so it never reaches the YAML. */}
+        {show('cells') && (<>
         <div className="slabel">SmartSheet damage</div>
         <button className="btn" onClick={onLoadCells} disabled={busy}>
           ⎘ Damage cells, region by region…
@@ -783,6 +873,9 @@ export default function Sidebar({
             else here only reads — and they are shared, so the panel always says
             the exact path, previews as a diff, and never creates a file by
             itself. */}
+        </>)}
+
+        {show('notes') && (<>
         <div className="slabel">Annotation notes</div>
         {!notesInfo ? (
           <div className="hint dim">looking in the dataset folder…</div>
@@ -928,6 +1021,8 @@ export default function Sidebar({
             </div>
           </div>
         )}
+
+        </>)}
 
         <div className="slabel">Export</div>
         {rotated && (
