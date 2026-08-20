@@ -103,6 +103,21 @@ ITEMS = [
     "(“hemi”) is the easy way to hunt for gaps between the regions "
     "inside it.",
 
+    # -- face / border toggles -----------------------------------------------------------
+    "Beside the eye, every region also has a face toggle and a border toggle. "
+    "These only change what you SEE — unlike the eye, the region still "
+    "counts for gap-finding, snapping and Check geometry. Hide a face to see "
+    "the imagery and the borders clean while you fill gaps; hide a border to "
+    "see a fill without its outline. The Faces off / Faces on buttons above "
+    "the list do every region at once.",
+
+    # -- merge -----------------------------------------------------------------------------
+    "Merge into one truly dissolves the border between the regions you picked: "
+    "the shared line disappears and they become a single region — even "
+    "when a hairline gap ran along the old border, it is sealed. Pieces that "
+    "genuinely do not touch stay as separate parts of the one region; the app "
+    "never invents tissue between them.",
+
     "Edit points reshapes a region by hand. Select the region, then drag the "
     "points along its outline. Tick Proportional editing underneath and the "
     "nearby points will follow the one you are dragging, and you can scroll "

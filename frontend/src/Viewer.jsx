@@ -172,12 +172,17 @@ export default function Viewer({
   propRing, onRegionMenu,
   onGrabVertex, onReleaseDrag,
   geneBitmap, geneBounds, stainInfo, stainChannels, layers, regionsOff,
+  bordersOff, fillsOff,
 }) {
   const L = layers || DEFAULT_LAYERS;
   const picks = borderPicks || [];
   const picksKey = picks.join('|');
   const off = regionsOff || EMPTY_SET;
   const offKey = [...off].sort().join('|');
+  const bOff = bordersOff || EMPTY_SET;
+  const fOff = fillsOff || EMPTY_SET;
+  const bOffKey = [...bOff].sort().join('|');
+  const fOffKey = [...fOff].sort().join('|');
   const deckRef = useRef(null);
 
   // One instance each, kept for the life of the component: a new mode object
@@ -271,8 +276,11 @@ export default function Viewer({
     getFillColor: (f) => {
       const nm = regionName(f, idProp);
       if (nm && off.has(nm)) return [0, 0, 0, 0];
+      // a pick highlight still shows -- an operation you are mid-way through
+      // must stay legible even on a region whose face is hidden
       const pi = nm ? picks.indexOf(nm) : -1;
       if (pi >= 0) { const [r, g, b] = PICK_COLORS[Math.min(pi, 2)]; return [r, g, b, 80]; }
+      if (nm && fOff.has(nm)) return [0, 0, 0, 0];
       const [r, g, b] = regionRgb(f, idProp);
       return [r, g, b, 70];
     },
@@ -282,6 +290,7 @@ export default function Viewer({
       const pi = nm ? picks.indexOf(nm) : -1;
       if (pi >= 0) { const [r, g, b] = PICK_COLORS[Math.min(pi, 2)]; return [r, g, b, 255]; }
       if (selected.has(fc.features.indexOf(f))) return [255, 80, 80, 255];
+      if (nm && bOff.has(nm)) return [0, 0, 0, 0];
       const [r, g, b] = regionRgb(f, idProp);
       return [r, g, b, 230];      // outline matches the fill, so a colour reads
     },
@@ -293,8 +302,8 @@ export default function Viewer({
     },
     updateTriggers: {
       // colourKey so a colour change repaints -- deck caches these accessors
-      getFillColor: [picksKey, colourKey, offKey],
-      getLineColor: [selectedIndexes, picksKey, colourKey, offKey],
+      getFillColor: [picksKey, colourKey, offKey, fOffKey],
+      getLineColor: [selectedIndexes, picksKey, colourKey, offKey, bOffKey],
       getLineWidth: [selectedIndexes, picksKey],
     },
     // draggable vertex handles (ModifyMode) -- pixel-sized + white-outlined so

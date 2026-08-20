@@ -404,6 +404,24 @@ export default function App() {
   // Switching a region off leaves it in the file, untouched; it is only ignored
   // by the operations that assume a clean partition, and hidden on the map.
   const [regionsOff, setRegionsOff] = useState(() => new Set());
+  // Display-only per-region toggles. Unlike the eye (regionsOff), these change
+  // NOTHING about operations -- a region with its face hidden still counts for
+  // gap-finding, snapping and Check geometry. They exist so you can work over
+  // a clean view: faces off to see the imagery and every border while filling
+  // gaps; borders off to see a fill without its outline.
+  const [bordersOff, setBordersOff] = useState(() => new Set());
+  const [fillsOff, setFillsOff] = useState(() => new Set());
+  const toggleBorderOff = useCallback((nm) => setBordersOff((prev) => {
+    const n = new Set(prev); n.has(nm) ? n.delete(nm) : n.add(nm); return n;
+  }), []);
+  const toggleFillOff = useCallback((nm) => setFillsOff((prev) => {
+    const n = new Set(prev); n.has(nm) ? n.delete(nm) : n.add(nm); return n;
+  }), []);
+  const setAllFaces = useCallback((show) => {
+    if (show) { setFillsOff(new Set()); return; }
+    setFillsOff(new Set((fcRef.current && fcRef.current.features || [])
+      .map((f) => featureName(f, idProp)).filter(Boolean)));
+  }, [idProp]);
   const regionsOffRef = useRef(regionsOff);
   regionsOffRef.current = regionsOff;
   const offList = useCallback(
@@ -1194,7 +1212,13 @@ export default function App() {
       const newFc = asFc(res, fc);
       commit(newFc); setBaseline(newFc);
       setBorderPicks([]); setBorderArc(null);
-      setBorderMsg(`Merged ${borderPicks.length} regions into “${res.name}” ✓`);
+      // Say what actually happened to the border between them: dissolved, or
+      // the pieces never touched and remain separate parts of one region.
+      const sealed = res.sealed ? ' — hairline seam dissolved' : '';
+      const still = res.parts > 1
+        ? ` — ${res.parts} separate pieces (they don't touch; the border between touching pieces is gone)`
+        : '';
+      setBorderMsg(`Merged ${borderPicks.length} regions into “${res.name}” ✓${sealed}${still}`);
     } catch (e) {
       setBorderMsg(`Merge failed: ${String(e).replace(/^Error:\s*/, '')}`);
     } finally { setBusy(false); }
@@ -2013,6 +2037,9 @@ export default function App() {
                 onOrientation={applyOrientation}
                 onAnswerReportDamage={answerDamageInReport}
                 regionsOff={regionsOff} onToggleRegionOff={toggleRegionOff}
+                bordersOff={bordersOff} onToggleBorderOff={toggleBorderOff}
+                fillsOff={fillsOff} onToggleFillOff={toggleFillOff}
+                onAllFaces={setAllFaces}
                 outlinePreview={outlinePreview} onOutline={doOutline}
                 onDismissOutline={() => setOutlinePreview(null)}
                 cellsReport={cellsReport} cellSep={cellSep} cellsAll={cellsAll}
@@ -2062,6 +2089,7 @@ export default function App() {
                 geneBitmap={geneBitmap} geneBounds={geneBounds}
                 stainInfo={stainInfo} stainChannels={stainChannels}
                 layers={layers} regionsOff={regionsOff}
+                bordersOff={bordersOff} fillsOff={fillsOff}
               />
             </div>
           </>
