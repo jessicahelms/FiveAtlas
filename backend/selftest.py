@@ -101,6 +101,23 @@ def _pillow():
     return f"Pillow {v}"
 
 
+def _h5ad():
+    # The AnnData export writes HDF5 through h5py. Round-trip a tiny file in
+    # memory so a missing HDF5 dylib fails HERE, in CI, not when a colleague
+    # first clicks "AnnData (.h5ad)".
+    import io as _io
+    import h5py
+    import numpy as np
+    buf = _io.BytesIO()
+    with h5py.File(buf, "w") as f:
+        f.create_dataset("X", data=np.arange(6, dtype=np.float32).reshape(2, 3))
+    buf.seek(0)
+    with h5py.File(buf, "r") as f:
+        if f["X"].shape != (2, 3):
+            raise RuntimeError("round trip lost the shape")
+    return f"h5py {h5py.__version__}, hdf5 {h5py.version.hdf5_version}"
+
+
 def _tk():
     # The folder picker on macOS uses osascript first; tkinter is the fallback
     # and the only picker on Windows. Importing is enough: creating a root would
@@ -118,6 +135,7 @@ def run():
         "shapely": _check("shapely", _shapely),
         "yaml": _check("yaml", _yaml),
         "pillow": _check("pillow", _pillow),
+        "h5ad": _check("h5ad", _h5ad),
         "tkinter": _check("tkinter", _tk),
     }
     return {
