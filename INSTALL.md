@@ -64,9 +64,8 @@ every feature below works identically. Only the install differs.
 3. Double-click FiveAtlas. It has no window of its own and no Dock icon: after a
    few seconds (up to a minute the first time, while macOS verifies it) a tab
    opens in your browser at <http://127.0.0.1:8050>. If no tab appears, type
-   that address into your browser. **To stop it, press "Quit FiveAtlas" at the
-   bottom of the sidebar**; it also stops on its own about ten minutes after the
-   last tab is closed.
+   that address into your browser. **To stop it, just close the tab** — it
+   stops on its own about ten minutes later.
 4. Your data is on the lab share: connect to it in Finder first (Go → Connect to
    Server). Then **Open Folder** in FiveAtlas and pick the experiment folder
    under *Locations*. A pasted path must look like `/Volumes/…`, not `smb://…`.

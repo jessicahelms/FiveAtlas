@@ -189,9 +189,8 @@ RUNNING IT
   minute the very first time, while macOS checks it), a tab opens in your
   browser at  http://127.0.0.1:8050  -- if no tab appears, type that address
   into your browser yourself. It keeps serving while that tab is open.
-  To stop it: press "Quit FiveAtlas" at the bottom of the sidebar. It also
-  stops by itself about ten minutes after the last browser tab is closed.
-  (Quit FiveAtlas from the Dock does nothing -- it is not a windowed app.)
+  To stop it: just close the browser tab -- FiveAtlas stops by itself about
+  ten minutes later. (There is no Dock icon; it is not a windowed app.)
 
 YOUR DATA
   Connect to the lab share in Finder first (Go -> Connect to Server). Then in

@@ -438,8 +438,8 @@ def main():
     url = f"http://127.0.0.1:{port}"
 
     # There is no console window to close on macOS -- say how to stop it there.
-    stop = ("Stop it with the Quit button at the bottom of the sidebar "
-            "(it also stops by itself about ten minutes after the tab is closed)."
+    stop = ("Close the browser tab when you are done -- FiveAtlas stops "
+            "itself about ten minutes later."
             if sys.platform == "darwin"
             else "Keep this window open while you use the app; close it to stop.")
 
