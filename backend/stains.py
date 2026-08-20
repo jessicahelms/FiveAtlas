@@ -25,8 +25,18 @@ import orientation as ORI
 
 # Xenium Explorer / Viv default channel palette, assigned BY CHANNEL INDEX
 # (extracted verbatim from Xenium Explorer's app.asar). For the 4-channel
-# morphology_focus this gives DAPI=blue, ATP1A1/CD45/E-Cadherin=green,
-# 18S=magenta, alphaSMA/Vimentin=yellow -- matching Xenium's default view.
+# Defaults keyed by the CHANNEL NAME so they hold on any dataset, matching the
+# Xenium Explorer's own view: DAPI blue, the boundary stain
+# (ATP1A1/CD45/E-Cadherin) magenta, interior RNA (18S) yellow, interior
+# protein (alphaSMA/Vimentin) green. The index palette below is only the
+# fallback for channels no rule names.
+_BY_NAME = [
+    ("dapi", [0, 0, 255]),
+    ("cadherin", [255, 0, 255]), ("atp1a1", [255, 0, 255]), ("cd45", [255, 0, 255]),
+    ("18s", [255, 255, 0]),
+    ("vimentin", [0, 255, 0]), ("alphasma", [0, 255, 0]), ("sma", [0, 255, 0]),
+]
+
 _PALETTE = [
     [0, 0, 255],      # blue
     [0, 255, 0],      # green
@@ -40,6 +50,10 @@ _PALETTE = [
 
 
 def _color_for(name, idx):
+    n = str(name or "").lower()
+    for key, col in _BY_NAME:
+        if key in n:
+            return col
     return _PALETTE[idx % len(_PALETTE)]
 
 

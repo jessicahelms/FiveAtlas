@@ -35,6 +35,10 @@ body {
 }
 .splitter:hover { background: #2f3a4c; }
 .sidebar h1 { font-size: 16px; margin: 0 0 4px; }
+/* folding section headers */
+.section-title.fold, .slabel.fold { cursor: pointer; user-select: none; }
+.section-title.fold:hover, .slabel.fold:hover { color: #e6e9ef; }
+.fold .arr { display: inline-block; width: 12px; color: #9aa4b2; }
 .ds { font-size: 13px; color: #9aa4b2; }
 .dims { font-size: 11px; color: #6b7482; margin-bottom: 8px; }
 
