@@ -81,7 +81,12 @@ ITEMS = [
     "If you are ever unsure about how to use certain features, there are "
     "instructions that pop up after you click on a feature. The sidebar can be "
     "made wider or narrower by dragging the thin strip between it and the "
-    "image.",
+    "image, and the gear button at the top opens Settings: pick a bigger or "
+    "smaller text size, and untick any tools you never use to hide them from "
+    "the sidebar (nothing else changes — Undo, Save, Export and Quit always "
+    "stay). When a newer FiveAtlas is on the download page, a line at the top "
+    "of the sidebar says so and links to it — updating is always your choice, "
+    "nothing downloads itself.",
 
     # -- stains and brightness -------------------------------------------------------
     "The Stains panel lists every morphology_focus channel (DAPI, 18S, "
@@ -97,9 +102,13 @@ ITEMS = [
     "Glow is the familiar additive one. Heat map draws the transcripts as "
     "perfect squares: pick the square size (10, 20, 40 or 80 microns), and "
     "each gene reads light where it is sparse and dark where it is dense — "
-    "a blue gene runs pale-blue to deep blue. Add a second gene in red and "
+    "a blue gene runs pale-blue to deep blue, and every square holding any "
+    "transcripts at all stays visibly tinted. Add a second gene in red and "
     "the two mix like inks: where both are dense the squares go dark purple. "
-    "The min/max sliders still set what counts as sparse and dense.",
+    "Or pick one of the scientific colour scales (Viridis, Inferno, Magma, "
+    "Plasma, Turbo — the same ones Xenium Explorer uses) to paint the "
+    "combined density of every shown gene on one scale. The min/max sliders "
+    "still set what counts as sparse and dense.",
 
     "All of your regions are listed in the sidebar. Click one to select it. "
     "Right click a region (two-finger click on a Mac trackpad), either in the "

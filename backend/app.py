@@ -112,6 +112,15 @@ def health():
     return {"ok": True}
 
 
+@app.get("/api/update-check")
+def update_check():
+    """Is a newer release on GitHub? Cached for hours; offline returns quietly.
+    The app never downloads or installs anything itself -- it only points at
+    the Releases page when a newer version exists."""
+    import updatecheck
+    return updatecheck.check(config.VERSION)
+
+
 @app.get("/api/selftest")
 def selftest():
     """Exercise the native stack (JPEG2000, blosc/zarr, GEOS, YAML, Pillow, Tk)
@@ -1687,21 +1696,24 @@ async def genes_composite(ds_id: str, request: Request):
     # Legacy body was a bare list of channels; the new one wraps it so the
     # render mode and bin size ride along: {channels, mode, binUm}.
     if isinstance(body, list):
-        spec, mode, bin_um = body, "glow", None
+        spec, mode, bin_um, palette = body, "glow", None, None
     elif isinstance(body, dict):
         spec = body.get("channels") or []
         mode = str(body.get("mode") or "glow")
         bin_um = body.get("binUm")
+        palette = body.get("palette")
     else:
         raise HTTPException(400, "body must be a channel list or {channels,...}")
     if not isinstance(spec, list):
         raise HTTPException(400, "channels must be a list")
     o = ORI.get(ds_id)
     if ORI.is_identity(o):
-        return Response(content=gd.composite_png(spec, mode=mode, bin_um=bin_um),
+        return Response(content=gd.composite_png(spec, mode=mode, bin_um=bin_um,
+                                                  palette=palette),
                         media_type="image/png")
     # Turn the composite itself, so it lands on the rotated bounds /genes reports.
-    rgba = ORI.transform_image(gd.composite(spec, mode=mode, bin_um=bin_um), o)
+    rgba = ORI.transform_image(
+        gd.composite(spec, mode=mode, bin_um=bin_um, palette=palette), o)
     buf = io.BytesIO()
     PILImage.fromarray(rgba, mode="RGBA").save(buf, format="PNG")
     return Response(content=buf.getvalue(), media_type="image/png")
