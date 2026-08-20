@@ -1472,6 +1472,75 @@ async def regions_repair(ds_id: str, request: Request):
             "fixed": res["fixed"]}
 
 
+@app.post("/api/datasets/{ds_id}/regions/export-anndata")
+async def regions_export_anndata(ds_id: str, request: Request):
+    """Regions x genes as an AnnData .h5ad: X = transcript-density counts per
+    region (summed on the same 10 um grid the viewer draws), obs = regions
+    (area, centroid), var = genes. Needs transcripts.zarr. Body: {fc?}."""
+    try:
+        d = ds.get_dataset(ds_id)
+    except KeyError:
+        raise HTTPException(404, "unknown dataset")
+    body = await request.json()
+    fc = body.get("fc") or geo.load_regions(ds_id)[0]
+    try:
+        gd = genedensity(ds_id)
+    except Exception:
+        raise HTTPException(422, "this dataset has no transcripts.zarr, so "
+                                 "there are no counts to export")
+    import tempfile
+    import annexport
+    try:
+        names, counts, genes, areas, cents = annexport.region_gene_counts(
+            gd, fc.get("features", []), d["id_prop"])
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    # Repeated names are one region in parts -- collapse them so obs_names are
+    # unique the way anndata expects.
+    order, first = [], {}
+    import numpy as _np
+    for i, nm in enumerate(names):
+        if nm in first:
+            j = first[nm]
+            counts[j] += counts[i]
+            areas[j] += areas[i]
+        else:
+            first[nm] = len(order)
+            order.append(i)
+    if len(order) != len(names):
+        counts = _np.asarray([counts[first[names[i]]] for i in order])
+        names_u = [names[i] for i in order]
+        areas_u = [areas[first[nm]] for nm in names_u]
+        cents_u = [cents[i] for i in order]
+    else:
+        names_u, areas_u, cents_u = names, areas, cents
+    with tempfile.NamedTemporaryFile(suffix=".h5ad", delete=False) as tmp:
+        path = tmp.name
+    try:
+        annexport.write_h5ad(
+            path, counts, names_u,
+            [("area_px2", areas_u, "num"),
+             ("n_transcript_counts", counts.sum(axis=1), "num")],
+            genes,
+            obsm={"spatial": cents_u},
+            uns={"source": "FiveAtlas", "version": config.VERSION,
+                 "dataset": ds_id, "pixel_size_um": gd.pixel_size,
+                 "density_grid_um": gd.grid_x,
+                 "counts_note": "X sums the 10um transcript-density grid "
+                                "inside each region polygon"},
+        )
+        data = open(path, "rb").read()
+    finally:
+        try:
+            os.unlink(path)
+        except Exception:
+            pass
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", ds_id)
+    return Response(content=data, media_type="application/octet-stream",
+                    headers={"Content-Disposition":
+                             f'attachment; filename="{safe}_regions.h5ad"'})
+
+
 @app.post("/api/datasets/{ds_id}/regions/export")
 async def regions_export(ds_id: str, request: Request):
     """Export the current regions either as ONE merged .geojson (all features in a
@@ -1614,14 +1683,25 @@ async def genes_composite(ds_id: str, request: Request):
         gd = genedensity(ds_id)
     except KeyError:
         raise HTTPException(404, "no transcripts")
-    spec = await request.json()
+    body = await request.json()
+    # Legacy body was a bare list of channels; the new one wraps it so the
+    # render mode and bin size ride along: {channels, mode, binUm}.
+    if isinstance(body, list):
+        spec, mode, bin_um = body, "glow", None
+    elif isinstance(body, dict):
+        spec = body.get("channels") or []
+        mode = str(body.get("mode") or "glow")
+        bin_um = body.get("binUm")
+    else:
+        raise HTTPException(400, "body must be a channel list or {channels,...}")
     if not isinstance(spec, list):
-        raise HTTPException(400, "body must be a list of channel specs")
+        raise HTTPException(400, "channels must be a list")
     o = ORI.get(ds_id)
     if ORI.is_identity(o):
-        return Response(content=gd.composite_png(spec), media_type="image/png")
+        return Response(content=gd.composite_png(spec, mode=mode, bin_um=bin_um),
+                        media_type="image/png")
     # Turn the composite itself, so it lands on the rotated bounds /genes reports.
-    rgba = ORI.transform_image(gd.composite(spec), o)
+    rgba = ORI.transform_image(gd.composite(spec, mode=mode, bin_um=bin_um), o)
     buf = io.BytesIO()
     PILImage.fromarray(rgba, mode="RGBA").save(buf, format="PNG")
     return Response(content=buf.getvalue(), media_type="image/png")

@@ -20,6 +20,10 @@ numcodecs==0.12.1
 numpy==2.0.2
 pillow==12.3.0
 python-multipart==0.0.32
+# h5py writes the AnnData (.h5ad) export directly against the documented
+# on-disk schema -- shipping the anndata package itself would drag pandas and
+# scipy (~200 MB) into the bundle for one file format.
+h5py==3.12.1
 # ruamel, NOT PyYAML: annotation.notes.yaml and metadata.yml are hand-maintained
 # by several people, and only a round-tripper preserves their comments, key
 # order, quoting and ---/... markers. PyYAML would reformat every file it wrote.

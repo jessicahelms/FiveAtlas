@@ -403,6 +403,14 @@ export default function App() {
   // can be found — and Check geometry reports 22 overlaps that are all correct.
   // Switching a region off leaves it in the file, untouched; it is only ignored
   // by the operations that assume a clean partition, and hidden on the map.
+  // sidebar width, draggable via the splitter; remembered across sessions
+  const [paneW, setPaneW] = useState(() => {
+    try {
+      const v = parseInt(localStorage.getItem('fiveatlas.paneW') || '', 10);
+      if (Number.isFinite(v)) return Math.max(260, Math.min(720, v));
+    } catch (e) { /* ok */ }
+    return 340;
+  });
   const [regionsOff, setRegionsOff] = useState(() => new Set());
   // Display-only per-region toggles. Unlike the eye (regionsOff), these change
   // NOTHING about operations -- a region with its face hidden still counts for
@@ -523,6 +531,10 @@ export default function App() {
   const [geneInfo, setGeneInfo] = useState(null);
   const [channels, setChannels] = useState(null);
   const [geneBitmap, setGeneBitmap] = useState(null);
+  // density rendering: additive "glow" or square-bin "ink" heatmap, and the
+  // bin size in microns (10 = the grid's native resolution)
+  const [geneMode, setGeneMode] = useState('glow');
+  const [geneBin, setGeneBin] = useState(10);
   const [geneBounds, setGeneBounds] = useState(null);
   // stains (morphology_focus, full-res tiled)
   const [stainInfo, setStainInfo] = useState(null);
@@ -669,11 +681,14 @@ export default function App() {
     if (!channels) return;
     let cancel = false;
     const t = setTimeout(async () => {
-      try { const bmp = await api.compositeBitmap(dsId, channels); if (!cancel) setGeneBitmap(bmp); }
-      catch (e) { /* ignore */ }
+      try {
+        const bmp = await api.compositeBitmap(dsId, channels,
+          { mode: geneMode, binUm: geneBin });
+        if (!cancel) setGeneBitmap(bmp);
+      } catch (e) { /* ignore */ }
     }, 120);
     return () => { cancel = true; clearTimeout(t); };
-  }, [channels, dsId, geneOrientKey]);
+  }, [channels, dsId, geneOrientKey, geneMode, geneBin]);
 
   const loadStainContrast = useCallback(async (idx, tries = 0) => {
     try {
@@ -1917,6 +1932,18 @@ export default function App() {
 
   // Export refuses to write broken geometry. On a block we surface the problem
   // list and let the user Repair, force it through, or go fix it by hand.
+  const doExportAnnData = useCallback(async () => {
+    setBusy(true); setError(null);
+    try {
+      const blob = await api.exportAnnData(dsId, fc);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = `${dsId}_regions.h5ad`;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+    } catch (e) { setError(apiDetail(e)); } finally { setBusy(false); }
+  }, [dsId, fc]);
+
   const doExport = useCallback(async (exportMode, { force = false, frame = 'displayed' } = {}) => {
     setBusy(true); setError(null);
     try {
@@ -1996,7 +2023,7 @@ export default function App() {
         {dsId && !error && (!info || !fc) && <div className="loading">Loading dataset…</div>}
         {dsId && info && fc && (
           <>
-            <aside className="sidebar">
+            <aside className="sidebar" style={{ flexBasis: paneW, width: paneW }}>
               <Sidebar
                 info={info} fc={fc} sources={sources} selected={selected}
                 onRegionMenu={openRegionMenu}
@@ -2053,6 +2080,8 @@ export default function App() {
                 onNotesCreate={doNotesCreate} onDismissNotes={() => setNotesReport(null)}
                 identity={identity} onIdentity={doSetIdentity}
                 onLoadFile={loadRegionsFromFile} onExport={doExport}
+                onExportAnnData={sources && sources.sources
+                  && sources.sources.transcripts ? doExportAnnData : null}
                 snapInfo={snapInfo} busy={busy} error={error}
                 onQuit={doQuit}
               />
@@ -2062,8 +2091,33 @@ export default function App() {
                 onAddGene={onAddGene} onRemoveGene={onRemoveGene}
                 stainInfo={stainInfo} stainChannels={stainChannels} onStainChange={onStainChange}
                 layers={layers} onLayerChange={onLayerChange}
+                geneMode={geneMode} onGeneMode={setGeneMode}
+                geneBin={geneBin} onGeneBin={setGeneBin}
               />
             </aside>
+            <div
+              className="splitter"
+              title="drag to resize the sidebar"
+              onPointerDown={(e) => {
+                e.preventDefault();
+                const startX = e.clientX;
+                const start = paneW;
+                const move = (ev) => {
+                  const w = Math.max(260, Math.min(720, start + (ev.clientX - startX)));
+                  setPaneW(w);
+                };
+                const up = () => {
+                  window.removeEventListener('pointermove', move);
+                  window.removeEventListener('pointerup', up);
+                  setPaneW((w) => {
+                    try { localStorage.setItem('fiveatlas.paneW', String(w)); } catch (e2) { /* ok */ }
+                    return w;
+                  });
+                };
+                window.addEventListener('pointermove', move);
+                window.addEventListener('pointerup', up);
+              }}
+            />
             <div className="canvas-wrap">
               <Viewer
                 // Remount on an orientation change. A quarter turn swaps the
@@ -2086,7 +2140,7 @@ export default function App() {
                 gapPreview={gapFind && gapFind.gap} onPickGap={onPickGap}
                 propRing={propRing} onRegionMenu={openRegionMenu}
                 onGrabVertex={onGrabVertex} onReleaseDrag={onReleaseDrag}
-                geneBitmap={geneBitmap} geneBounds={geneBounds}
+                geneBitmap={geneBitmap} geneBounds={geneBounds} geneMode={geneMode}
                 stainInfo={stainInfo} stainChannels={stainChannels}
                 layers={layers} regionsOff={regionsOff}
                 bordersOff={bordersOff} fillsOff={fillsOff}

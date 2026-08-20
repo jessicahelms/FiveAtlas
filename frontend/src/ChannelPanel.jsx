@@ -70,6 +70,7 @@ export default function ChannelPanel({
   geneInfo, channels, onChannelChange, geneList, onAddGene, onRemoveGene,
   stainInfo, stainChannels, onStainChange,
   layers, onLayerChange,
+  geneMode, onGeneMode, geneBin, onGeneBin,
 }) {
   const addGene = (input) => {
     const value = input.value.trim();
@@ -129,6 +130,28 @@ export default function ChannelPanel({
         <div className="section">
           <div className="section-title">
             Genes ({channels.length}{geneList ? ` of ${geneList.length}` : ''})
+          </div>
+          {/* density rendering: glow (additive) or ink (square-bin heat map:
+              a gene's colour dilutes toward white when sparse, saturates dark
+              when dense, and two genes multiply like inks) */}
+          <div className="row">
+            <button className={`btn sm${geneMode !== 'ink' ? ' on' : ''}`}
+              title="additive glow over the dark imagery"
+              onClick={() => onGeneMode && onGeneMode('glow')}>
+              Glow
+            </button>
+            <button className={`btn sm${geneMode === 'ink' ? ' on' : ''}`}
+              title="square-bin heat map: light = sparse, dark = dense; genes mix like inks"
+              onClick={() => onGeneMode && onGeneMode('ink')}>
+              Heat map
+            </button>
+            <select value={geneBin || 10}
+              title="bin size — the squares' size in microns (10 is the data's native grid)"
+              onChange={(e) => onGeneBin && onGeneBin(parseInt(e.target.value, 10))}>
+              {[10, 20, 40, 80].map((b) => (
+                <option key={b} value={b}>{b} µm</option>
+              ))}
+            </select>
           </div>
           <input
             className="gene-add"

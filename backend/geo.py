@@ -152,17 +152,26 @@ def run_snap(ds_id: str, before_fc: dict, after_fc: dict,
 
 
 def load_regions_file(ds_id: str, path: str) -> dict:
-    """Load an arbitrary GeoJSON from disk and make it this dataset's working
-    copy (so any region set can be opened for editing, not just the folder's)."""
+    """Load a region set from disk and make it this dataset's working copy.
+
+    GeoJSON as before; a .csv/.tsv/.txt is read as a vertex table (one row per
+    vertex, grouped by region name -- see tableio for the columns it accepts,
+    including Xenium's micron column names)."""
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(path)
-    with open(p, encoding="utf-8") as f:
-        fc = json.load(f)
-    if not isinstance(fc, dict) or fc.get("type") != "FeatureCollection":
-        raise ValueError("not a GeoJSON FeatureCollection")
-    # smooth away spikes / heal invalid polygons on load
     d = ds.get_dataset(ds_id)
+    if p.suffix.lower() in (".csv", ".tsv", ".txt"):
+        import tableio
+        fc, notes = tableio.read_regions_table(
+            p, id_prop=d["id_prop"], pixel_size_um=d.get("pixel_size_um"))
+        fc["_import"] = {"from": str(p), "notes": notes}
+    else:
+        with open(p, encoding="utf-8") as f:
+            fc = json.load(f)
+        if not isinstance(fc, dict) or fc.get("type") != "FeatureCollection":
+            raise ValueError("not a GeoJSON FeatureCollection")
+    # smooth away spikes / heal invalid polygons on load
     fc["features"] = topology.clean_features(fc.get("features", []), d["id_prop"], spike=3.0)
     save_edited(ds_id, fc)
     return fc

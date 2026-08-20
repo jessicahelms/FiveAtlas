@@ -183,7 +183,7 @@ def _run_picker_mode() -> bool:
         print(f"[picker] unknown kind {kind!r}; expected 'folder' or 'file'",
               file=sys.stderr)
         return True
-    title = "Select dataset folder" if kind == "folder" else "Select a GeoJSON region file"
+    title = "Select dataset folder" if kind == "folder" else "Select a region file (GeoJSON or CSV)"
     try:
         print(nativedialog.pick(kind, initial or None, title))
     except Exception as e:

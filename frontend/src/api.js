@@ -406,11 +406,22 @@ export async function geneContrast(ds, gene) {
 }
 
 // POST channel spec -> composited RGBA PNG -> ImageBitmap for a BitmapLayer.
-export async function compositeBitmap(ds, spec) {
+// Regions x genes counts as an AnnData .h5ad (needs transcripts.zarr).
+export async function exportAnnData(ds, fc) {
+  const r = await fetch(`${API}/datasets/${ds}/regions/export-anndata`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fc }),
+  });
+  if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+  return r.blob();
+}
+
+export async function compositeBitmap(ds, spec, { mode = 'glow', binUm = null } = {}) {
   const r = await fetch(`${API}/datasets/${ds}/genes/composite.png`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(spec),
+    body: JSON.stringify({ channels: spec, mode, binUm }),
   });
   if (!r.ok) throw new Error(`composite ${r.status}`);
   const blob = await r.blob();

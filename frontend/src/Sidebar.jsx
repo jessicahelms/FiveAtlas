@@ -28,7 +28,7 @@ export default function Sidebar({
   onCellsAll, onRegionDamage,
   notesInfo, notesReport, notesScope, onNotesScope, onNotesPreview, onNotesSave,
   onNotesCreate, onDismissNotes, identity, onIdentity,
-  onLoadFile, onExport,
+  onLoadFile, onExport, onExportAnnData,
   snapInfo, busy, error, onQuit,
 }) {
   const [confirmRestore, setConfirmRestore] = useState(false);
@@ -962,6 +962,17 @@ export default function Sidebar({
             disabled={busy}>Separate .zip</button>
         </div>
         <div className="hint dim">Merged = one file, all regions. Separate = one file per region, zipped.</div>
+        {onExportAnnData && (
+          <>
+            <button className="btn" onClick={onExportAnnData} disabled={busy}>
+              AnnData (.h5ad)
+            </button>
+            <div className="hint dim">
+              Regions × genes counts for scanpy/anndata: X sums the transcript
+              density inside each region, obs carries area and centroid.
+            </div>
+          </>
+        )}
 
         {geomReport && (
           <div className="geomrep">
