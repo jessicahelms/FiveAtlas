@@ -305,18 +305,39 @@ jobs:
       # Only publish a Release from a build that actually ran. A .dmg that fails
       # its own smoke test should not become the download people are handed.
       # Published with the gh CLI that is already on the runner, not a
-      # third-party action holding the write token. The release body is the
-      # same README that is inside the .dmg, so the download page itself says
-      # how to get past Gatekeeper and what Macs it runs on.
+      # third-party action holding the write token. The release body is
+      # composed from three parts, in reading order:
+      #   1. "What's new" -- this tag's section of CHANGELOG.md, so the
+      #      download page says what the update contains;
+      #   2. the same install README that is inside the .dmg;
+      #   3. the screenshots of this very build running on the runner.
+      # A tag with no CHANGELOG section still releases (a gentle warning is
+      # logged); notes must never be the reason colleagues cannot download.
       - name: Attach to release
         if: github.ref_type == 'tag' && steps.smoke.outcome == 'success' && steps.storm.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           R="$HOME/Library/Caches/FiveAtlas_build/release"
+          BODY="$RUNNER_TEMP/notes.md"
+
+          awk -v ver="$GITHUB_REF_NAME" '
+            $0 ~ "^## "ver"$" { grab=1; next }
+            grab && /^## /    { exit }
+            grab              { print }
+          ' CHANGELOG.md > "$RUNNER_TEMP/whatsnew.md" || true
+          if [ -s "$RUNNER_TEMP/whatsnew.md" ]; then
+            { echo "## What's new in $GITHUB_REF_NAME"
+              cat "$RUNNER_TEMP/whatsnew.md"; echo; } > "$BODY"
+          else
+            echo "::warning title=changelog::no '## $GITHUB_REF_NAME' section in CHANGELOG.md -- the release page will carry install instructions only"
+            : > "$BODY"
+          fi
+          { echo "## Install"; echo '```'; cat "$R/README.txt"; echo '```'; echo; } >> "$BODY"
+
           if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release create "$GITHUB_REF_NAME" --title "FiveAtlas $GITHUB_REF_NAME" \
-              --notes-file "$R/README.txt"
+              --notes-file "$BODY"
           fi
           gh release upload "$GITHUB_REF_NAME" "$R"/*.dmg "$R"/*.zip "$R/SHA256SUMS" --clobber
           # The screenshots go up as assets too, and the release notes embed
@@ -328,8 +349,7 @@ jobs:
           done
           if [ -n "$shots" ]; then
             base="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME"
-            { echo '```'; cat "$R/README.txt"; echo '```'; echo
-              echo "### Built and run on GitHub's macOS (Apple Silicon) runner"
+            { echo "### Built and run on GitHub's macOS (Apple Silicon) runner"
               for f in $shots; do
                 case "$f" in
                   ui-chrome.png) echo "The UI as rendered by Chrome on the runner:" ;;
@@ -337,8 +357,8 @@ jobs:
                 esac
                 echo; echo "![$f]($base/$f)"; echo
               done
-            } > "$RUNNER_TEMP/notes.md"
-            gh release edit "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md"
+            } >> "$BODY"
+            gh release edit "$GITHUB_REF_NAME" --notes-file "$BODY"
           fi
 
       - name: Job summary
