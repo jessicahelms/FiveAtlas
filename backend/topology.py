@@ -385,6 +385,23 @@ def border_between(features, id_prop, region_a, region_b, grid=4.0, corridor=25.
     gb = _body(features, idx[region_b])
     if ga.is_empty or gb.is_empty:
         return []
+    # One inside the other: there is no coincident edge, but there IS a border
+    # -- the inner's own outline is the line between them. Return it whole
+    # (one arc per lobe), whichever of the two was picked first; the corridor
+    # trick below is order-dependent for nested pairs and useless here.
+    small, big = (ga, gb) if ga.area <= gb.area else (gb, ga)
+    if small.area > 0:
+        inter = _safe_intersection(small, big).area
+        if inter / small.area >= CONTAINED_FRAC:
+            out = []
+            for poly in _polys(small):
+                ring = LineString(poly.exterior.coords)
+                if simplify and simplify > 0:
+                    cand = ring.simplify(float(simplify))
+                    if not cand.is_empty and cand.geom_type == "LineString"                             and len(cand.coords) >= 4:
+                        ring = cand
+                out.append([[round(x, 2), round(y, 2)] for x, y in ring.coords])
+            return out
     parts = _lines(ga.boundary.intersection(gb.buffer(corridor, join_style=2)))
     if not parts:
         return []
@@ -470,9 +487,11 @@ def containment_message(c) -> str:
     pct = f"{100 * c['frac']:.0f}%"
     return (f'"{c["outer"]}" contains "{c["inner"]}"'
             + (f" ({pct} of it)" if c["frac"] < 0.999 else "")
-            + " - one is inside the other, so there is no border between them. "
-              "Sharing a border needs two regions that sit side by side. "
-              f'Unpick "{c["outer"]}" and choose a neighbour of "{c["inner"]}".')
+            + " - one is inside the other, so tiling (Share borders) has "
+              "nothing to divide. But their border IS editable: with just "
+              f'these two picked, "{c["inner"]}"\'s outline appears as the '
+              "shared border - drag it, and "
+              f'"{c["outer"]}" keeps wrapping it.')
 
 
 def summary(features, id_prop="name", grid=4.0):
@@ -552,6 +571,46 @@ def move_border(features, id_prop, region_a, region_b, points, drag_start=None, 
             old_arc = [(float(x), float(y)) for x, y in longest]
     if not old_arc or len(old_arc) < 2:
         raise ValueError("couldn't locate the border being edited")
+
+    # One region inside the other: the dragged arc is the INNER's outline (its
+    # ring is the shared border). The inner is rebuilt from the dragged ring;
+    # the container is never carved -- it simply keeps covering, by taking the
+    # union with the new inner, so the files' cover convention survives every
+    # drag. Real neighbours are still protected ground.
+    inner_is_a = A.area <= B.area
+    small, big = (A, B) if inner_is_a else (B, A)
+    inter = _safe_intersection(small, big).area if small.area > 0 else 0.0
+    if small.area > 0 and inter / small.area >= CONTAINED_FRAC:
+        inner_keys = idx[region_a if inner_is_a else region_b]
+        outer_keys = idx[region_b if inner_is_a else region_a]
+        inner_name = region_a if inner_is_a else region_b
+
+        # the dragged lobe: the part of the inner whose outline the drag began on
+        start_pt = Point(*old_arc[0])
+        lobes = _polys(small)
+        lobe = min(lobes, key=lambda pg: pg.exterior.distance(start_pt))
+        rest = _safe_difference(small, lobe)
+
+        ring = list(new_arc)
+        if ring[0] != ring[-1]:
+            ring.append(ring[0])
+        if len(ring) < 4:
+            raise ValueError("the dragged outline collapsed -- try a smaller drag")
+        new_lobe = Polygon(ring).buffer(0)
+        new_lobe = unary_union(_polys(new_lobe))
+        if new_lobe.is_empty or new_lobe.area < 1.0:
+            raise ValueError(f"that drag would erase {inner_name} -- try a smaller one")
+        if not protected.is_empty:
+            new_lobe = _safe_difference(new_lobe, protected)   # never take a neighbour
+        new_inner = clean_geom(unary_union([rest, new_lobe]).buffer(0), smooth=False)
+        if new_inner.is_empty or new_inner.area < 1.0:
+            raise ValueError(f"that drag would erase {inner_name} -- try a smaller one")
+        new_outer = clean_geom(unary_union([big, new_inner]).buffer(0), smooth=False)
+
+        out = json.loads(json.dumps(features))
+        _write_body(out, features, inner_keys, new_inner)
+        _write_body(out, features, outer_keys, new_outer)
+        return out
 
     # The old and new arc share endpoints, so old_arc + reversed(new_arc) closes a
     # thin loop = the area the border swept across. buffer(0) heals any self-touch;

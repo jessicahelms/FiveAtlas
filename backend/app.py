@@ -1010,9 +1010,17 @@ async def shared_border(ds_id: str, request: Request):
         "touchTol": touch_tol,
     }
     if contained:
-        return {**pair_meta, "arcs": [], "bridged": False,
+        # A nested pair HAS a border: the inner's own outline. Hand it over as
+        # the draggable arc(s); dragging reshapes the inner and the container
+        # keeps covering it (move_border's nested branch).
+        arcs = topology.border_between(fc["features"], d["id_prop"], str(a), str(b), grid)
+        return {**pair_meta, "arcs": arcs, "bridged": False,
                 "contained": contained,
-                "message": topology.containment_message(contained)}
+                "message": (f'"{contained["inner"]}" sits inside '
+                            f'"{contained["outer"]}" -- the outline of '
+                            f'"{contained["inner"]}" is their shared border. '
+                            f'Drag it; "{contained["outer"]}" always keeps '
+                            "wrapping it.")}
     if not body.get("bridge", True):
         # exact coincident border only (no geometry change)
         arcs = topology.border_between(fc["features"], d["id_prop"], str(a), str(b), grid)
@@ -1049,9 +1057,9 @@ async def move_border(ds_id: str, request: Request):
         drag_start = body.get("orig")     # legacy name; still means this drag's start arc
     if not fc or not a or not b or not pts:
         raise HTTPException(400, "need 'fc', 'regionA', 'regionB', 'points'")
-    contained = topology.containment(fc["features"], d["id_prop"], [str(a), str(b)])
-    if contained:
-        raise HTTPException(422, topology.containment_message(contained))
+    # Nested pairs are welcome here: move_border reshapes the inner along its
+    # dragged outline and the container keeps covering. (Share borders/tiling
+    # still refuses nested picks -- there is nothing for a partition to divide.)
     try:
         feats = topology.move_border(fc["features"], d["id_prop"], str(a), str(b), pts, drag_start=drag_start)
     except ValueError as e:  # geometry couldn't be divided -> client-fixable

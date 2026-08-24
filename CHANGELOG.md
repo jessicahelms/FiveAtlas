@@ -5,6 +5,15 @@ above the install instructions. Keep entries short and in plain language --
 they are read by annotators, not developers. The heading must be `## vX.Y.Z`
 exactly; CI matches it against the tag.
 
+## v1.1.0
+
+- Regions that sit inside another region now have an editable shared border:
+  pick the pair in Edit shared borders and the inner region's outline appears
+  as the border. Drag it and the inner reshapes; the containing region always
+  keeps wrapping it, and real neighbours are never taken. (Share borders --
+  the tiling button -- still refuses nested pairs, since there is nothing to
+  divide; the message now points you at the drag instead.)
+
 ## v1.0.1
 
 - Removed the Quit button. To stop FiveAtlas: on Windows close its window;
