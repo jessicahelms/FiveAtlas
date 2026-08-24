@@ -956,10 +956,19 @@ export default function App() {
         // picking stays snappy. If the outlines are merely near each other, prompt
         // the user to Share borders before exposing a draggable shared edge.
         const res = await api.sharedBorder(dsId, next[0], next[1], fc, { bridge: false });
-        // One region inside the other: there is no border to share, and the
-        // partition would shred the overlap into slivers. Say so on the pick.
+        // One region inside the other: the inner's outline IS the border.
+        // The server sends it as the arcs; wire them up like any other border
+        // and let its message explain what dragging will do. Only a nested
+        // pair with no ring at all (degenerate geometry) still stops here.
         if (res && res.contained) {
-          setBorderArc(null); setBorderSegments([]);
+          const ringArcs = normalizeBorderArcs(res.arcs);
+          if (!ringArcs.length) {
+            setBorderArc(null); setBorderSegments([]);
+            setBorderMsg(res.message);
+            return;
+          }
+          setBorderSegments(ringArcs); setBorderSegmentIndex(0);
+          setBorderArc(borderArcsFc(ringArcs));
           setBorderMsg(res.message);
           return;
         }

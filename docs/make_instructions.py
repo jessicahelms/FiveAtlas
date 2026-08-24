@@ -145,7 +145,10 @@ ITEMS = [
 
     "Edit shared borders works on the line between two regions. Click two "
     "regions that touch and you can drag the border between them, and both "
-    "sides update together so you never open up a gap. A drag may also reach "
+    "sides update together so you never open up a gap. This works for a "
+    "region INSIDE another region too: pick the pair and the inner one's "
+    "outline appears as their border — drag it, and the outer region keeps "
+    "wrapping it. A drag may also reach "
     "PAST the section outline — the region grows into the empty ground "
     "beyond it (rebuild “hemi” afterwards if you want the outline to "
     "catch up). Other regions' territory is never taken this way.",
