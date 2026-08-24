@@ -1086,9 +1086,27 @@ async def regions_partition(ds_id: str, request: Request):
         raise HTTPException(400, "need 'regions': at least two region names")
     fc = body.get("fc") or geo.load_regions(ds_id)[0]
     tol = float(body.get("tol", 40.0))
-    # Refuse a container/content pick rather than shredding the overlap into
-    # slivers. This is the mutating call, so it changes nothing and says why.
+    # A nested PAIR gets the nested meaning of "share borders": the hairline
+    # band between the inner's edge and the container's outline joins the
+    # inner, so they genuinely share the outline along their neighbouring
+    # stretch. Three or more picks with a container among them still refuse --
+    # a partition would shred the overlap into slivers.
     contained = topology.containment(fc["features"], d["id_prop"], names)
+    if contained and len(names) == 2:
+        try:
+            res = topology.snap_to_container(fc["features"], d["id_prop"],
+                                             names, tol=tol)
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+        detail = (f"{res['inner']} joined to {res['outer']}'s outline"
+                  f" ({res['sealed']:,.0f} px\u00b2 along {res['stretches']}"
+                  " stretch(es))")
+        return {**provenance.stamped(res["features"], fc, "share-borders",
+                                     detail, names),
+                "borders": res["borders"],
+                "nested": {"outer": res["outer"], "inner": res["inner"],
+                           "sealed": res["sealed"],
+                           "stretches": res["stretches"]}}
     if contained:
         raise HTTPException(422, topology.containment_message(contained))
     try:

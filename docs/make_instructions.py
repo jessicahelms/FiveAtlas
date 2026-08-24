@@ -148,7 +148,11 @@ ITEMS = [
     "sides update together so you never open up a gap. This works for a "
     "region INSIDE another region too: pick the pair and the inner one's "
     "outline appears as their border — drag it, and the outer region keeps "
-    "wrapping it. A drag may also reach "
+    "wrapping it — and pressing Share borders on such a pair absorbs the "
+    "hairline gap between the inner region's edge and the outline, so they "
+    "genuinely share it where they neighbour. To pick a region that sits "
+    "underneath everything (like “hemi”), click its NAME in the "
+    "Regions list. A drag may also reach "
     "PAST the section outline — the region grows into the empty ground "
     "beyond it (rebuild “hemi” afterwards if you want the outline to "
     "catch up). Other regions' territory is never taken this way.",

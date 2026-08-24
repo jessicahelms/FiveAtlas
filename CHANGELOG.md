@@ -5,6 +5,17 @@ above the install instructions. Keep entries short and in plain language --
 they are read by annotators, not developers. The heading must be `## vX.Y.Z`
 exactly; CI matches it against the tag.
 
+## v1.1.1
+
+- Share borders now works for a region inside another region (hemi + a
+  coastal region, say): the hairline gap between the region's edge and the
+  outline is absorbed, so they genuinely share the outline where they
+  neighbour. Nothing else moves -- the container is untouched, neighbours
+  are never taken, and fat unclaimed pockets are left alone.
+- Picking hemi got easier to find: the Edit shared borders hint now says to
+  pick regions by clicking their NAMES in the list -- the way to pick a
+  region that sits underneath everything.
+
 ## v1.1.0
 
 - Regions that sit inside another region now have an editable shared border:

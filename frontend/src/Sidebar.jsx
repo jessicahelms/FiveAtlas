@@ -581,6 +581,9 @@ export default function Sidebar({
           <div className="hint">
             <b>Edit points</b>: select a region, drag its outline.
             <b> Shared borders</b>: pick regions to drag a border, tile, or merge them.
+            Pick by clicking NAMES in the Regions list when a region cannot be
+            clicked on the image — hemi sits under everything, so its name is
+            the way to pick it.
           </div>
         )}
 
