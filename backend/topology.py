@@ -494,6 +494,99 @@ def containment_message(c) -> str:
               f'"{c["outer"]}" keeps wrapping it.')
 
 
+def snap_to_container(features, id_prop, names, tol=40.0):
+    """Merge a nested pair's borders WHERE THEY NEIGHBOUR: the hairline band
+    between the inner's edge and the container's outline joins the inner, so
+    the inner runs exactly to the outline along their shared stretch.
+
+    "Share borders" for hemi + a coastal region, in other words. Absorbed
+    ground is strictly limited:
+      * only unclaimed ground (never another region's),
+      * only hairline bands (erodes to nothing at tol/2 -- a fat unlabelled
+        pocket is somebody's future region, not a border artefact),
+      * only within `tol` of the container's own outline -- the band along
+        the coast, never a corridor running inland.
+    The container itself is untouched: it covered that ground before and
+    covers it after. Returns {features, borders, sealed, stretches}.
+    """
+    c = containment(features, id_prop, names)
+    if not c:
+        raise ValueError("these regions are not nested -- Share borders "
+                         "handles side-by-side pairs directly")
+    idx = _index_all(features, id_prop)
+    outer = _body(features, idx[c["outer"]])
+    inner = _body(features, idx[c["inner"]])
+    pair = set(idx[c["outer"]]) | set(idx[c["inner"]])
+    blanket_names = set(blankets(features, id_prop, keep=[c["outer"], c["inner"]]))
+    others = []
+    for k, f in enumerate(features):
+        if k in pair:
+            continue
+        if str((f.get("properties") or {}).get(id_prop)) in blanket_names:
+            continue
+        try:
+            g = shape(f["geometry"])
+            if not g.is_valid:
+                g = g.buffer(0)
+            if not g.is_empty:
+                others.append(g)
+        except Exception:
+            pass
+    protected = unary_union(others).buffer(0) if others else Polygon()
+
+    free = _safe_difference(_safe_difference(outer, inner), protected)
+    w = max(float(tol), 4.0)
+    # The band is the ground BETWEEN the two boundaries: every absorbed point
+    # lies within `g` of the inner's edge AND within `g` of the outline. That
+    # is what "where the borders are neighbours" means -- a hairline gap
+    # between region edge and section outline -- and it is what keeps open
+    # interior ground out: an unclaimed pocket may run along the outline OR
+    # alongside the inner, but only the true between-sliver is close to both.
+    # (The unclaimed ground is one huge connected blob, so membership is by
+    # this double proximity, never by connected components.)
+    g = max(w / 4.0, 4.0)
+    zone = _safe_intersection(_safe_intersection(free, outer.boundary.buffer(g)),
+                              inner.buffer(g))
+    fill = []
+    edge = outer.boundary.buffer(1.0)
+    for piece in _polys(zone):
+        if piece.area <= 1e-6:
+            continue
+        if piece.distance(inner) > 0.5:
+            continue                       # does not touch the inner
+        if not piece.intersects(edge):
+            continue                       # does not reach the outline
+        fill.append(piece)
+    if not fill:
+        return {"features": json.loads(json.dumps(features)), "borders": [],
+                "sealed": 0.0, "stretches": 0,
+                "outer": c["outer"], "inner": c["inner"]}
+
+    new_inner = unary_union([inner] + fill).buffer(0)
+    new_inner = _snap_polys(new_inner, 0.01)
+    new_inner = clean_geom(new_inner, smooth=False)
+
+    out = json.loads(json.dumps(features))
+    _write_body(out, features, idx[c["inner"]], new_inner)
+
+    # the stretches now genuinely shared with the outline, for the drag UI
+    arcs = []
+    try:
+        shared = new_inner.boundary.intersection(outer.boundary.buffer(2.0))
+        parts = _lines(shared)
+        merged = linemerge(parts) if len(parts) > 1 else (parts[0] if parts else None)
+        if merged is not None:
+            for ln in _lines(merged):
+                if ln.length >= 8.0:
+                    arcs.append({"points": [[round(x, 2), round(y, 2)]
+                                            for x, y in ln.coords]})
+    except Exception:
+        arcs = []                # the merge stands even if the arc report fails
+    return {"features": out, "borders": arcs,
+            "sealed": float(sum(g.area for g in fill)), "stretches": len(fill),
+            "outer": c["outer"], "inner": c["inner"]}
+
+
 def summary(features, id_prop="name", grid=4.0):
     borders = shared_borders(features, id_prop, grid)
     per_region = {}

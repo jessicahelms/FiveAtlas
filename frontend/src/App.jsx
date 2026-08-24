@@ -1140,14 +1140,18 @@ export default function App() {
       // Sharing leaves a Voronoi-dense, unevenly spaced border, so even it out
       // straight away rather than making the user reach for the slider. The
       // slider is still there to go coarser or finer afterwards.
+      // (Not for a nested pair: their shared stretch lies ON the container's
+      // outline, and resampling it would move the outline itself.)
       let repointed = null;
-      try {
-        const rs = await api.resampleRegions(dsId, borderPicks, newFc, resampleTol);
-        if (rs && rs.features && rs.handles) {
-          newFc = asFc(rs, newFc);
-          repointed = rs;
-        }
-      } catch (e) { /* keep the un-resampled result rather than failing the share */ }
+      if (!res.nested) {
+        try {
+          const rs = await api.resampleRegions(dsId, borderPicks, newFc, resampleTol);
+          if (rs && rs.features && rs.handles) {
+            newFc = asFc(rs, newFc);
+            repointed = rs;
+          }
+        } catch (e) { /* keep the un-resampled result rather than failing the share */ }
+      }
 
       commit(newFc); setBaseline(newFc);
       setMoved((prev) => { const n = new Set(prev); borderPicks.forEach((x) => n.add(x)); return n; });
@@ -1171,9 +1175,16 @@ export default function App() {
         const spread = repointed && repointed.handles
           ? ` Points evened out, ${repointed.handles.before} → ${repointed.handles.after}.`
           : '';
-        setBorderMsg(arced
-          ? `Joined ${borderPicks[0]} & ${borderPicks[1]} ✓ —${spread} drag the border to fine-tune.${segmentCount > 1 ? ` ${segmentCount} interrupted segments shown.` : ''}`
-          : `Joined ${borderPicks[0]} & ${borderPicks[1]} ✓.${spread}`);
+        if (res.nested) {
+          const px = Math.round(res.nested.sealed).toLocaleString();
+          setBorderMsg(res.nested.sealed > 0
+            ? `Merged ${res.nested.inner}'s border onto ${res.nested.outer}'s outline where they neighbour — ${px} px² absorbed ✓${arced ? ' Drag the outline to fine-tune.' : ''}`
+            : `No gap between ${res.nested.inner} and ${res.nested.outer}'s outline to merge — to reshape their border, drag ${res.nested.inner}'s outline instead.`);
+        } else {
+          setBorderMsg(arced
+            ? `Joined ${borderPicks[0]} & ${borderPicks[1]} ✓ —${spread} drag the border to fine-tune.${segmentCount > 1 ? ` ${segmentCount} interrupted segments shown.` : ''}`
+            : `Joined ${borderPicks[0]} & ${borderPicks[1]} ✓.${spread}`);
+        }
       } else {
         setBorderArc(null); setBorderSegments([]); setBorderSegmentIndex(0);
         setBorderMsg(`Shared borders across ${borderPicks.length} regions ✓ (${(res.borders || []).length} borders). Save / Export when done.`);

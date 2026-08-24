@@ -142,9 +142,14 @@ check("move-border accepts the nested pair end to end", ok,
 
 code, res = post(f"/api/datasets/{DS}/regions/partition",
                  {"regions": ["ISO", "SSp"], "fc": fc})
-check("Share borders (tiling) still refuses nested picks", code == 422,
-      f"code {code}")
-check("...and the refusal now points at the drag",
+check("Share borders on a nested PAIR now succeeds (coastal merge semantics)",
+      code == 200 and "nested" in res, f"code {code}")
+check("...deep inside the container there is nothing near the outline to seal",
+      code == 200 and res.get("nested", {}).get("sealed", -1) == 0.0)
+code, res = post(f"/api/datasets/{DS}/regions/partition",
+                 {"regions": ["ISO", "SSp", "C"], "fc": fc})
+check("three picks with a container still refuse", code == 422, f"code {code}")
+check("...and the refusal points at the drag",
       code == 422 and "drag" in str(res).lower())
 
 print("\n" + (f"{len(fails)} FAILED: " + "; ".join(fails) if fails else "all checks passed"))
