@@ -75,6 +75,19 @@ gV3 = geom_of(res3, "VISp")
 check("an inland corridor toward a neighbour stays (mostly) unclaimed",
       not gV3.covers(Point(40, 86)), "")
 
+print("\nan inner poking PAST the outline: the container grows to cover it")
+POKY = box(3, 3, 80, 80).union(box(20, -12, 60, 3))    # wedge past the coast
+resP = T.snap_to_container([feat("hemi", HEMI), feat("POKY", POKY)],
+                           "name", ["hemi", "POKY"], tol=40)
+gH, gP = geom_of(resP, "hemi"), geom_of(resP, "POKY")
+check("the container now covers the protrusion", gH.covers(gP.buffer(-0.5)),
+      f"covered {resP.get('covered', 0):.0f}")
+check("the covered area is reported", 400 < resP.get("covered", 0) < 560,
+      f"{resP.get('covered', 0):.0f}")
+check("...and it converges: a second run covers nothing",
+      T.snap_to_container(resP["features"], "name", ["hemi", "POKY"],
+                          tol=40).get("covered", 0) < 1.0)
+
 print("\na flush region between flush neighbours: nothing to do, twice")
 # the real-file case: coastal regions shoulder to shoulder, all on the outline
 D = box(20, 120, 80, 200)

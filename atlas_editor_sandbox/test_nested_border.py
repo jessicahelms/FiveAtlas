@@ -103,6 +103,37 @@ out = T.move_border([feat("hemi", hemi), feat("SSp", SSP)], "name",
 check("hemi unchanged", abs(geom_of(out, "hemi").area - 340 * 240) < 1.0)
 check("the inner reshaped", abs(geom_of(out, "SSp").area - 100 * 100) < 1.0)
 
+print("\ncoastal stretch: where the borders coincide, they move as ONE line")
+COAST = box(0, 50, 70, 150)                    # left edge ON ISO's own outline
+coast_ring = [[0, 50], [70, 50], [70, 150], [0, 150], [0, 50]]
+coast_in = [[20, 50], [70, 50], [70, 150], [20, 150], [20, 50]]
+out = T.move_border([feat("ISO", ISO), feat("COAST", COAST)], "name",
+                    "COAST", "ISO", coast_in, drag_start=coast_ring)
+gS, gI = geom_of(out, "COAST"), geom_of(out, "ISO")
+check("the inner takes the inward drag", abs(gS.area - 50 * 100) < 1.0,
+      f"{gS.area:.0f}")
+check("the container's outline FOLLOWS along the coincident stretch",
+      abs(gI.area - (200 * 200 - 20 * 100)) < 2.0, f"{gI.area:.0f}")
+check("away from that stretch the container keeps its old coast",
+      gI.covers(Point(1, 1)) and gI.covers(Point(1, 199)))
+check("the container still covers the inner", gI.covers(gS.buffer(-0.5)))
+
+print("\n...but another region's ground on the coast is never cut away")
+NB = box(0, 150, 70, 200)                      # coastal neighbour above COAST
+out = T.move_border([feat("ISO", ISO), feat("COAST", COAST), feat("NB", NB)],
+                    "name", "COAST", "ISO", coast_in, drag_start=coast_ring)
+gI, gN = geom_of(out, "ISO"), geom_of(out, "NB")
+check("the container keeps covering the coastal neighbour",
+      gI.covers(gN.buffer(-0.5)))
+
+print("\nmerging a nested pair dissolves it into the container's shape")
+res = T.merge_regions([feat("ISO", ISO), feat("SSp", SSP)], "name",
+                      ["ISO", "SSp"])
+gM = shape(res["features"][0]["geometry"])
+check("one region left, the container's full extent",
+      len(res["features"]) == 1 and abs(gM.area - 200 * 200) < 1.0,
+      f"{gM.area:.0f}")
+
 print("\nthe routes")
 
 

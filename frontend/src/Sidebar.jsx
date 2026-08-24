@@ -11,6 +11,7 @@ export default function Sidebar({
   info, fc, sources, selected, onSelectName, onRegionMenu,
   mode, onToggleModify, onToggleBorder, onToggleSplit, onToggleDissolve, onToggleDraw,
   borderPicks, borderMsg, borderShared, onClearBorder, onShareBorders, onMerge,
+  snapTol, onSnapTol,
   splitMsg, drawMsg, drawKind, onDrawKind, designations, damageAsk, onAnswerDamage,
   resample, resampleTol, onResampleTol, onApplyResample, onCancelResample,
   gapFind, gapMsg, onDissolve, onFillGap, onClearGap,
@@ -283,6 +284,25 @@ export default function Sidebar({
               <button className="btn sm" onClick={onMerge} disabled={busy}>
                 ⨝ Merge into one ({picks.length})
               </button>
+            )}
+            {picks.length >= 2 && !borderShared && (
+              <div className="prop">
+                <div className="pts-head">Snap reach</div>
+                <div className="rng">
+                  <span>near</span>
+                  <input
+                    type="range" min="5" max="300" step="5"
+                    value={snapTol}
+                    onChange={(e) => onSnapTol && onSnapTol(Number(e.target.value))}
+                    disabled={busy}
+                  />
+                  <span>far</span>
+                </div>
+                <div className="prop-readout">
+                  <span>bridges gaps up to</span>
+                  <span className="v">{snapTol} px</span>
+                </div>
+              </div>
             )}
             {picks.length >= 2 && borderShared && (
               <div className="prop">
