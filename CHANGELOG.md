@@ -5,6 +5,27 @@ above the install instructions. Keep entries short and in plain language --
 they are read by annotators, not developers. The heading must be `## vX.Y.Z`
 exactly; CI matches it against the tag.
 
+## v1.2.0
+
+- Share borders on a nested pair now truly merges the borders. Gaps up to
+  the snap reach between the region's edge and the outline are absorbed
+  however wide the band actually is (before, anything wider than about half
+  the reach was silently skipped and the app still said "merged"). And where
+  the region pokes PAST the outline, the outline now grows to cover it, so
+  the two borders end up as one line on both kinds of stretch.
+- New "Snap reach" slider (5-300 px, default 40) appears once you have
+  picked regions in Edit shared borders. It sets how wide a gap Share
+  borders bridges -- for nested pairs and side-by-side pairs alike -- and
+  how wide a seam Merge dissolves. Wide bands may need the slider up around
+  150; a second click is always safe and only tightens things further.
+- Dragging a nested pair's border where it runs ON the outline now moves
+  both as one line: pull the region's edge inward along the coast and the
+  outline follows, exactly like an ordinary side-by-side border. Inland,
+  the container still simply keeps covering, and neighbours are never taken.
+- Honest messages: if a region sits too far inside the outline for the snap
+  to bridge, the app now says how many pixels away it is and suggests
+  raising Snap reach, instead of claiming there was nothing to merge.
+
 ## v1.1.1
 
 - Share borders now works for a region inside another region (hemi + a

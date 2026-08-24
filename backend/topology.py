@@ -536,17 +536,22 @@ def snap_to_container(features, id_prop, names, tol=40.0):
 
     free = _safe_difference(_safe_difference(outer, inner), protected)
     w = max(float(tol), 4.0)
-    # The band is the ground BETWEEN the two boundaries: every absorbed point
-    # lies within `g` of the inner's edge AND within `g` of the outline. That
-    # is what "where the borders are neighbours" means -- a hairline gap
-    # between region edge and section outline -- and it is what keeps open
-    # interior ground out: an unclaimed pocket may run along the outline OR
-    # alongside the inner, but only the true between-sliver is close to both.
-    # (The unclaimed ground is one huge connected blob, so membership is by
-    # this double proximity, never by connected components.)
-    g = max(w / 4.0, 4.0)
-    zone = _safe_intersection(_safe_intersection(free, outer.boundary.buffer(g)),
-                              inner.buffer(g))
+    # The band is the ground BETWEEN the two boundaries. A morphological
+    # CLOSING of (inner + the outline) yields exactly that: the fill a
+    # radius-tol/2 close adds is the ground spanning gaps up to `tol` wide
+    # between the two -- the whole band, however it meanders. (The old
+    # double-proximity zone at tol/4 qualified NOTHING once the band was
+    # wider than tol/2, so the snap reported "merged" while visibly doing
+    # nothing.) A closing also cannot creep: where the pair is already
+    # flush there is no gap to fill, so repeat clicks converge instead of
+    # each nibbling further along the coast. Fills between two stretches
+    # of the OUTLINE itself (a notch in the coast) never touch the inner
+    # and fall to the filters below, as do the inner's own inland notches
+    # (they never reach the outline).
+    r = w / 2.0
+    U = unary_union([inner, outer.boundary.buffer(0.5)]).buffer(0)
+    closed = U.buffer(r, join_style=2).buffer(-r, join_style=2).buffer(0)
+    zone = _safe_intersection(_safe_difference(closed, U), free)
     fill = []
     edge = outer.boundary.buffer(1.0)
     for piece in _polys(zone):
@@ -557,22 +562,52 @@ def snap_to_container(features, id_prop, names, tol=40.0):
         if not piece.intersects(edge):
             continue                       # does not reach the outline
         fill.append(piece)
-    if not fill:
+    # The inner may also POKE PAST the container's outline (the containment
+    # threshold admits up to ~10% outside). No amount of gap-filling merges
+    # the borders there -- the band is on the wrong side. The cover
+    # convention settles it: containers cover contents, so the container
+    # GROWS to the inner's edge along the protrusion, and the two borders
+    # coincide there too (exactly what a nested border drag already does).
+    spill = _safe_difference(inner, outer)
+    covered = float(spill.area) if not spill.is_empty else 0.0
+    if covered <= 1e-6:
+        covered = 0.0
+
+    if not fill and covered == 0.0:
         return {"features": json.loads(json.dumps(features)), "borders": [],
-                "sealed": 0.0, "stretches": 0,
+                "sealed": 0.0, "stretches": 0, "covered": 0.0,
+                "gapPx": round(float(inner.distance(outer.boundary)), 1),
                 "outer": c["outer"], "inner": c["inner"]}
 
     new_inner = unary_union([inner] + fill).buffer(0)
+    if fill:
+        # The closing measured the gap from a hairline-thick outline, so a last
+        # half-pixel skin against the coast is still unclaimed; take it in
+        # wherever the inner now runs against the outline, so the two borders
+        # end up genuinely coincident. Clipped to the inner's own footprint --
+        # never along coast the inner does not reach.
+        skin = _safe_intersection(_safe_intersection(free, outer.boundary.buffer(0.75)),
+                                  new_inner.buffer(1.5))
+        if not skin.is_empty and skin.area > 1e-6:
+            fill.append(skin)
+            new_inner = unary_union([new_inner, skin]).buffer(0)
     new_inner = _snap_polys(new_inner, 0.01)
     new_inner = clean_geom(new_inner, smooth=False)
 
+    new_outer = outer
+    if covered > 0.0:
+        new_outer = clean_geom(unary_union([outer, new_inner]).buffer(0),
+                               smooth=False)
+
     out = json.loads(json.dumps(features))
     _write_body(out, features, idx[c["inner"]], new_inner)
+    if covered > 0.0:
+        _write_body(out, features, idx[c["outer"]], new_outer)
 
     # the stretches now genuinely shared with the outline, for the drag UI
     arcs = []
     try:
-        shared = new_inner.boundary.intersection(outer.boundary.buffer(2.0))
+        shared = new_inner.boundary.intersection(new_outer.boundary.buffer(2.0))
         parts = _lines(shared)
         merged = linemerge(parts) if len(parts) > 1 else (parts[0] if parts else None)
         if merged is not None:
@@ -584,6 +619,8 @@ def snap_to_container(features, id_prop, names, tol=40.0):
         arcs = []                # the merge stands even if the arc report fails
     return {"features": out, "borders": arcs,
             "sealed": float(sum(g.area for g in fill)), "stretches": len(fill),
+            "covered": covered,
+            "gapPx": round(float(new_inner.distance(new_outer.boundary)), 1),
             "outer": c["outer"], "inner": c["inner"]}
 
 
@@ -699,6 +736,26 @@ def move_border(features, id_prop, region_a, region_b, points, drag_start=None, 
         if new_inner.is_empty or new_inner.area < 1.0:
             raise ValueError(f"that drag would erase {inner_name} -- try a smaller one")
         new_outer = clean_geom(unary_union([big, new_inner]).buffer(0), smooth=False)
+
+        # Where the dragged stretch COINCIDED with the container's own outline
+        # (borders merged, e.g. after Share borders on a coastal pair), the two
+        # edges are one line and move as one -- exactly like a side-by-side
+        # pair's shared border. So the ground the inner ceded that touches the
+        # container's outer boundary recedes from the container too. Inland
+        # cessions never touch that boundary, so there the container keeps
+        # covering as before; and nothing another region owns is ever cut away.
+        ceded = _safe_difference(lobe, new_lobe)
+        if not ceded.is_empty and ceded.area > 1e-6:
+            edge = big.boundary.buffer(2.0)
+            coastal = [p for p in _polys(ceded) if p.intersects(edge)]
+            if coastal:
+                keep_cover = unary_union([new_inner, other_union]).buffer(0)
+                cut = _safe_difference(unary_union(coastal), keep_cover)
+                if not cut.is_empty and cut.area > 1e-6:
+                    receded = clean_geom(_safe_difference(new_outer, cut).buffer(0),
+                                         smooth=False)
+                    if not receded.is_empty and receded.area >= 1.0:
+                        new_outer = receded
 
         out = json.loads(json.dumps(features))
         _write_body(out, features, inner_keys, new_inner)

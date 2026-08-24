@@ -483,6 +483,7 @@ export default function App() {
   const [damageAsk, setDamageAsk] = useState(null);   // {name, candidates, dominant}
   // resample: thin the shared border after Share borders
   const [resampleTol, setResampleTol] = useState(150);
+  const [snapTol, setSnapTol] = useState(40);       // px reach for Share borders / Merge gap bridging
   const [resample, setResample] = useState(null);   // { counts, fc, tol }
   const resampleTimer = useRef(null);
   const resampleUndoRef = useRef(null);   // handles as they were before previewing
@@ -1134,7 +1135,7 @@ export default function App() {
     if (borderPicks.length < 2) return;
     setBusy(true); setError(null);
     try {
-      const res = await api.partitionRegions(dsId, borderPicks, fc);
+      const res = await api.partitionRegions(dsId, borderPicks, fc, snapTol);
       let newFc = asFc(res, fc);
 
       // Sharing leaves a Voronoi-dense, unevenly spaced border, so even it out
@@ -1177,9 +1178,16 @@ export default function App() {
           : '';
         if (res.nested) {
           const px = Math.round(res.nested.sealed).toLocaleString();
-          setBorderMsg(res.nested.sealed > 0
-            ? `Merged ${res.nested.inner}'s border onto ${res.nested.outer}'s outline where they neighbour — ${px} px² absorbed ✓${arced ? ' Drag the outline to fine-tune.' : ''}`
-            : `No gap between ${res.nested.inner} and ${res.nested.outer}'s outline to merge — to reshape their border, drag ${res.nested.inner}'s outline instead.`);
+          const gap = Number(res.nested.gapPx);
+          const cov = Number(res.nested.covered) || 0;
+          const covNote = cov > 0
+            ? ` ${res.nested.outer}'s outline grew ${Math.round(cov).toLocaleString()} px² to cover where ${res.nested.inner} poked past it.`
+            : '';
+          setBorderMsg(res.nested.sealed > 0 || cov > 0
+            ? `Merged ${res.nested.inner}'s border onto ${res.nested.outer}'s outline where they neighbour — ${px} px² absorbed ✓${covNote}${arced ? ' Drag the outline to fine-tune.' : ''}`
+            : (Number.isFinite(gap) && gap > 1
+              ? `${res.nested.inner} sits ${Math.round(gap)} px inside ${res.nested.outer}'s outline — beyond the ${snapTol} px snap reach. Raise “Snap reach” and Share borders again, or drag ${res.nested.inner}'s outline toward the edge.`
+              : `No gap between ${res.nested.inner} and ${res.nested.outer}'s outline to merge — to reshape their border, drag ${res.nested.inner}'s outline instead.`));
         } else {
           setBorderMsg(arced
             ? `Joined ${borderPicks[0]} & ${borderPicks[1]} ✓ —${spread} drag the border to fine-tune.${segmentCount > 1 ? ` ${segmentCount} interrupted segments shown.` : ''}`
@@ -1194,7 +1202,7 @@ export default function App() {
       // sentence the backend wrote, not as `Error: 422: {"detail":"…"}`.
       setBorderMsg(`Share failed: ${apiDetail(e)}`);
     } finally { setBusy(false); }
-  }, [dsId, fc, borderPicks, commit, resampleTol]);
+  }, [dsId, fc, borderPicks, commit, resampleTol, snapTol]);
 
   // Preview a resample: the backend returns both the counts and the resulting FC,
   // so Apply commits what was already computed. Debounced -- the slider fires a
@@ -1272,7 +1280,7 @@ export default function App() {
     if (borderPicks.length < 2) return;
     setBusy(true); setError(null);
     try {
-      const res = await api.mergeRegions(dsId, borderPicks, fc);
+      const res = await api.mergeRegions(dsId, borderPicks, fc, undefined, snapTol);
       const newFc = asFc(res, fc);
       commit(newFc); setBaseline(newFc);
       setBorderPicks([]); setBorderArc(null);
@@ -1286,7 +1294,7 @@ export default function App() {
     } catch (e) {
       setBorderMsg(`Merge failed: ${String(e).replace(/^Error:\s*/, '')}`);
     } finally { setBusy(false); }
-  }, [dsId, fc, borderPicks, commit]);
+  }, [dsId, fc, borderPicks, commit, snapTol]);
 
   const onClickFeature = useCallback((idx, obj) => {
     const t = obj && obj.geometry && obj.geometry.type;
@@ -2082,6 +2090,7 @@ export default function App() {
                 borderPicks={borderPicks} borderMsg={borderMsg} borderShared={borderShared}
                 onClearBorder={clearBorder} onShareBorders={doShareBorders}
                 onMerge={doMerge} splitMsg={splitMsg}
+                snapTol={snapTol} onSnapTol={setSnapTol}
                 resample={resample} resampleTol={resampleTol}
                 onResampleTol={previewResample} onApplyResample={applyResample}
                 onCancelResample={cancelResample}

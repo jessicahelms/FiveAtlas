@@ -1100,12 +1100,15 @@ async def regions_partition(ds_id: str, request: Request):
             raise HTTPException(422, str(e))
         detail = (f"{res['inner']} joined to {res['outer']}'s outline"
                   f" ({res['sealed']:,.0f} px\u00b2 along {res['stretches']}"
-                  " stretch(es))")
+                  " stretch(es)"
+                  + (f"; outline grew {res['covered']:,.0f} px\u00b2 to cover"
+                     if res.get("covered") else "") + ")")
         return {**provenance.stamped(res["features"], fc, "share-borders",
                                      detail, names),
                 "borders": res["borders"],
                 "nested": {"outer": res["outer"], "inner": res["inner"],
-                           "sealed": res["sealed"],
+                           "sealed": res["sealed"], "gapPx": res.get("gapPx"),
+                           "covered": res.get("covered", 0.0),
                            "stretches": res["stretches"]}}
     if contained:
         raise HTTPException(422, topology.containment_message(contained))
@@ -1161,7 +1164,8 @@ async def regions_merge(ds_id: str, request: Request):
         raise HTTPException(400, "need 'regions': at least two region names")
     fc = body.get("fc") or geo.load_regions(ds_id)[0]
     try:
-        res = topology.merge_regions(fc["features"], d["id_prop"], names, body.get("name"))
+        res = topology.merge_regions(fc["features"], d["id_prop"], names, body.get("name"),
+                                     seam_tol=float(body.get("tol", 40.0)))
     except ValueError as e:
         raise HTTPException(422, str(e))
     except Exception as e:
