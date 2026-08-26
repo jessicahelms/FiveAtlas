@@ -82,7 +82,9 @@ class StainStack:
         else:
             names = self._files or [str(p) for p in Path(self.path).rglob("*.ome.tif*")]
         for n in names:
-            m = re.match(r".*ch(\d+)_", Path(n).name, re.I)
+            base = Path(n).name
+            m = (re.match(r".*ch(\d+)_", base, re.I)
+                 or re.match(r"morphology_focus_(\d+)\.ome\.tiff?$", base, re.I))
             if m:
                 self._member[int(m.group(1))] = n
 
@@ -114,6 +116,12 @@ class StainStack:
     def _channel(self, idx):
         if idx not in self._z:
             with self._lock:
+                # A request that raced a close() must fail loudly (the route
+                # turns KeyError into 404), not reopen members through the
+                # dropped zip handle -- self._zf is None then and _open would
+                # hand tifffile a zip member NAME as if it were a path.
+                if self.kind == "zip" and self._zf is None:
+                    raise KeyError("stain stack is closed")
                 if idx not in self._z:
                     tf = tifffile.TiffFile(self._open(self._member[idx]), is_ome=False)
                     s = tf.series[0]

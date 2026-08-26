@@ -37,6 +37,19 @@ def _write_opened(paths):
 
 
 def register(desc: dict) -> dict:
+    # Two different folders can share a name ("output", a re-exported slide...)
+    # and the folder name is the id. Letting the second silently REPLACE the
+    # first crossed the datasets' imagery, caches and -- worst -- their edited-
+    # regions workdir. A different root claiming a taken id gets a stable
+    # suffix from its full path instead, so each folder keeps its own identity
+    # (and the same suffix every session -> the same workdir).
+    cur = _REGISTRY.get(desc["id"])
+    if cur is not None and str(cur.get("root")) != str(desc.get("root")):
+        import hashlib
+        suffix = hashlib.sha1(str(desc.get("root")).encode("utf-8")).hexdigest()[:6]
+        desc = dict(desc)
+        desc["id"] = f"{desc['id']}~{suffix}"
+        desc["label"] = f"{desc.get('label') or desc['id']} ({suffix})"
     _REGISTRY[desc["id"]] = desc
     return desc
 

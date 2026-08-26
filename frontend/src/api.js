@@ -1,7 +1,7 @@
 import { API } from './config';
 
-export async function getInfo(ds) {
-  const r = await fetch(`${API}/datasets/${ds}/info`);
+export async function getInfo(ds, { noImagery = false } = {}) {
+  const r = await fetch(`${API}/datasets/${ds}/info${noImagery ? '?noimg=1' : ''}`);
   if (!r.ok) throw new Error(`info ${r.status}`);
   return r.json();
 }
@@ -142,6 +142,18 @@ export async function loadRegionsFile(ds, path) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ path }),
+  });
+  if (!r.ok) throw new Error(`load ${r.status}: ${await r.text()}`);
+  return r.json();
+}
+
+// One or several region files combined into the working copy (the pre-load
+// checklist's region rows).
+export async function loadRegionsMulti(ds, paths) {
+  const r = await fetch(`${API}/datasets/${ds}/regions/load-multi`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ paths }),
   });
   if (!r.ok) throw new Error(`load ${r.status}: ${await r.text()}`);
   return r.json();

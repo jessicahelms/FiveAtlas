@@ -1,0 +1,240 @@
+# Build the Windows FiveAtlas on GitHub's Windows runners.
+#
+# Why this exists: the Windows zip used to be built by hand on one laptop and
+# copied to the S: share, so the GitHub release page offered a Mac download
+# only. Anyone sent that link on Windows had nothing to click. Now a tag
+# builds both, and ONE link serves everybody.
+#
+# It runs the very same build_release.ps1 the laptop runs (passed -Python so it
+# does not need the local venv), so there is one build recipe, not two.
+#
+# Run it from the Actions tab ("Run workflow"), or push a tag like v1.2.1.
+name: Build FiveAtlas (Windows)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version string baked into the app and filenames"
+        required: false
+        default: "0.0.0-dev"
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write        # needed to attach the .zip to a Release on a tag push
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      # Actions pinned to a commit SHA, not a floating tag -- a tag can be moved
+      # to different code after the fact, a SHA cannot. (Same SHAs as the macOS
+      # workflow, so both builds are pinned to one reviewed set.)
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      # 3.11, not the 3.9 the laptop venv uses: 3.9 is past end-of-life. Every
+      # pin in requirements.txt has a cp311 win_amd64 wheel, so nothing is
+      # compiled here.
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend deps
+        working-directory: frontend
+        run: npm ci
+
+      - name: Install backend deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install "pyinstaller==6.21.0"
+          pip freeze > "${{ runner.temp }}/requirements-built.txt"
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        env:
+          VER_IN: ${{ inputs.version }}
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            v="${GITHUB_REF_NAME#v}"
+          else
+            v="${VER_IN:-0.0.0-dev}"
+          fi
+          # It ends up in a filename and a generated Python module.
+          if ! printf '%s' "$v" | grep -Eq '^[0-9][0-9A-Za-z.+-]*$'; then
+            echo "::error::version '$v' is not a plain version string"; exit 1
+          fi
+          echo "value=$v" >> "$GITHUB_OUTPUT"
+
+      # -OutRoot on the runner's temp: the build writes ~1 GB of scratch and
+      # must not land in the checkout.
+      - name: Build
+        run: >
+          powershell -ExecutionPolicy Bypass -File build_release.ps1
+          -Version "${{ steps.ver.outputs.value }}"
+          -OutRoot "${{ runner.temp }}\build"
+          -Python "python"
+
+      # Proves the built exe actually starts and serves the UI on a clean
+      # Windows box -- a missing hidden import or codec DLL fails here rather
+      # than on a colleague's laptop. /api/selftest exercises the native stack
+      # for real (JPEG2000, blosc/zarr, GEOS, YAML, Pillow), which /api/health
+      # cannot see.
+      #
+      # continue-on-error: the zip already exists by now, so a runtime problem
+      # should still hand back a downloadable artifact plus the diagnostics --
+      # the job is failed at the end by "Fail if smoke test failed".
+      - name: Smoke-test the built app
+        id: smoke
+        continue-on-error: true
+        shell: bash
+        env:
+          ATLAS_NO_BROWSER: "1"
+          ATLAS_PORT: "8051"
+          ATLAS_WORKDIR: ${{ runner.temp }}/smoke-wd
+        run: |
+          set +e
+          EXE="${RUNNER_TEMP}/build/release/FiveAtlas/FiveAtlas.exe"
+          OUT="${RUNNER_TEMP}/app-stdout.txt"
+          [ -f "$EXE" ] || { echo "::error title=build::FiveAtlas.exe not found at $EXE"; exit 1; }
+
+          # Workflow logs need repo-admin rights to download through the API,
+          # but check-run ANNOTATIONS are public -- so diagnostics go out as
+          # ::error:: lines and can be read straight from the API on failure.
+          annotate() {
+            local title="$1" body
+            body=$(head -c 4000 "$2" 2>/dev/null | python -c \
+              "import sys;print(sys.stdin.read().replace('%','%25').replace('\r','%0D').replace('\n','%0A'))")
+            [ -n "$body" ] && echo "::error title=${title}::${body}"
+          }
+
+          "$EXE" >"$OUT" 2>&1 &
+          PID=$!
+          for i in $(seq 1 60); do
+            if curl -fsS "http://127.0.0.1:8051/api/health" >/dev/null 2>&1; then
+              echo "health OK after ${i}s"
+              ok=1
+              idx=$(curl -fsS "http://127.0.0.1:8051/" || true)
+              echo "$idx" | grep -q 'id="root"' || { echo "::error title=ui::/ is not the SPA index"; ok=0; }
+              js=$(echo "$idx" | grep -o '/assets/index-[^"]*\.js' | head -1)
+              if [ -n "$js" ]; then
+                curl -fsS -o /dev/null "http://127.0.0.1:8051$js" || { echo "::error title=ui::$js not served"; ok=0; }
+              else
+                echo "::error title=ui::no /assets/index-*.js in index.html"; ok=0
+              fi
+              st=$(curl -fsS "http://127.0.0.1:8051/api/selftest" || echo '{"ok":false}')
+              echo "$st" | python -c 'import json,sys; d=json.load(sys.stdin); print(json.dumps(d, indent=1)); sys.exit(0 if d.get("ok") else 1)' \
+                || { echo "::error title=selftest::$(echo "$st" | head -c 1500)"; ok=0; }
+              # the version on the tag must be the version inside the exe
+              got=$(echo "$st" | python -c 'import json,sys; print(json.load(sys.stdin).get("version",""))' 2>/dev/null)
+              want="${{ steps.ver.outputs.value }}"
+              [ "$got" = "$want" ] || { echo "::error title=version::exe says '$got', tag says '$want'"; ok=0; }
+              taskkill //PID $PID //F >/dev/null 2>&1
+              [ "$ok" = 1 ] && exit 0
+              echo "::error title=smoke::the app serves, but a check above failed"
+              exit 1
+            fi
+            if ! kill -0 $PID 2>/dev/null; then
+              wait $PID; rc=$?
+              echo "::error title=exit::app exited after ${i}s with code $rc"
+              break
+            fi
+            sleep 1
+          done
+          echo "===== app stdout/stderr ====="; cat "$OUT" 2>/dev/null
+          annotate "app-stdout" "$OUT"
+          taskkill //PID $PID //F >/dev/null 2>&1
+          exit 1
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: FiveAtlas-windows-x64
+          path: |
+            ${{ runner.temp }}/build/release/*.zip
+            ${{ runner.temp }}/build/release/*.exe
+            ${{ runner.temp }}/build/release/FiveAtlas/README.txt
+            ${{ runner.temp }}/requirements-built.txt
+            ${{ runner.temp }}/app-stdout.txt
+          if-no-files-found: warn
+
+      # Attach to the SAME release the macOS job publishes, so one link offers
+      # both downloads. The macOS job normally gets there first and writes the
+      # notes; this waits for it rather than racing, and only creates the
+      # release itself if the Mac build never showed up (a Windows download
+      # should not be held hostage to a Mac runner outage).
+      - name: Attach to release
+        if: github.ref_type == 'tag' && steps.smoke.outcome == 'success'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          R="${RUNNER_TEMP}/build/release"
+          ZIP=$(ls "$R"/FiveAtlas-*-win64.zip | head -1)
+          [ -f "$ZIP" ] || { echo "::error::no win64 zip to upload"; exit 1; }
+
+          # Checksums so a download can be verified; a Windows-specific name so
+          # it never collides with the macOS job's SHA256SUMS.
+          ( cd "$R" && sha256sum "$(basename "$ZIP")" > SHA256SUMS-windows.txt )
+
+          for i in $(seq 1 80); do            # up to ~20 min for the Mac job
+            gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 && break
+            [ "$i" = 1 ] && echo "waiting for the release to be created..."
+            sleep 15
+          done
+
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "::warning title=release::no release yet (macOS build slow or failed) -- creating it for the Windows download"
+            awk -v ver="$GITHUB_REF_NAME" '
+              $0 ~ "^## "ver"$" { grab=1; next }
+              grab && /^## /    { exit }
+              grab              { print }
+            ' CHANGELOG.md > "$RUNNER_TEMP/whatsnew.md" || true
+            BODY="$RUNNER_TEMP/notes.md"
+            if [ -s "$RUNNER_TEMP/whatsnew.md" ]; then
+              { echo "## What's new in $GITHUB_REF_NAME"; cat "$RUNNER_TEMP/whatsnew.md"; echo; } > "$BODY"
+            else
+              : > "$BODY"
+            fi
+            gh release create "$GITHUB_REF_NAME" --title "FiveAtlas $GITHUB_REF_NAME" \
+              --notes-file "$BODY" || true
+          fi
+
+          gh release upload "$GITHUB_REF_NAME" "$ZIP" "$R/SHA256SUMS-windows.txt" --clobber
+          echo "uploaded $(basename "$ZIP")"
+
+      - name: Job summary
+        if: always()
+        shell: bash
+        run: |
+          R="${RUNNER_TEMP}/build/release"
+          {
+            echo "## FiveAtlas Windows build"
+            echo
+            echo "| check | result |"
+            echo "|---|---|"
+            echo "| build | ${{ job.status }} |"
+            echo "| smoke (health, SPA, /api/selftest, version) | ${{ steps.smoke.outcome }} |"
+            echo
+            ls -l "$R" 2>/dev/null | sed 's/^/    /'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail if smoke test failed
+        if: steps.smoke.outcome != 'success'
+        run: |
+          echo "smoke: ${{ steps.smoke.outcome }}"
+          echo "The app was built and uploaded as an artifact, but the smoke test failed."
+          exit 1

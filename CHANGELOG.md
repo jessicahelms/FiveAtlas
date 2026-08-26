@@ -5,6 +5,30 @@ above the install instructions. Keep entries short and in plain language --
 they are read by annotators, not developers. The heading must be `## vX.Y.Z`
 exactly; CI matches it against the tag.
 
+## v1.2.1
+
+- Windows and Mac downloads now sit on the SAME release page, so one link
+  works for everybody -- and the "a newer FiveAtlas is out" notice inside the
+  app links straight to it.
+- Opening a dataset now starts with a screen listing what is in the folder:
+  the imagery, the stains, transcripts, genes, and each region file on its own
+  line, all ticked. Untick anything you don't want and nothing about it is
+  read from disk at all. The app no longer loads a previous dataset by itself
+  when it starts, which is what used to leave stains black or the wrong
+  picture under the regions when you then opened your own folder.
+- Region files are picked individually: load just one, or several together.
+  If you don't touch those tick boxes your edited work loads exactly as
+  before.
+- Several regions at once: Ctrl-click to add one, Shift-click to take a whole
+  run -- in the region list or on the map -- then "Delete selected" removes
+  them all in one step, and one Ctrl+Z brings them all back.
+- Stains now work on datasets straight out of the Xenium machine, whose files
+  are named morphology_focus_0000..0003 rather than ch0000_dapi. They come up
+  named and coloured as usual (DAPI blue, boundary magenta, 18S yellow,
+  Vimentin green). Previously such a folder showed no stains and no sliders.
+- Two folders with the same name no longer replace one another -- each keeps
+  its own imagery and its own edits.
+
 ## v1.2.0
 
 - Share borders on a nested pair now truly merges the borders. Gaps up to
