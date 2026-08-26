@@ -365,26 +365,11 @@ jobs:
               --notes-file "$BODY"
           fi
           gh release upload "$GITHUB_REF_NAME" "$R"/*.dmg "$R"/*.zip "$R/SHA256SUMS" --clobber
-          # The screenshots go up as assets too, and the release notes embed
-          # them -- so the download page shows the app running on a Mac, not
-          # just a list of files.
-          shots=""
-          for f in ui-chrome.png ui-screen.png; do
-            [ -s "$R/$f" ] && gh release upload "$GITHUB_REF_NAME" "$R/$f" --clobber && shots="$shots $f"
-          done
-          if [ -n "$shots" ]; then
-            base="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME"
-            { echo "### Built and run on GitHub's macOS (Apple Silicon) runner"
-              for f in $shots; do
-                case "$f" in
-                  ui-chrome.png) echo "The UI as rendered by Chrome on the runner:" ;;
-                  ui-screen.png) echo "The runner's screen ~20 s after double-click-style launch (the app opened the browser itself):" ;;
-                esac
-                echo; echo "![$f]($base/$f)"; echo
-              done
-            } >> "$BODY"
-            gh release edit "$GITHUB_REF_NAME" --notes-file "$BODY"
-          fi
+          # The runner screenshots are NOT published here. They are build
+          # evidence for us (nobody on this project owns a Mac), not something
+          # the person following a download link needs to scroll past -- that
+          # page should be the two downloads and how to install them. They are
+          # still taken, and still ride along in the workflow artifact.
 
       - name: Job summary
         if: always()

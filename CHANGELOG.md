@@ -5,7 +5,7 @@ above the install instructions. Keep entries short and in plain language --
 they are read by annotators, not developers. The heading must be `## vX.Y.Z`
 exactly; CI matches it against the tag.
 
-## v1.2.1
+## v1.2.2
 
 - Windows and Mac downloads now sit on the SAME release page, so one link
   works for everybody -- and the "a newer FiveAtlas is out" notice inside the
