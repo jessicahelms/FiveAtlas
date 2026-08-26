@@ -333,7 +333,32 @@ jobs:
             echo "::warning title=changelog::no '## $GITHUB_REF_NAME' section in CHANGELOG.md -- the release page will carry install instructions only"
             : > "$BODY"
           fi
-          { echo "## Install"; echo '```'; cat "$R/README.txt"; echo '```'; echo; } >> "$BODY"
+          # One link, both platforms. The Windows job attaches its zip to this
+          # same release (it may still be building when this runs), so the page
+          # has to name both files whether or not the zip has landed yet.
+          V="${GITHUB_REF_NAME#v}"
+          { echo "## Download"
+            echo
+            echo "| You are on | Download this |"
+            echo "|---|---|"
+            echo "| **Windows** 10 / 11 | \`FiveAtlas-${V}-win64.zip\` |"
+            echo "| **Mac** (Apple Silicon) | \`FiveAtlas-${V}-macos-arm64.dmg\` |"
+            echo
+            echo "Both are under **Assets** below. The Windows zip is published by the"
+            echo "Windows build job and can appear a few minutes after the Mac files."
+            echo; } >> "$BODY"
+
+          { echo "## Install (Mac)"; echo '```'; cat "$R/README.txt"; echo '```'; echo; } >> "$BODY"
+          { echo "## Install (Windows)"
+            echo
+            echo "Unzip \`FiveAtlas-${V}-win64.zip\`, copy the **FiveAtlas** folder to your own"
+            echo "hard drive (not a network drive -- it starts far faster locally), and"
+            echo "double-click \`FiveAtlas.exe\`. A console window opens with the address and"
+            echo "your browser opens on it; keep that window open while you work."
+            echo
+            echo "The first time, Windows may say \"Windows protected your PC\" because the app"
+            echo "is not code-signed -- click **More info**, then **Run anyway**."
+            echo; } >> "$BODY"
 
           if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release create "$GITHUB_REF_NAME" --title "FiveAtlas $GITHUB_REF_NAME" \

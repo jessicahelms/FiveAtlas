@@ -375,6 +375,9 @@ function computeRing(base, o, delta, R) {
 export default function App() {
   const [datasets, setDatasets] = useState([]);
   const [dsId, setDsId] = useState(null);
+  const dsIdLiveRef = useRef(null);          // what dsId is NOW, for async guards
+  useEffect(() => { dsIdLiveRef.current = dsId; }, [dsId]);
+  const pendingRegionsRef = useRef(null);    // {id, paths}: region files picked in the pre-load gate
   const [sources, setSources] = useState(null);
   const [dsBusy, setDsBusy] = useState(false);
 
@@ -605,7 +608,10 @@ export default function App() {
       try {
         const list = await api.listDatasets();
         setDatasets(list);
-        setDsId((cur) => cur || (list[0] && list[0].id) || null);
+        // Deliberately do NOT auto-open the first remembered dataset. Doing so
+        // started a full imagery load the user then opened their real folder
+        // on top of, and the two loads raced (dead stain channels, the wrong
+        // image under the regions). Start clean; the dropdown still remembers.
       } catch (e) { /* ignore */ }
     })();
   }, []);
@@ -645,6 +651,59 @@ export default function App() {
     })();
   }, []);
 
+  // Per-dataset choice of what to load, made on the pre-load screen and
+  // remembered in localStorage. (Display on/off lives in the Layers controls;
+  // this is only about what gets read from disk in the first place.)
+  const readSrcOff = (id) => {
+    try { return new Set(JSON.parse(localStorage.getItem('fiveatlas.srcOff.' + id) || '[]')); }
+    catch (e) { return new Set(); }
+  };
+
+  const loadStainContrast = useCallback(async (idx, tries = 0) => {
+    try {
+      const c = await api.stainContrast(dsId, idx);
+      // The dataset can change while this request is in flight (open a folder
+      // while the previous dataset is still loading). Writing the OLD
+      // dataset's contrast onto the NEW dataset's channels rendered them with
+      // wrong min/max -- often plain black, i.e. "the stain doesn't work".
+      if (dsIdLiveRef.current !== dsId) return;
+      if (!c) { if (tries < 12) setTimeout(() => loadStainContrast(idx, tries + 1), 5000); return; }
+      setStainChannels((chs) => chs && chs.map((ch) => (ch.index === idx
+        ? { ...ch, min: c.min, max: c.max, dataMax: c.dataMax, contrastLoaded: true } : ch)));
+    } catch (e) {
+      // A thrown fetch (slow network drive, server mid-restart) used to end the
+      // retry chain for good and the channel kept its placeholder contrast.
+      if (dsIdLiveRef.current !== dsId) return;
+      if (tries < 12) setTimeout(() => loadStainContrast(idx, tries + 1), 5000);
+    }
+  }, [dsId]);
+
+  const loadGenesFor = useCallback(async (id) => {
+    try {
+      const g = await api.getGenes(id);
+      if (dsIdLiveRef.current !== id || !g || !g.defaults) return;
+      setGeneInfo(g); setGeneBounds(g.bounds);
+      setChannels(g.defaults.map((c) => ({
+        gene: c.gene, color: c.color, min: c.min, max: c.max,
+        dataMax: c.dataMax, visible: true,
+      })));
+    } catch (e) { /* no genes */ }
+  }, []);
+
+  const loadStainsFor = useCallback(async (id) => {
+    try {
+      const st = await api.getStains(id);
+      if (dsIdLiveRef.current !== id || !st || !st.channels || !st.channels.length) return;
+      setStainInfo(st);
+      setStainChannels(st.channels.map((c) => ({
+        index: c.index, name: c.name, color: c.color,
+        min: 0, max: 1000, dataMax: 65535, visible: true, contrastLoaded: false,
+      })));
+      setLayers((l) => ({ ...l, showDapi: false })); // stains include DAPI
+      st.channels.forEach((c) => loadStainContrast(c.index));
+    } catch (e) { /* no stains */ }
+  }, [loadStainContrast]);
+
   useEffect(() => {
     if (!dsId) return;
     let cancel = false;
@@ -652,11 +711,20 @@ export default function App() {
       setInfo(null); setFc(null); setError(null);
       setGeneInfo(null); setChannels(null); setGeneBitmap(null); setGeneBounds(null);
       setStainInfo(null); setStainChannels(null);
+      const offPref = readSrcOff(dsId);
       try {
-        const i = await api.getInfo(dsId);
+        const i = await api.getInfo(dsId, { noImagery: offPref.has('morphology') });
         if (cancel) return;
         let r = { type: 'FeatureCollection', features: [] };
-        try { r = await api.getRegions(dsId); } catch (e) { /* none */ }
+        const picked = pendingRegionsRef.current;
+        if (picked && picked.id === dsId) {
+          // the gate's region rows were changed: load exactly those files
+          pendingRegionsRef.current = null;
+          try { r = await api.loadRegionsMulti(dsId, picked.paths); }
+          catch (e) { try { r = await api.getRegions(dsId); } catch (e2) { /* none */ } }
+        } else if (!offPref.has('regions')) {
+          try { r = await api.getRegions(dsId); } catch (e) { /* none */ }
+        }
         let s = null;
         try { s = await api.getSources(dsId); } catch (e) { /* optional */ }
         if (cancel) return;
@@ -670,32 +738,13 @@ export default function App() {
         setResample(null); resampleUndoRef.current = null;
         setCellsReport(null); setDamageAsk(null); setOutlinePreview(null);
         setGeomReport(null); setRegionsOff(new Set());
-        try {
-          const g = await api.getGenes(dsId);
-          if (!cancel && g && g.defaults) {
-            setGeneInfo(g); setGeneBounds(g.bounds);
-            setChannels(g.defaults.map((c) => ({
-              gene: c.gene, color: c.color, min: c.min, max: c.max,
-              dataMax: c.dataMax, visible: true,
-            })));
-          }
-        } catch (e) { /* no genes */ }
-        try {
-          const st = await api.getStains(dsId);
-          if (!cancel && st && st.channels && st.channels.length) {
-            setStainInfo(st);
-            setStainChannels(st.channels.map((c) => ({
-              index: c.index, name: c.name, color: c.color,
-              min: 0, max: 1000, dataMax: 65535, visible: true, contrastLoaded: false,
-            })));
-            setLayers((l) => ({ ...l, showDapi: false })); // stains include DAPI
-            st.channels.forEach((c) => loadStainContrast(c.index));
-          }
-        } catch (e) { /* no stains */ }
+        if (offPref.has('morphology')) setLayers((l) => ({ ...l, showDapi: false }));
+        if (!offPref.has('genes') && !offPref.has('transcripts')) await loadGenesFor(dsId);
+        if (!offPref.has('stains')) await loadStainsFor(dsId);
       } catch (e) { if (!cancel) setError(String(e)); }
     })();
     return () => { cancel = true; };
-  }, [dsId]);
+  }, [dsId, loadGenesFor, loadStainsFor]);
 
   // debounced gene composite
   //
@@ -720,23 +769,69 @@ export default function App() {
     return () => { cancel = true; clearTimeout(t); };
   }, [channels, dsId, geneOrientKey, geneMode, geneBin, genePalette]);
 
-  const loadStainContrast = useCallback(async (idx, tries = 0) => {
+  // The pre-load gate: picking a dataset shows WHAT it contains first, and
+  // nothing -- imagery, stains, genes, regions -- is fetched until Load is
+  // clicked with the parts you want checked. Only the folder's scan metadata
+  // (a small JSON) is read to draw the list.
+  const [pendingDs, setPendingDs] = useState(null);   // {id, sources, off:Set, regionSel:Set, regionTouched, hasEdited}
+
+  const stageDataset = useCallback(async (id) => {
+    if (!id) return;
+    setDsBusy(true); setError(null);
     try {
-      const c = await api.stainContrast(dsId, idx);
-      if (!c) { if (tries < 12) setTimeout(() => loadStainContrast(idx, tries + 1), 5000); return; }
-      setStainChannels((chs) => chs && chs.map((ch) => (ch.index === idx
-        ? { ...ch, min: c.min, max: c.max, dataMax: c.dataMax, contrastLoaded: true } : ch)));
-    } catch (e) { /* ignore */ }
-  }, [dsId]);
+      const s = await api.getSources(id);
+      const src = (s && s.sources) || {};
+      const files = src.regions || [];
+      let sel;
+      try {
+        const saved = JSON.parse(localStorage.getItem('fiveatlas.regionSel.' + id) || 'null');
+        sel = saved && saved.length ? new Set(saved.filter((p) => files.some((f) => f.path === p))) : null;
+      } catch (e) { sel = null; }
+      if (!sel || !sel.size) {
+        sel = new Set(s && s.primaryRegions ? [s.primaryRegions] : (files[0] ? [files[0].path] : []));
+      }
+      setPendingDs({ id, sources: src, off: readSrcOff(id),
+                     regionSel: sel, regionTouched: false,
+                     hasEdited: !!(s && s.hasEdited) });
+    } catch (e) {
+      setPendingDs({ id, sources: {}, off: readSrcOff(id),
+                     regionSel: new Set(), regionTouched: false, hasEdited: false });
+    } finally { setDsBusy(false); }
+  }, []);
+
+  const confirmPending = useCallback(() => {
+    if (!pendingDs) return;
+    const { id, off, regionSel, regionTouched } = pendingDs;
+    const off2 = new Set(off);
+    // no region file checked = regions off for this load
+    if ((pendingDs.sources.regions || []).length) {
+      if (regionSel.size === 0) off2.add('regions'); else off2.delete('regions');
+    }
+    try {
+      localStorage.setItem('fiveatlas.srcOff.' + id, JSON.stringify([...off2]));
+      localStorage.setItem('fiveatlas.regionSel.' + id, JSON.stringify([...regionSel]));
+    } catch (e) { /* private mode */ }
+    // Only an ACTIVE change of the region rows replaces the working copy --
+    // otherwise your edited regions keep loading exactly as before.
+    pendingRegionsRef.current = (regionTouched && regionSel.size)
+      ? { id, paths: [...regionSel] } : null;
+    setPendingDs(null);
+    if (id === dsId) {          // same dataset re-staged: force the load effect
+      setDsId(null);
+      setTimeout(() => setDsId(id), 0);
+    } else {
+      setDsId(id);
+    }
+  }, [pendingDs, dsId]);
 
   const loadOpened = useCallback(async (path) => {
     setDsBusy(true); setError(null);
     try {
       const res = await api.openDataset(path);
       setDatasets(await api.listDatasets());
-      setDsId(res.id);
+      await stageDataset(res.id);
     } catch (e) { setError(String(e)); } finally { setDsBusy(false); }
-  }, []);
+  }, [stageDataset]);
 
   const openFolder = useCallback(async () => {
     setDsBusy(true); setError(null);
@@ -745,10 +840,10 @@ export default function App() {
       if (path) {
         const res = await api.openDataset(path);
         setDatasets(await api.listDatasets());
-        setDsId(res.id);
+        await stageDataset(res.id);
       }
     } catch (e) { setError(String(e)); } finally { setDsBusy(false); }
-  }, []);
+  }, [stageDataset]);
 
   // Proportional editing: the library moved ONE vertex; re-derive every vertex in
   // that ring from the frozen pre-drag base, limited by the radius.
@@ -1296,12 +1391,57 @@ export default function App() {
     } finally { setBusy(false); }
   }, [dsId, fc, borderPicks, commit, snapTol]);
 
-  const onClickFeature = useCallback((idx, obj) => {
+  // One selection rule for the map and the sidebar list, in the shape people
+  // already know from file managers: plain click replaces, Ctrl/Cmd-click adds
+  // or removes one, Shift-click takes everything between the last click and
+  // this one. The list is drawn in feature order, so a range of list rows is a
+  // range of feature indexes.
+  const selAnchorRef = useRef(null);
+  const applySelect = useCallback((idx, mods = {}) => {
+    if (idx == null || idx < 0) return;
+    setSelected((prev) => {
+      if (mods.shift && selAnchorRef.current != null) {
+        const lo = Math.min(selAnchorRef.current, idx);
+        const hi = Math.max(selAnchorRef.current, idx);
+        const set = new Set(mods.ctrl ? prev : []);
+        for (let i = lo; i <= hi; i += 1) set.add(i);
+        return [...set];
+      }
+      selAnchorRef.current = idx;      // a plain or Ctrl click moves the anchor
+      if (mods.ctrl) {
+        return prev.includes(idx) ? prev.filter((i) => i !== idx) : [...prev, idx];
+      }
+      return [idx];
+    });
+  }, []);
+
+  const onClickFeature = useCallback((idx, obj, mods = {}) => {
     const t = obj && obj.geometry && obj.geometry.type;
     if (idx == null || idx < 0 || !(t === 'Polygon' || t === 'MultiPolygon')) return;
     if (mode === 'border') { pickBorderRegion(featureName(obj, idProp)); return; }
-    setSelected([idx]);
-  }, [mode, pickBorderRegion, idProp]);
+    applySelect(idx, mods);
+  }, [mode, pickBorderRegion, idProp, applySelect]);
+
+  // Delete every selected region in ONE step (and one undo).
+  const deleteSelectedRegions = useCallback(() => {
+    const cur = fcRef.current;
+    if (!cur || !cur.features || !selected.length) return;
+    const drop = new Set(selected);
+    const names = selected.map((i) => cur.features[i] && featureName(cur.features[i], idProp))
+      .filter(Boolean);
+    const next = stampFc({ ...cur, features: cur.features.filter((_, i) => !drop.has(i)) },
+                         identityRef.current, 'delete-regions', names.join(', '), names);
+    commit(next);
+    const gone = new Set(names);
+    setBaseline((prev) => ((prev && prev.features)
+      ? { ...prev, features: prev.features.filter((f) => !gone.has(featureName(f, idProp))) }
+      : prev));
+    setSelected([]);
+    setMoved((prev) => { const n = new Set(prev); names.forEach((nm) => n.delete(nm)); return n; });
+    setBorderPicks((prev) => prev.filter((x) => !gone.has(x)));
+    setSnapInfo((s) => ({ ...(s || {}),
+      saved: `deleted ${names.length} region${names.length > 1 ? 's' : ''} — Ctrl+Z undoes it` }));
+  }, [selected, commit, idProp]);
 
   const updateRegionProperties = useCallback((featureIndex, nextProps) => {
     const currentFc = fcRef.current;
@@ -2059,25 +2199,116 @@ export default function App() {
   return (
     <div className="root">
       <DatasetBar
-        datasets={datasets} activeId={dsId} onSelect={setDsId}
+        datasets={datasets} activeId={dsId} onSelect={stageDataset}
         onOpenFolder={openFolder} onOpenPath={loadOpened} busy={dsBusy}
       />
       <div className="app">
-        {!dsId && <div className="empty">No dataset loaded. Click <b>📂 Open folder…</b> above to load a Xenium folder.</div>}
-        {dsId && error && !info && <div className="fatal">Error: {error}</div>}
-        {dsId && !error && (!info || !fc) && <div className="loading">Loading dataset…</div>}
-        {dsId && info && fc && (
+        {pendingDs && (
+          <div className="empty" style={{ overflow: 'auto' }}>
+            <div style={{ maxWidth: 460, margin: '48px auto', textAlign: 'left' }}>
+              <h3 style={{ marginTop: 0 }}>
+                {(datasets.find((d) => d.id === pendingDs.id) || {}).label || pendingDs.id}
+              </h3>
+              <div className="hint dim" style={{ marginBottom: 10 }}>
+                Found in this folder — uncheck anything you don't want loaded.
+                Nothing loads until you click Load. Your choice is remembered
+                for this dataset.
+              </div>
+              {[
+                ['morphology', 'morphology (DAPI pyramid)', pendingDs.sources.morphology],
+                ['stains', pendingDs.sources.morphology_focus
+                  ? `focus stains — ${(pendingDs.sources.morphology_focus.channels || []).length} channels` : '',
+                  pendingDs.sources.morphology_focus],
+                ['transcripts', 'transcripts.zarr', pendingDs.sources.transcripts],
+                ['genes', pendingDs.sources.genes
+                  ? `genes — ${(pendingDs.sources.genes.names || []).length}` : '', pendingDs.sources.genes],
+              ].filter(([, , present]) => present).map(([key, label]) => {
+                // The gene layer IS the transcript density render, so it cannot
+                // load without the zarr: unchecking transcripts takes genes with it.
+                const needsTx = key === 'genes' && pendingDs.sources.transcripts;
+                const txOff = needsTx && pendingDs.off.has('transcripts');
+                return (
+                  <label key={key} style={{ display: 'block', padding: '4px 0',
+                                            cursor: txOff ? 'default' : 'pointer',
+                                            opacity: txOff ? 0.5 : 1 }}>
+                    <input type="checkbox" disabled={!!txOff}
+                      checked={!pendingDs.off.has(key) && !txOff}
+                      onChange={() => setPendingDs((p) => {
+                        const off = new Set(p.off);
+                        if (off.has(key)) off.delete(key); else off.add(key);
+                        // transcripts off -> genes off with it; back on -> genes free again
+                        if (key === 'transcripts') {
+                          if (off.has('transcripts')) off.add('genes'); else off.delete('genes');
+                        }
+                        return { ...p, off };
+                      })} />
+                    {' '}{label}
+                    {txOff ? <span className="dim"> — needs transcripts.zarr</span> : null}
+                  </label>
+                );
+              })}
+              {(pendingDs.sources.regions || []).length > 0 && (
+                <div style={{ marginTop: 8 }}>
+                  <div className="slabel">Region files — check one or several (they load together)</div>
+                  {pendingDs.sources.regions.map((f) => (
+                    <label key={f.path}
+                      style={{ display: 'block', padding: '3px 0 3px 14px', cursor: 'pointer' }}>
+                      <input type="checkbox" checked={pendingDs.regionSel.has(f.path)}
+                        onChange={() => setPendingDs((p) => {
+                          const sel = new Set(p.regionSel);
+                          if (sel.has(f.path)) sel.delete(f.path); else sel.add(f.path);
+                          return { ...p, regionSel: sel, regionTouched: true };
+                        })} />
+                      {' '}{f.name}
+                      <span className="dim">{Number.isFinite(f.features) ? ` — ${f.features} regions` : ''}</span>
+                    </label>
+                  ))}
+                  {pendingDs.hasEdited && !pendingDs.regionTouched && (
+                    <div className="hint dim" style={{ paddingLeft: 14 }}>
+                      Your edited working copy loads as usual. Change the checkboxes to
+                      load fresh from the checked file(s) instead (your current copy is
+                      versioned first).
+                    </div>
+                  )}
+                  {pendingDs.regionTouched && (
+                    <div className="hint dim" style={{ paddingLeft: 14 }}>
+                      {pendingDs.regionSel.size
+                        ? `Will load fresh from ${pendingDs.regionSel.size} file(s), replacing the working copy.`
+                        : 'No region file checked — regions will not load.'}
+                    </div>
+                  )}
+                </div>
+              )}
+              <div className="row" style={{ marginTop: 14 }}>
+                <button className="btn primary" onClick={confirmPending} disabled={dsBusy}>
+                  Load
+                </button>
+                <button className="btn" onClick={() => setPendingDs(null)} disabled={dsBusy}>
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+        {!pendingDs && !dsId && <div className="empty">No dataset loaded. Click <b>📂 Open folder…</b> above to load a Xenium folder.</div>}
+        {!pendingDs && dsId && error && !info && <div className="fatal">Error: {error}</div>}
+        {!pendingDs && dsId && !error && (!info || !fc) && <div className="loading">Loading dataset…</div>}
+        {!pendingDs && dsId && info && fc && (
           <>
             <aside className="sidebar"
               style={{ flexBasis: paneW, width: paneW, zoom: uiSettings.zoom }}>
               <Sidebar
                 info={info} fc={fc} sources={sources} selected={selected}
                 onRegionMenu={openRegionMenu}
-                onSelectName={(nm) => {
+                onSelectName={(nm, mods = {}, listIdx) => {
+                  if (mods.clear) { setSelected([]); selAnchorRef.current = null; return; }
                   if (mode === 'border') { pickBorderRegion(nm); return; }
-                  const i = fc.features.findIndex((f) => featureName(f, idProp) === nm);
-                  if (i >= 0) setSelected([i]);
+                  const i = Number.isInteger(listIdx)
+                    ? listIdx
+                    : fc.features.findIndex((f) => featureName(f, idProp) === nm);
+                  applySelect(i, mods);
                 }}
+                onDeleteSelected={deleteSelectedRegions}
                 mode={mode}
                 onToggleModify={onToggleModify}
                 onToggleBorder={onToggleBorder}

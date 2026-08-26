@@ -19,7 +19,12 @@
 param(
     [string]$Version = "",
     [string]$OutRoot = "$env:LOCALAPPDATA\FiveAtlas_build",
-    [switch]$SkipFrontend
+    [switch]$SkipFrontend,
+    # The python to build with. Defaults to the repo venv (what setup.bat
+    # makes). CI has no venv -- it installs requirements.txt into the runner's
+    # own interpreter and passes it here, so the Windows download is built by
+    # this same script rather than a second, drifting copy of these steps.
+    [string]$Python = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -42,12 +47,18 @@ $App = $PSScriptRoot
 # no requirements file constrains -- so the pins that keep the build working,
 # numcodecs<0.16 in particular, did not apply to the Windows build at all.
 $Venv = $null
-foreach ($cand in @((Join-Path $App ".venv\Scripts\python.exe"),
-                    (Join-Path (Split-Path $App -Parent) ".venv\Scripts\python.exe"))) {
-    if (Test-Path $cand) { $Venv = $cand; break }
-}
-if (-not $Venv) {
-    throw "python venv not found in $App\.venv or $(Split-Path $App -Parent)\.venv - run setup.bat first"
+if ($Python) {
+    $Venv = (Get-Command $Python -ErrorAction SilentlyContinue).Source
+    if (-not $Venv) { $Venv = $Python }
+    if (-not (Test-Path $Venv)) { throw "-Python '$Python' is not an executable this machine can find" }
+} else {
+    foreach ($cand in @((Join-Path $App ".venv\Scripts\python.exe"),
+                        (Join-Path (Split-Path $App -Parent) ".venv\Scripts\python.exe"))) {
+        if (Test-Path $cand) { $Venv = $cand; break }
+    }
+    if (-not $Venv) {
+        throw "python venv not found in $App\.venv or $(Split-Path $App -Parent)\.venv - run setup.bat first"
+    }
 }
 
 # Fail loudly on the dependency combination that silently broke the macOS build:

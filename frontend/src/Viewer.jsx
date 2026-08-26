@@ -635,10 +635,14 @@ export default function Viewer({
         }
       }}
       onDragEnd={() => { if (onReleaseDrag) onReleaseDrag(); }}
-      onClick={(pickInfo) => {
+      onClick={(pickInfo, event) => {
         if (mode === 'dissolve') { takeGapClick(pickInfo && pickInfo.coordinate); return; }
         if (pickInfo && pickInfo.layer && String(pickInfo.layer.id).includes('regions')) {
-          onClickFeature(pickInfo.index, pickInfo.object);
+          const src = event && event.srcEvent;
+          onClickFeature(pickInfo.index, pickInfo.object, {
+            ctrl: !!(src && (src.ctrlKey || src.metaKey)),
+            shift: !!(src && src.shiftKey),
+          });
         }
       }}
       />

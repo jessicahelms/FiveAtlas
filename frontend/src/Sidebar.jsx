@@ -8,7 +8,7 @@ function displayName(feature, idProp) {
 }
 
 export default function Sidebar({
-  info, fc, sources, selected, onSelectName, onRegionMenu,
+  info, fc, sources, selected, onSelectName, onRegionMenu, onDeleteSelected,
   mode, onToggleModify, onToggleBorder, onToggleSplit, onToggleDissolve, onToggleDraw,
   borderPicks, borderMsg, borderShared, onClearBorder, onShareBorders, onMerge,
   snapTol, onSnapTol,
@@ -171,13 +171,31 @@ export default function Sidebar({
             but ignored by gap-finding and Check geometry, and hidden on the map.
           </div>
         )}
+        {selected.length > 0 && (
+          <div className="row">
+            <button className="btn sm danger" disabled={busy}
+              title="delete every highlighted region in one step — Ctrl+Z undoes it"
+              onClick={() => onDeleteSelected && onDeleteSelected()}>
+              🗑 Delete selected ({selected.length})
+            </button>
+            <button className="btn sm" disabled={busy}
+              title="clear the selection"
+              onClick={() => onSelectName && onSelectName(null, { clear: true })}>
+              Clear
+            </button>
+          </div>
+        )}
+        <div className="hint dim">
+          Ctrl-click to add one, Shift-click to take a whole run — names here or
+          regions on the map.
+        </div>
         <ul className="regions">
           {names.map((nm, i) => {
             const pi = picks.indexOf(nm);
             const parts = partCount[nm] || 1;
             const part = parts > 1 ? names.slice(0, i + 1).filter((n) => n === nm).length : 0;
             const cls = [
-              selected[0] === i ? 'sel' : '',
+              selected.includes(i) ? 'sel' : '',
               moved.has(nm) ? 'moved' : '',
               off.has(nm) ? 'off' : '',
               pi === 0 ? 'pickA' : pi === 1 ? 'pickB' : pi > 1 ? 'pickX' : '',
@@ -186,7 +204,9 @@ export default function Sidebar({
               <li
                 key={i}
                 className={cls}
-                onClick={() => onSelectName(nm)}
+                onMouseDown={(e) => { if (e.shiftKey) e.preventDefault(); }}
+                onClick={(e) => onSelectName(nm,
+                  { ctrl: e.ctrlKey || e.metaKey, shift: e.shiftKey }, i)}
                 onContextMenu={(e) => {
                   if (!onRegionMenu) return;
                   e.preventDefault();

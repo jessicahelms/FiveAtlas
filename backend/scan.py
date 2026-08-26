@@ -30,8 +30,17 @@ def _slug(name: str) -> str:
     return s or "dataset"
 
 
+# A stock Xenium export names the four stain files morphology_focus_0000..0003
+# with no stain name in the filename; what each index IS is fixed by the
+# platform (multimodal cell segmentation kit), so name them here -- the names
+# also drive the default colours (DAPI blue, boundary magenta, ...).
+_XENIUM_MF_NAMES = {0: "DAPI", 1: "ATP1A1 / CD45 / E-Cadherin",
+                    2: "18S", 3: "alphaSMA / Vimentin"}
+
+
 def _channels_from_filenames(names) -> list:
-    """morphology_focus channels: 'ch0002_18s.ome.tif' -> {index:2, name:'18s'}."""
+    """morphology_focus channels: 'ch0002_18s.ome.tif' -> {index:2, name:'18s'};
+    a stock export's 'morphology_focus_0002.ome.tif' -> {index:2, name:'18S'}."""
     chans = []
     for n in names:
         base = Path(n).name
@@ -39,6 +48,12 @@ def _channels_from_filenames(names) -> list:
         if m:
             chans.append({"index": int(m.group(1)),
                           "name": m.group(2).replace("_", " ")})
+            continue
+        m = re.match(r"morphology_focus_(\d+)\.ome\.tiff?$", base, re.I)
+        if m:
+            i = int(m.group(1))
+            chans.append({"index": i,
+                          "name": _XENIUM_MF_NAMES.get(i, f"channel {i}")})
     chans.sort(key=lambda c: c["index"])
     return chans
 

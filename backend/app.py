@@ -29,12 +29,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
+import cachefs
 import config
 import datasets as ds
 import geo
 from PIL import Image as PILImage
 
 import orientation as ORI
+import scan
 import damage as DMG
 import notes
 import provenance
@@ -103,7 +105,17 @@ def stainstack(ds_id: str) -> StainStack:
         mf = d["sources"].get("morphology_focus")
         if not mf:
             raise KeyError("no morphology_focus")
-        _STAINS[ds_id] = StainStack(mf, ds.workdir_for(ds_id))
+        ss = StainStack(mf, ds.workdir_for(ds_id))
+        # scan() registers the source whenever the folder or zip is THERE, so a
+        # morphology_focus that is empty, still copying, or named outside the two
+        # ch0000_*/morphology_focus_0000 conventions builds a stack with no members.
+        # _prime() then no-ops and the stack has no levels and no size. Treat that as
+        # "no stains" here, once, so every stain route 404s alike -- reading it as a
+        # live stack got as far as int(None) in stains_info and returned a 500.
+        if ss.W0 is None or ss.H0 is None:
+            ss.close()
+            raise KeyError("morphology_focus has no readable stain channels")
+        _STAINS[ds_id] = ss
     return _STAINS[ds_id]
 
 
@@ -260,6 +272,8 @@ async def open_dataset(request: Request):
     path = (body or {}).get("path")
     if not path:
         raise HTTPException(400, "need 'path'")
+    prev = next((dict(d) for d in ds._REGISTRY.values()
+                 if str(d.get("root")) == str(path)), None)
     try:
         desc = ds.open_path(path)
     except Exception as e:
@@ -267,7 +281,12 @@ async def open_dataset(request: Request):
     # a re-scan can change file paths -> drop cached readers for this dataset.
     # Close them, don't just drop them: re-opening a dataset whose files moved
     # would otherwise leave the OLD paths locked for the rest of the session.
-    _evict(desc["id"])
+    # But ONLY when something actually changed: re-opening the folder that is
+    # already being viewed used to close the readers mid-request, and every
+    # tile/contrast call in flight died on a closed handle -- which the viewer
+    # showed as stain channels going permanently dark until a reload.
+    if prev is None or prev.get("sources") != desc.get("sources"):
+        _evict(desc["id"])
     return {"id": desc["id"], "label": desc["label"],
             "sources": desc["sources"], "pixelSizeUm": desc.get("pixel_size_um")}
 
@@ -279,7 +298,9 @@ def dataset_sources(ds_id: str):
     except KeyError:
         raise HTTPException(404, "unknown dataset")
     return {"id": ds_id, "label": d["label"], "root": d["root"],
-            "sources": d["sources"], "pixelSizeUm": d.get("pixel_size_um")}
+            "sources": d["sources"], "pixelSizeUm": d.get("pixel_size_um"),
+            "primaryRegions": scan.primary_regions_path(d),
+            "hasEdited": ds.edited_regions_path(ds_id).exists()}
 
 
 def _regions_extent(fc):
@@ -312,14 +333,59 @@ def _frame_tag(frame: str, o) -> str:
         + ("_flipH" if o["flipH"] else "") + ("_flipV" if o["flipV"] else "")
 
 
+def _cache_ready(ds_id: str, remapped: dict):
+    """Every mirrored file is local and verified: point the registry at the
+    mirror and drop the network-backed readers so the next request opens the
+    local copies. Runs on the copy thread."""
+    ds._REGISTRY[ds_id] = remapped
+    _evict(ds_id)
+    print(f"[cache] {ds_id}: reads switched to local mirror")
+
+
+@app.get("/api/datasets/{ds_id}/cache")
+def dataset_cache(ds_id: str):
+    try:
+        ds.get_dataset(ds_id)
+    except KeyError:
+        raise HTTPException(404, "unknown dataset")
+    return cachefs.status(ds_id)
+
+
+@app.get("/api/cache")
+def cache_usage():
+    return cachefs.usage()
+
+
+@app.post("/api/cache/clear")
+def cache_clear():
+    for did in list(ds._REGISTRY):
+        _evict(did)
+    try:
+        return cachefs.clear()
+    except RuntimeError as e:
+        raise HTTPException(409, str(e))
+
+
 @app.get("/api/datasets/{ds_id}/info")
-def info(ds_id: str):
+def info(ds_id: str, noimg: int = 0):
+    """`noimg=1`: the viewer chose not to load imagery, so do not OPEN it --
+    the canvas is sized from the regions instead, and not a single imagery
+    byte is read."""
     try:
         d = ds.get_dataset(ds_id)
     except KeyError:
         raise HTTPException(404, "unknown dataset")
+    # Selecting a dataset is the moment to start mirroring a network-hosted
+    # one to local disk (idempotent; no-op for local folders and once ready).
+    if not noimg:
+        try:
+            cachefs.start(ds_id, d, _cache_ready)
+        except Exception as e:
+            print(f"[cache] start failed for {ds_id}: {e}", file=sys.stderr)
     o = ORI.get(ds_id)
     try:
+        if noimg:
+            raise NoImagery(ds_id)
         p = pyramid(ds_id)
         nfo = p.info()
         # The canvas is what the user SEES, so a quarter turn swaps the extent.
@@ -1300,6 +1366,34 @@ async def regions_load(ds_id: str, request: Request):
     return JSONResponse(fc)
 
 
+@app.post("/api/datasets/{ds_id}/regions/load-multi")
+async def regions_load_multi(ds_id: str, request: Request):
+    """Load ONE OR SEVERAL region files as the working copy -- the pre-load
+    checklist's region rows. Each file goes through the same reader as a
+    single load (space transform, healing); their features are concatenated
+    in the order picked. Body: {paths:[...]}."""
+    try:
+        ds.get_dataset(ds_id)
+    except KeyError:
+        raise HTTPException(404, "unknown dataset")
+    body = await request.json()
+    paths = (body or {}).get("paths") or []
+    if not paths:
+        raise HTTPException(400, "need 'paths': at least one region file")
+    feats, names = [], []
+    for path in paths:
+        try:
+            fc = geo.load_regions_file(ds_id, str(path))
+        except Exception as e:
+            raise HTTPException(400, f"load failed for {Path(str(path)).name}: {e}")
+        feats.extend(fc.get("features") or [])
+        names.append(Path(str(path)).name)
+    out = {"type": "FeatureCollection", "features": feats}
+    provenance.stamp(out, "load-regions", " + ".join(names))
+    geo.save_edited(ds_id, out)
+    return JSONResponse(out)
+
+
 @app.post("/api/datasets/{ds_id}/regions/add")
 async def regions_add(ds_id: str, request: Request):
     """Add a new region from a drawn outline. Body: {points:[[x,y]...], fc?, name?,
@@ -1771,7 +1865,10 @@ def stains_contrast(ds_id: str, idx: int):
         ss = stainstack(ds_id)
     except KeyError:
         raise HTTPException(404, "no morphology_focus stains")
-    return ss.channel_contrast(idx)
+    try:
+        return ss.channel_contrast(idx)
+    except KeyError:
+        raise HTTPException(404, "stain stack closed while reading")
 
 
 @app.get("/api/datasets/{ds_id}/stains/tiles/{z}/{x}/{y}.png")
@@ -1796,7 +1893,10 @@ def stains_tile(ds_id: str, z: int, x: int, y: int, s: str = ""):
     if not isinstance(spec, list):
         spec = []
     spec = [c for c in spec if isinstance(c, dict)]
-    png = ss.composite_tile(spec, level, x, y, orient=ORI.get(ds_id))
+    try:
+        png = ss.composite_tile(spec, level, x, y, orient=ORI.get(ds_id))
+    except KeyError:
+        raise HTTPException(404, "stain stack closed while reading")
     if png is None:
         return Response(status_code=204)
     return Response(content=png, media_type="image/png",
