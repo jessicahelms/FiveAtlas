@@ -101,11 +101,9 @@ export default function Sidebar({
       )}
 
       <div className="row histrow">
-        <button className="btn" onClick={onUndo} disabled={!canUndo} title="Undo (Ctrl+Z)">↶ Undo</button>
-        <button className="btn" onClick={onRedo} disabled={!canRedo} title="Redo (Ctrl+Shift+Z)">↷ Redo</button>
         <button className={`btn${showSettings ? ' on' : ''}`}
           title="settings: text size, and which tools the sidebar shows"
-          onClick={() => setShowSettings((v) => !v)}>⚙</button>
+          onClick={() => setShowSettings((v) => !v)}>⚙ Settings</button>
       </div>
 
       {showSettings && (
@@ -132,7 +130,7 @@ export default function Sidebar({
 
       {sources && sources.sources && (
         <div className="section">
-          <SecTitle k="detected">Detected</SecTitle>
+          <SecTitle k="detected">What loaded</SecTitle>
           {isOpen('detected') && (
           <ul className="detected">
             {sources.sources.morphology && <li>✓ morphology (DAPI pyramid)</li>}
@@ -269,7 +267,7 @@ export default function Sidebar({
       </div>
 
       <div className="section">
-        <SecTitle k="edit">Edit</SecTitle>
+        <SecTitle k="edit">Edit regions</SecTitle>
         {isOpen('edit') && (<>
 
         <button className={mode === 'modify' ? 'btn on' : 'btn'} onClick={onToggleModify} disabled={!selectedName && mode !== 'modify'}>
@@ -727,13 +725,6 @@ export default function Sidebar({
           <div className="hint dim">Scroll the mouse wheel while dragging a point to resize it.</div>
         </div>
 
-        <button className="btn primary" onClick={onSnap} disabled={busy || !canSnap}>
-          Snap neighbors{canSnap && moved.size ? ` (${moved.size} moved)` : ''}
-        </button>
-        <div className="row">
-          <button className="btn" onClick={onSave} disabled={busy}>Save</button>
-          <button className="btn" onClick={onReset} disabled={busy}>Reset</button>
-        </div>
 
         </>)}
       </div>
@@ -784,7 +775,7 @@ export default function Sidebar({
       </div>
 
       <div className="section">
-        <SecTitle k="data">Data</SecTitle>
+        <SecTitle k="data">Files &amp; export</SecTitle>
         {isOpen('data') && (<>
         <button className="btn" onClick={onLoadFile} disabled={busy}>📂 Load regions file…</button>
         <button className="btn" onClick={onValidate} disabled={busy}>✓ Check geometry</button>

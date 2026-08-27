@@ -581,8 +581,14 @@ export default function App() {
     histIdxRef.current = base.length - 1;
     setHistTick((t) => t + 1);
   }, []);
-  const commit = useCallback((nextFc) => { fcRef.current = nextFc; setFc(nextFc); record(nextFc); }, [record]);
+  // Anything committed is unsaved until Save writes it. The top bar shows
+  // this, so "have I saved?" is answerable without hunting for a message.
+  const [dirty, setDirty] = useState(false);
+  const commit = useCallback((nextFc) => {
+    fcRef.current = nextFc; setFc(nextFc); record(nextFc); setDirty(true);
+  }, [record]);
   const initHistory = useCallback((fc0) => {
+    setDirty(false);                     // freshly loaded == saved
     historyRef.current = [fc0];
     histIdxRef.current = 0;
     setHistTick((t) => t + 1);
@@ -1923,6 +1929,7 @@ export default function App() {
     setBusy(true); setError(null);
     try {
       const r = await api.saveRegions(dsId, fc);
+      setDirty(false);
       const stamped = r.version ? String(r.version).split(/[\\/]/).pop() : null;
       setSnapInfo((s) => ({
         ...(s || {}),
@@ -2260,6 +2267,9 @@ export default function App() {
       <DatasetBar
         datasets={datasets} activeId={dsId} onSelect={stageDataset}
         onOpenFolder={openFolder} onOpenPath={loadOpened} busy={dsBusy}
+        canSave={!!(dsId && fc)} dirty={dirty} busySave={busy}
+        onSave={doSave} onReset={doReset}
+        onUndo={undo} onRedo={redo} canUndo={canUndo} canRedo={canRedo}
       />
       <div className="app">
         {pendingDs && (
