@@ -748,7 +748,7 @@ export default function App() {
         setCellsReport(null); setDamageAsk(null); setOutlinePreview(null);
         setGeomReport(null); setRegionsOff(new Set());
         if (offPref.has('morphology')) setLayers((l) => ({ ...l, showDapi: false }));
-        if (!offPref.has('genes') && !offPref.has('transcripts')) await loadGenesFor(dsId);
+        if (!offPref.has('transcripts')) await loadGenesFor(dsId);
         if (!offPref.has('stains')) await loadStainsFor(dsId);
       } catch (e) { if (!cancel) setError(String(e)); }
     })();
@@ -2288,14 +2288,17 @@ export default function App() {
                 ['stains', pendingDs.sources.morphology_focus
                   ? `focus stains — ${(pendingDs.sources.morphology_focus.channels || []).length} channels` : '',
                   pendingDs.sources.morphology_focus],
-                ['transcripts', 'transcripts.zarr', pendingDs.sources.transcripts],
-                ['genes', pendingDs.sources.genes
-                  ? `genes — ${(pendingDs.sources.genes.names || []).length}` : '', pendingDs.sources.genes],
+                // ONE row, not two. The gene layer IS the transcript density
+                // render, so the zarr is the thing being loaded or skipped.
+                // (There used to be a second "genes — 9" row; the 9 counted
+                // leftover pre-rendered .tif files in the folder that nothing
+                // reads, while the layer itself offers every gene in the panel.)
+                ['transcripts', 'transcripts.zarr — the gene layer is built from this',
+                 pendingDs.sources.transcripts],
               ].filter(([, , present]) => present).map(([key, label]) => {
                 // The gene layer IS the transcript density render, so it cannot
                 // load without the zarr: unchecking transcripts takes genes with it.
-                const needsTx = key === 'genes' && pendingDs.sources.transcripts;
-                const txOff = needsTx && pendingDs.off.has('transcripts');
+                const txOff = false;
                 return (
                   <label key={key} style={{ display: 'block', padding: '4px 0',
                                             cursor: txOff ? 'default' : 'pointer',
