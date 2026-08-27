@@ -11,12 +11,13 @@ import {
   EditableGeoJsonLayer,
   ViewMode,
   ModifyMode,
+  TranslateMode,
   DrawLineStringMode,
   DrawPolygonMode,
   DrawPolygonByDraggingMode,
 } from '@deck.gl-community/editable-layers';
 
-const MODES = { view: ViewMode, modify: ModifyMode };
+const MODES = { view: ViewMode, modify: ModifyMode, translate: TranslateMode };
 
 // deck delivers a right-click to the mode as an ordinary click, so without this
 // check the right button ADDS A POINT before (or after) the shape is finished.

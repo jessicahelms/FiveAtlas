@@ -169,13 +169,17 @@ export async function browseFile() {
 // region the outline covers cede that ground, so the file stays a clean partition.
 // `damage` is a designation tag: the server names the shape <tag>.<n> and never
 // carves, because damage sits inside its host and the host stays whole.
-export async function addRegion(ds, fc, points, { name = null, carve = true, damage = null } = {}) {
+export async function addRegion(ds, fc, points,
+  { name = null, carve = true, damage = null, overlap = null, ask = false } = {}) {
   const r = await fetch(`${API}/datasets/${ds}/regions/add`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ fc, points, name, carve, damage }),
+    body: JSON.stringify({ fc, points, name, carve, damage, overlap, ask }),
   });
   if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+  // ask=true with no `overlap` and something already on that ground comes back
+  // as { needsOverlapChoice, overlaps, suggest } and changes NOTHING -- re-post
+  // with overlap:'top'|'bottom'|'both' to actually add it.
   return r.json(); // { type, features, name, area, ceded, damage, inside }
 }
 

@@ -1416,6 +1416,7 @@ async def regions_add(ds_id: str, request: Request):
     feats = fc.get("features") or []
 
     name, carve = body.get("name"), bool(body.get("carve", True))
+    overlap = body.get("overlap")          # "top" | "bottom" | "both" | None
     asked = body.get("damage")
     # parse_name() resolves a bare tag as well as a numbered name, and tolerates
     # the display spelling ("Small void") the dropdown sends back.
@@ -1430,9 +1431,28 @@ async def regions_add(ds_id: str, request: Request):
                                   for f in feats], tag))
         carve = False
 
+    # The stacking question, asked BEFORE anything is committed: a client that
+    # sends ask=true and has not yet chosen gets back what the outline would
+    # land on, and nothing is changed. It then re-posts with `overlap`. Damage
+    # never asks -- it sits inside its host by definition.
+    if body.get("ask") and not overlap and not tag:
+        try:
+            rep = topology.overlap_report(feats, d["id_prop"], points)
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+        hits = rep["overlaps"]
+        if hits:
+            nested = any(h["relationship"] in ("envelops", "inside") for h in hits)
+            return {"needsOverlapChoice": True, "overlaps": hits, "area": rep["area"],
+                    # a region drawn around (or inside) another is the cover
+                    # convention these files already use -- do not carve it;
+                    # a slight overlap between neighbours should stay a clean
+                    # partition, so there the new shape takes the ground.
+                    "suggest": "both" if nested else "top"}
+
     try:
         res = topology.add_region(feats, d["id_prop"], points,
-                                  name=name, carve=carve)
+                                  name=name, carve=carve, overlap=overlap)
     except ValueError as e:
         raise HTTPException(422, str(e))
     except Exception as e:
@@ -1463,6 +1483,12 @@ async def regions_add(ds_id: str, request: Request):
         detail += f" in {', '.join(inside)})" if inside else ", over no region)"
     elif res["ceded"]:
         detail += f", taken from {', '.join(res['ceded'])}"
+    elif overlap == "bottom":
+        detail += ", placed underneath (trimmed to the free ground)"
+    elif overlap == "both":
+        under = res.get("placedUnder") or []
+        detail += (f", overlapping and drawn beneath {', '.join(under)}"
+                   if under else ", overlapping, nothing trimmed")
     return {**provenance.stamped(res["features"], fc, "add-region", detail,
                                  [res["name"]]),
             "name": res["name"], "area": res["area"], "ceded": res["ceded"],

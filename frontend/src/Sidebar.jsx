@@ -9,6 +9,7 @@ function displayName(feature, idProp) {
 
 export default function Sidebar({
   info, fc, sources, selected, onSelectName, onRegionMenu, onDeleteSelected,
+  overlapAsk, onAnswerOverlap, onToggleTranslate,
   mode, onToggleModify, onToggleBorder, onToggleSplit, onToggleDissolve, onToggleDraw,
   borderPicks, borderMsg, borderShared, onClearBorder, onShareBorders, onMerge,
   snapTol, onSnapTol,
@@ -278,6 +279,21 @@ export default function Sidebar({
 
         {/* vertex-count control (arrow keys / +−) disabled — paused per request */}
 
+        <button className={mode === 'translate' ? 'btn on' : 'btn'}
+          onClick={onToggleTranslate}
+          disabled={!selectedName && mode !== 'translate'}
+          title="drag the selected region bodily to a new place; its shape does not change">
+          {mode === 'translate' ? '✥ Moving the region' : 'Move region'}
+          {selectedName ? ' · ' + selectedName : ''}
+        </button>
+        {mode === 'translate' && (
+          <div className="hint dim">
+            Drag it on the image. Nothing is trimmed, so it may end up overlapping a
+            neighbour — right-click a region for <b>Bring to front</b> / <b>Send to
+            back</b>, or use Share borders to tidy the join.
+          </div>
+        )}
+
         <button className={mode === 'border' ? 'btn on' : 'btn'} onClick={onToggleBorder}>
           {mode === 'border' ? '⇹ Editing shared borders' : 'Edit shared borders'}
         </button>
@@ -455,6 +471,72 @@ export default function Sidebar({
               </div>
             )}
             {drawMsg && <div className="hint">{drawMsg}</div>}
+
+            {/* The outline is drawn but NOTHING has been committed: it lands on
+                ground another region holds, and only the annotator knows whether
+                it is a correction (take the ground), a smaller structure inside
+                one (leave it whole), or a container drawn around them. */}
+            {overlapAsk && (() => {
+              // Two of the three answers are impossible in some layouts, and
+              // offering them would only earn a refusal: taking ALL of a
+              // region's ground would erase it, and giving up the overlap
+              // when you drew inside something leaves nothing of the shape.
+              const rels = overlapAsk.overlaps.map((o) => o.relationship);
+              const wraps = rels.includes('envelops');
+              const within = rels.includes('inside');
+              return (
+              <div className="pts">
+                <div className="pts-head">How should this outline sit?</div>
+                <div className="hint dim">
+                  It lands on{' '}
+                  {overlapAsk.overlaps.map((o, i) => (
+                    <span key={o.name}>
+                      {i > 0 ? ', ' : ''}<b>{o.name}</b>
+                      {o.relationship === 'envelops' ? ' (it goes right around it)'
+                        : o.relationship === 'inside' ? ' (it sits inside it)' : ''}
+                    </span>
+                  ))}.
+                </div>
+                <div className="row">
+                  {!wraps && (
+                    <button className={overlapAsk.suggest === 'top' ? 'btn sm primary' : 'btn sm'}
+                      disabled={busy}
+                      title="the new region takes the overlapping ground; the others are trimmed"
+                      onClick={() => onAnswerOverlap && onAnswerOverlap('top')}>
+                      On top
+                    </button>
+                  )}
+                  {!within && (
+                    <button className="btn sm" disabled={busy}
+                      title="the new region gives up the overlap and is trimmed; nothing already there changes"
+                      onClick={() => onAnswerOverlap && onAnswerOverlap('bottom')}>
+                      Underneath
+                    </button>
+                  )}
+                  <button className={overlapAsk.suggest === 'both' ? 'btn sm primary' : 'btn sm'}
+                    disabled={busy}
+                    title="both keep their full shape and genuinely overlap, the way hemi wraps everything"
+                    onClick={() => onAnswerOverlap && onAnswerOverlap('both')}>
+                    Overlap, keep both
+                  </button>
+                  <button className="btn sm" disabled={busy}
+                    title="throw the outline away and draw again"
+                    onClick={() => onAnswerOverlap && onAnswerOverlap(null)}>
+                    Cancel
+                  </button>
+                </div>
+                <div className="hint dim">
+                  <b>On top</b> trims what is already there. <b>Underneath</b> trims
+                  the new shape instead. <b>Overlap</b> trims nothing — a region drawn
+                  around another is put behind it so the smaller one stays visible.
+                  {wraps && ' (“On top” is not offered: taking all of that region’s'
+                    + ' ground would erase it.)'}
+                  {within && ' (“Underneath” is not offered: there would be nothing'
+                    + ' left of the shape you drew.)'}
+                </div>
+              </div>
+              );
+            })()}
 
             {/* A shape that reaches into a second region. Damage goes to the one
                 region holding most of it, so this is a judgement call and the

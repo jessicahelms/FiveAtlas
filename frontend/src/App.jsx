@@ -506,6 +506,9 @@ export default function App() {
   const [propRing, setPropRing] = useState(null);   // {center, radius} drawn while dragging
   // right-click a region -> rename it
   const [regionMenu, setRegionMenu] = useState(null);   // {index, name, x, y}
+  // A drawn outline waiting on "on top / underneath / overlap": nothing has
+  // been committed yet, the coords are held here until the annotator says.
+  const [overlapAsk, setOverlapAsk] = useState(null);
   const [menuView, setMenuView] = useState('menu');     // 'menu' | 'rename' | 'delete'
   const [renameDraft, setRenameDraft] = useState('');
   // geometry check / blocked export
@@ -1002,6 +1005,15 @@ export default function App() {
 
   const onToggleModify = useCallback(() => {
     setMode((m) => (m === 'modify' ? 'view' : 'modify'));
+    clearBorder(); clearSplit(); clearGap(); clearDraw(); clearClean();
+  }, [clearBorder, clearSplit, clearGap, clearDraw, clearClean]);
+
+  // Move a whole region: TranslateMode drags every selected feature bodily,
+  // shape unchanged. Nothing is carved -- a region nudged onto its tissue may
+  // end up overlapping a neighbour, and that is what the stacking controls
+  // and Share borders are for.
+  const onToggleTranslate = useCallback(() => {
+    setMode((m) => (m === 'translate' ? 'view' : 'translate'));
     clearBorder(); clearSplit(); clearGap(); clearDraw(); clearClean();
   }, [clearBorder, clearSplit, clearGap, clearDraw, clearClean]);
 
@@ -1551,6 +1563,29 @@ export default function App() {
     setSnapInfo((s) => ({ ...(s || {}), saved: `deleted “${nm}” — Ctrl+Z undoes it` }));
   }, [commit, idProp]);
 
+  // Draw order IS feature order, in the file itself, so this survives a save
+  // and tells the next person what sits over what. Every part of a multi-part
+  // region moves together -- they are one region.
+  const restack = useCallback((featureIndex, where) => {
+    const cur = fcRef.current;
+    if (!cur || !cur.features || !cur.features[featureIndex]) return;
+    const nm = featureName(cur.features[featureIndex], idProp);
+    const mine = cur.features.filter((f) => featureName(f, idProp) === nm);
+    const rest = cur.features.filter((f) => featureName(f, idProp) !== nm);
+    if (!mine.length) return;
+    const front = where === 'front';
+    const feats = front ? [...rest, ...mine] : [...mine, ...rest];
+    const next = stampFc({ ...cur, features: feats }, identityRef.current,
+                         'restack', nm + ' to the ' + (front ? 'front' : 'back'), [nm]);
+    commit(next);
+    const at = front ? rest.length : 0;
+    const idxs = mine.map((_, k) => at + k);
+    setSelected(idxs);
+    selAnchorRef.current = idxs[0];
+    setSnapInfo((sn) => ({ ...(sn || {}),
+      saved: nm + ' moved to the ' + (front ? 'front' : 'back') + ' \u2014 Ctrl+Z undoes it' }));
+  }, [commit, idProp]);
+
   // Escape, or a click anywhere outside it, dismisses the menu
   useEffect(() => {
     if (!regionMenu) return undefined;
@@ -1659,13 +1694,22 @@ export default function App() {
   // Draw mode: trace an outline, and it becomes a new region. Any region the
   // outline covers cedes that ground, so the file stays a clean partition —
   // EXCEPT for damage, which lies inside its host and leaves it whole.
-  const applyAddRegion = useCallback(async (coords) => {
+  const applyAddRegion = useCallback(async (coords, overlap = null) => {
     if (!coords || coords.length < 3 || !fc) return;
     const dmgTag = drawKind === 'region' ? null : drawKind;
     setBusy(true); setError(null);
     setDrawMsg(dmgTag ? 'adding damage…' : 'creating…');
     try {
-      const res = await api.addRegion(dsId, fc, coords, { damage: dmgTag });
+      const res = await api.addRegion(dsId, fc, coords,
+        { damage: dmgTag, overlap, ask: !overlap });
+      // It landed on ground someone already holds: ask first, change nothing.
+      if (res.needsOverlapChoice) {
+        setOverlapAsk({ coords, overlaps: res.overlaps || [], suggest: res.suggest, area: res.area });
+        const who = (res.overlaps || []).map((o) => o.name).join(', ');
+        setDrawMsg(`That outline lands on ${who} — say how it should sit.`);
+        return;
+      }
+      setOverlapAsk(null);
       const newFc = asFc(res, fc);
       commit(newFc); setBaseline(newFc);
       setMoved((prev) => {
@@ -1690,15 +1734,30 @@ export default function App() {
           setDrawMsg(`Added “${res.name}” (${area})${where}. Draw another, or change the kind above.`);
         }
       } else {
+        const under = (res.placedUnder || []).length
+          ? ` — kept whole and drawn beneath ${res.placedUnder.join(', ')}`
+          : '';
         const took = (res.ceded || []).length
           ? ` — ${res.ceded.join(', ')} gave up the overlap`
-          : '';
-        setDrawMsg(`Created “${res.name}” (${area})${took}. Right-click it to rename.`);
+          : (overlap === 'bottom' ? ' — trimmed to the free ground' : under);
+        setDrawMsg(`Created “${res.name}” (${area})${took}. Right-click it to rename, or to change what it sits over.`);
       }
     } catch (e) {
       setDrawMsg(apiDetail(e));
     } finally { setBusy(false); }
   }, [dsId, fc, commit, drawKind]);
+
+  // The stacking answer: re-run the very same outline with the choice made.
+  const answerOverlap = useCallback((choice) => {
+    const pending = overlapAsk;
+    if (!pending) return;
+    setOverlapAsk(null);
+    if (!choice) {                    // Cancel: the outline is thrown away
+      setDrawMsg('Outline discarded — draw another.');
+      return;
+    }
+    applyAddRegion(pending.coords, choice);
+  }, [overlapAsk, applyAddRegion]);
 
   // The answer goes on the shape itself (`_damage_regions`), not into session
   // state: it is an annotator's judgement, and it has to survive a save, an
@@ -2309,6 +2368,8 @@ export default function App() {
                   applySelect(i, mods);
                 }}
                 onDeleteSelected={deleteSelectedRegions}
+                overlapAsk={overlapAsk} onAnswerOverlap={answerOverlap}
+                onToggleTranslate={onToggleTranslate}
                 mode={mode}
                 onToggleModify={onToggleModify}
                 onToggleBorder={onToggleBorder}
@@ -2438,6 +2499,16 @@ export default function App() {
             <>
               <button className="ctx-item" onClick={() => setMenuView('rename')}>Rename</button>
               <button className="ctx-item" onClick={() => setMenuView('colour')}>Colour…</button>
+              <button className="ctx-item"
+                title="draw it over everything else — and it takes the clicks"
+                onClick={() => { restack(regionMenu.index, 'front'); closeRegionMenu(); }}>
+                Bring to front
+              </button>
+              <button className="ctx-item"
+                title="draw it behind everything else, so what it contains stays visible"
+                onClick={() => { restack(regionMenu.index, 'back'); closeRegionMenu(); }}>
+                Send to back
+              </button>
               <button className="ctx-item danger" onClick={() => setMenuView('delete')}>Delete</button>
             </>
           )}

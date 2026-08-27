@@ -2324,13 +2324,27 @@ def _new_feature(features, id_prop, name, geom):
     return {"type": "Feature", "properties": props, "geometry": mapping(geom)}
 
 
-def add_region(features, id_prop, points, name=None, carve=True, min_area=25.0):
+def add_region(features, id_prop, points, name=None, carve=True, min_area=25.0,
+               overlap=None):
     """Add a brand-new region from a drawn outline.
 
-    carve=True keeps the file a clean partition: any existing region the new
-    outline covers cedes that ground. A region that would be wiped out entirely
-    is refused rather than silently deleted.
-    Returns {features, name, area, ceded}.
+    `overlap` is the annotator's answer to "on top, underneath, or both?" when
+    the new outline lands on ground another region already holds:
+
+      "top"    the existing regions cede the overlap (the historic carve=True).
+               The file stays a clean partition.
+      "bottom" the NEW region gives up the overlap instead -- it is trimmed to
+               what was still free. Nothing already on the map changes.
+      "both"   nobody is trimmed; the two genuinely overlap, and draw order
+               decides what is seen and clicked. This is the cover convention
+               the atlas files already use (hemi wraps everything, ISO covers
+               SSp), so a region drawn AROUND another is placed underneath it --
+               the container covers its contents and is never carved into a
+               donut.
+
+    carve= is kept for callers with no choice to offer (damage sits inside its
+    host and never carves); `overlap`, when given, decides.
+    Returns {features, name, area, ceded, placedUnder}.
     """
     ring = [(float(x), float(y)) for x, y in points]
     if len(ring) < 3:
@@ -2352,6 +2366,34 @@ def add_region(features, id_prop, points, name=None, carve=True, min_area=25.0):
     g = unary_union(_polys(g)).buffer(0) if _polys(g) else g
     if g.is_empty or g.area < min_area:
         raise ValueError("that outline is too small to be a region")
+
+    if overlap == "top":
+        carve = True
+    elif overlap in ("bottom", "both"):
+        carve = False
+
+    # "underneath": the new region cedes the contested ground rather than
+    # taking it, so everything already on the map is left untouched.
+    if overlap == "bottom":
+        held = []
+        for f in features:
+            if (f.get("geometry") or {}).get("type") not in ("Polygon", "MultiPolygon"):
+                continue
+            try:
+                other = shape(f["geometry"])
+            except Exception:
+                continue
+            if not other.is_valid:
+                other = other.buffer(0)
+            if not other.is_empty and other.intersects(g):
+                held.append(other)
+        if held:
+            g = _safe_difference(g, unary_union(held).buffer(0))
+            g = unary_union(_polys(g)).buffer(0) if _polys(g) else g
+            if g.is_empty or g.area < min_area:
+                raise ValueError("underneath leaves nothing of that outline -- "
+                                 "it is covered by what is already there. Draw it "
+                                 "somewhere freer, or choose on top / overlap.")
 
     idx = _index(features, id_prop)
     nm = _unique_name(set(idx), name or "New region")
@@ -2379,8 +2421,76 @@ def add_region(features, id_prop, points, name=None, carve=True, min_area=25.0):
             out[k]["geometry"] = mapping(_snap_polys(trimmed))
             ceded.append(label)
 
-    out.append(_new_feature(features, id_prop, nm, g))
-    return {"features": out, "name": nm, "area": float(g.area), "ceded": ceded}
+    feat = _new_feature(features, id_prop, nm, g)
+    # Draw order is feature order. A region drawn AROUND existing ones has to go
+    # BEHIND them or it would hide what it contains; anything else goes on top,
+    # which is what "I just drew this" should look like.
+    placed_under = []
+    at = len(out)
+    if overlap == "both":
+        for k, f in enumerate(features):
+            if (f.get("geometry") or {}).get("type") not in ("Polygon", "MultiPolygon"):
+                continue
+            try:
+                other = shape(f["geometry"])
+            except Exception:
+                continue
+            if not other.is_valid:
+                other = other.buffer(0)
+            if other.is_empty or other.area <= 0 or not other.intersects(g):
+                continue
+            if _safe_intersection(other, g).area / other.area >= CONTAINED_FRAC:
+                placed_under.append(str((f.get("properties") or {}).get(id_prop)))
+                at = min(at, k)
+    out.insert(at, feat)
+    return {"features": out, "name": nm, "area": float(g.area), "ceded": ceded,
+            "placedUnder": placed_under}
+
+
+def overlap_report(features, id_prop, points, min_area=25.0):
+    """What an about-to-be-drawn outline lands on, so the annotator can be asked
+    "on top, underneath, or overlap?" BEFORE any geometry changes.
+
+    Each hit is {name, relationship, area}: `envelops` (the outline swallows
+    that region), `inside` (the outline sits within it), or `partial`.
+    """
+    ring = [(float(x), float(y)) for x, y in points]
+    if len(ring) < 3:
+        raise ValueError("a region needs at least three points")
+    if ring[0] != ring[-1]:
+        ring.append(ring[0])
+    g = Polygon(ring)
+    if not g.is_valid:
+        g = g.buffer(0)
+    g = unary_union(_polys(g)).buffer(0) if _polys(g) else g
+    if g.is_empty or g.area < min_area:
+        raise ValueError("that outline is too small to be a region")
+
+    hits = []
+    for f in features:
+        if (f.get("geometry") or {}).get("type") not in ("Polygon", "MultiPolygon"):
+            continue
+        try:
+            other = shape(f["geometry"])
+        except Exception:
+            continue
+        if not other.is_valid:
+            other = other.buffer(0)
+        if other.is_empty or other.area <= 0 or not other.intersects(other.envelope):
+            continue
+        inter = _safe_intersection(other, g).area
+        if inter <= min_area:
+            continue
+        if inter / other.area >= CONTAINED_FRAC:
+            rel = "envelops"
+        elif inter / g.area >= CONTAINED_FRAC:
+            rel = "inside"
+        else:
+            rel = "partial"
+        hits.append({"name": str((f.get("properties") or {}).get(id_prop)),
+                     "relationship": rel, "area": float(inter)})
+    hits.sort(key=lambda h: -h["area"])
+    return {"overlaps": hits, "area": float(g.area)}
 
 
 def section_outline(features, id_prop, name="hemi", method="bubble", radius=200.0,
