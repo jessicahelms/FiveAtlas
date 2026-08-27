@@ -2026,6 +2026,8 @@ export default function App() {
 
   const refreshNotes = useCallback(async (id) => {
     if (!id) return;
+    // unticked on the load screen -> the notes file is not read at all
+    if (readSrcOff(id).has('notes')) { setNotesInfo(null); return; }
     try { setNotesInfo(await api.notesState(id)); }
     catch (e) { setNotesInfo(null); }
   }, []);
@@ -2284,17 +2286,25 @@ export default function App() {
                 for this dataset.
               </div>
               {[
-                ['morphology', 'morphology (DAPI pyramid)', pendingDs.sources.morphology],
+                ['morphology', 'morphology.ome.tif — the DAPI image everything is drawn on',
+                 pendingDs.sources.morphology],
                 ['stains', pendingDs.sources.morphology_focus
-                  ? `focus stains — ${(pendingDs.sources.morphology_focus.channels || []).length} channels` : '',
-                  pendingDs.sources.morphology_focus],
-                // ONE row, not two. The gene layer IS the transcript density
+                  ? `morphology_focus — ${(pendingDs.sources.morphology_focus.channels || [])
+                      .map((c) => c.name).join(', ') || 'stain channels'}`
+                  : '', pendingDs.sources.morphology_focus],
+                // ONE row for the gene layer. It IS the transcript density
                 // render, so the zarr is the thing being loaded or skipped.
                 // (There used to be a second "genes — 9" row; the 9 counted
-                // leftover pre-rendered .tif files in the folder that nothing
-                // reads, while the layer itself offers every gene in the panel.)
+                // leftover pre-rendered .tif files that nothing reads, while
+                // the layer itself offers every gene in the panel.)
                 ['transcripts', 'transcripts.zarr — the gene layer is built from this',
                  pendingDs.sources.transcripts],
+                ['notes', pendingDs.sources.notes
+                  ? `${pendingDs.sources.notes.name} — the shared per-region notes` : '',
+                  pendingDs.sources.notes],
+                ['metadata', pendingDs.sources.metadata
+                  ? `${pendingDs.sources.metadata.name} — sample facts and the annotator roster` : '',
+                  pendingDs.sources.metadata],
               ].filter(([, , present]) => present).map(([key, label]) => {
                 // The gene layer IS the transcript density render, so it cannot
                 // load without the zarr: unchecking transcripts takes genes with it.

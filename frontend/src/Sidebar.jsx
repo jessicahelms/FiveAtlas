@@ -139,15 +139,8 @@ export default function Sidebar({
             )}
             {sources.sources.regions && <li>✓ regions — {sources.sources.regions.length} file(s)</li>}
             {sources.sources.transcripts && <li>✓ transcripts.zarr (the gene layer)</li>}
-            {/* These are pre-rendered gene pictures sitting in the folder from an
-                earlier pipeline. Nothing in the viewer reads them -- the gene
-                layer is drawn from the zarr above -- so they are listed as what
-                they are rather than as "genes", which read as the panel size. */}
-            {sources.sources.genes && (
-              <li className="dim">
-                {sources.sources.genes.names.length} gene .tif files in the folder (not used here)
-              </li>
-            )}
+            {sources.sources.notes && <li>✓ {sources.sources.notes.name}</li>}
+            {sources.sources.metadata && <li>✓ {sources.sources.metadata.name}</li>}
           </ul>
           )}
         </div>

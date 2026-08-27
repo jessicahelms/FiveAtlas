@@ -188,6 +188,23 @@ def scan_folder(path: str) -> dict:
     if tz:
         sources["transcripts"] = {"path": str(tz)}
 
+    # --- shared annotation notes ---------------------------------------------
+    # The notes panel reads these; listing them here is what lets the load
+    # screen show everything the app can actually open, rather than only the
+    # pictures. Spellings vary between folders, so all the accepted ones are
+    # tried (the same list notes.py uses).
+    for cand in ("annotation.notes.yaml", "annotation.notes.yml",
+                 "annotations.notes.yaml"):
+        p = root / cand
+        if p.exists():
+            sources["notes"] = {"path": str(p), "name": cand}
+            break
+    for cand in ("metadata.yml", "metadata.yaml"):
+        p = root / cand
+        if p.exists():
+            sources["metadata"] = {"path": str(p), "name": cand}
+            break
+
     return {
         "id": _slug(root.name),
         "label": label,
