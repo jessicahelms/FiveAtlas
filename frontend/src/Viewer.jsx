@@ -16,7 +16,7 @@ import {
   DrawPolygonMode,
   DrawPolygonByDraggingMode,
 } from '@deck.gl-community/editable-layers';
-import { PointEditMode, existingPointProps, deletePointAt } from './pointEditMode';
+import { PointEditMode, existingPointProps } from './pointEditMode';
 
 // Edit points uses PointEditMode: a plain click on a point never deletes it,
 // a right-click does (see handleContextMenu). The shared-border editor below
@@ -174,7 +174,7 @@ export default function Viewer({
   drawPoly, onDrawEdit,
   cleanPoly, onCleanEdit, cleanPreview,
   gapPreview, onPickGap,
-  propRing, onRegionMenu, onPointDeleted, onPointRefused,
+  propRing, onRegionMenu, onDeletePoint, onDeleteBorderPoint,
   onGrabVertex, onReleaseDrag,
   geneBitmap, geneBounds, geneMode, stainInfo, stainChannels, layers, regionsOff,
   bordersOff, fillsOff,
@@ -593,12 +593,17 @@ export default function Viewer({
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
 
-    // border mode: right-click the red arc to drop a new point on it
+    // border mode: right-click a POINT on the red arc to delete it, or the line
+    // between points to drop a new one there
     if (mode === 'border' && picks.length === 2 && borderArc && onAddBorderPoint) {
       const pick = deck.pickObject({ x, y, radius: 18 });
       const layerId = pick && pick.layer && String(pick.layer.id);
       if (layerId && layerId.includes('border-edit')) {
         e.preventDefault();
+        if (existingPointProps(pick.object) && onDeleteBorderPoint) {
+          onDeleteBorderPoint(pick.object.geometry.coordinates);
+          return;
+        }
         const viewport = (deck.getViewports({ x, y }) || [])[0];
         const coord = (pick && pick.coordinate)
           || (viewport && viewport.unproject([x - viewport.x, y - viewport.y]));
@@ -608,17 +613,16 @@ export default function Viewer({
     }
 
     // Edit points: right-click a point to delete it. Picked with a radius a
-    // little larger than the handle, so it does not take pixel-perfect aim.
-    if (mode === 'modify' && onEdit) {
+    // little larger than the handle, so it does not take pixel-perfect aim. The
+    // server does the deleting: a point on a shared border goes from both
+    // regions, and the rest of that stretch re-spaces to close the gap.
+    if (mode === 'modify' && onDeletePoint) {
       const near = deck.pickObject({ x, y, radius: 10 });
       const pr = near && existingPointProps(near.object);
       if (pr) {
         e.preventDefault();                // and no browser menu over the point
-        const res = deletePointAt(fc, pr);
-        if (res.refused) { if (onPointRefused) onPointRefused(); return; }
-        onEdit({ updatedData: res.updatedData, editType: 'removePosition',
-                 editContext: res.editContext });
-        if (onPointDeleted) onPointDeleted();
+        const f = fc && fc.features && fc.features[pr.featureIndex];
+        if (f) onDeletePoint(regionName(f, idProp), near.object.geometry.coordinates);
         return;
       }
     }

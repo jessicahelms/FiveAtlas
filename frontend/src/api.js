@@ -147,6 +147,33 @@ export async function loadRegionsFile(ds, path) {
   return r.json();
 }
 
+// Delete one point of a region's outline, keeping every border joined: a point
+// on a shared border goes from both regions, and the rest of that stretch is
+// re-spaced to close the gap. A refusal (a junction, the end of a shared
+// border, a triangle) comes back as a 422 whose detail says why.
+export async function deletePoint(ds, fc, region, point, respace = true) {
+  const r = await fetch(`${API}/datasets/${ds}/regions/delete-point`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fc, region, point, respace }),
+  });
+  if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+  return r.json(); // { type, features, removedFrom, respaced, stretch }
+}
+
+// Read a region file WITHOUT changing anything: the client asks "add or replace?"
+// first. For a file containing hemi, `_hasHemi` and `_damageBeside` ({files,
+// features}: damage-only files next to it) let it ask about damage too.
+export async function readRegionsFile(ds, path) {
+  const r = await fetch(`${API}/datasets/${ds}/regions/read-file`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path }),
+  });
+  if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+  return r.json();
+}
+
 // One or several region files combined into the working copy (the pre-load
 // checklist's region rows).
 export async function loadRegionsMulti(ds, paths) {

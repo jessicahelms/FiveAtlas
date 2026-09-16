@@ -3,7 +3,7 @@ import { useState } from 'react';
 export default function DatasetBar({
   datasets, activeId, onSelect, onOpenFolder, onOpenPath, busy,
   canSave, dirty, busySave, onSave, onReset, onUndo, onRedo, canUndo, canRedo,
-  saveResult, onDismissSave, onRevealSave, onSaveAs, saveTarget, onForgetSaveTarget,
+  saveResult, onDismissSave, onRevealSave, onSaveAs, saveTarget,
 }) {
   const shown = saveResult && (saveResult.exported || saveResult.path);
   const warn = saveResult && (saveResult.refused || saveResult.failed || saveResult.exportError);
@@ -43,22 +43,22 @@ export default function DatasetBar({
             {dirty ? '● unsaved' : 'saved'}
           </span>
         )}
-        {saveTarget && (
-          <span className="dsbar-target" title={`Save writes ${saveTarget}`}>
-            → {saveTarget.split(/[\\/]/).pop()}
-          </span>
+        {canSave && saveTarget && (
+          <>
+            <span className="dsbar-target" title={saveTarget}>
+              Saving to {saveTarget.split(/[\\/]/).pop()}
+            </span>
+            <button className="linkbtn" disabled={busySave}
+              title="choose a different file; later Saves go there instead"
+              onClick={() => onSaveAs && onSaveAs()}>(change)</button>
+          </>
         )}
         <button className={dirty ? 'btn sm primary' : 'btn sm'}
           onClick={onSave} disabled={!canSave || busySave}
           title={saveTarget
-            ? `write the regions to ${saveTarget} (and a backup in the app's own folder)`
-            : "write the edited regions to the app's own folder (the dataset's files are never touched)"}>
+            ? `write the regions to ${saveTarget}`
+            : 'save the regions -- the first time, you choose where'}>
           Save
-        </button>
-        <button className="btn sm" onClick={() => onSaveAs && onSaveAs()}
-          disabled={!canSave || busySave}
-          title="choose the file to save the regions in; later Saves update the same file">
-          Save as…
         </button>
         <button className="btn sm" onClick={onReset} disabled={!canSave || busySave}
           title="throw away every edit since the last save and reload">
@@ -126,13 +126,7 @@ export default function DatasetBar({
                   onClick={() => navigator.clipboard && navigator.clipboard.writeText(shown)}>
                   Copy path
                 </button>
-                {saveTarget && (
-                  <button className="btn sm"
-                    title="later Saves go only to the app's own folder again; the file itself is left alone"
-                    onClick={() => onForgetSaveTarget && onForgetSaveTarget()}>
-                    Stop saving here
-                  </button>
-                )}
+
               </div>
             </>
           )}

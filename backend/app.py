@@ -1464,21 +1464,29 @@ async def regions_partition(ds_id: str, request: Request):
 
 @app.post("/api/datasets/{ds_id}/regions/resample")
 async def regions_resample(ds_id: str, request: Request):
-    """Thin the outlines of the picked regions without breaking their shared
-    borders. Body: {regions:[names], fc?, tol?}. Returns the updated FC plus the
-    before/after vertex counts, so the client can show the effect before keeping it."""
+    """Even out the points of the picked regions without breaking their borders.
+    Body: {regions:[names], fc?, tol?}. Returns the updated FC plus the
+    before/after point counts, so the client can show the effect before keeping it.
+
+    Two or more regions: the shared border between them (Edit shared borders).
+    ONE region: its whole outline (Edit points), re-pointing every neighbour's
+    side of each border it shares so none of them opens."""
     try:
         d = ds.get_dataset(ds_id)
     except KeyError:
         raise HTTPException(404, "unknown dataset")
     body = await request.json()
     names = body.get("regions") or body.get("names")
-    if not names or len(names) < 2:
-        raise HTTPException(400, "need 'regions': at least two region names")
+    if not names:
+        raise HTTPException(400, "need 'regions': one region, or two whose border to resample")
     fc = body.get("fc") or geo.load_regions(ds_id)[0]
     try:
-        res = topology.resample_regions(fc["features"], d["id_prop"], names,
-                                        tol=float(body.get("tol", 20.0)))
+        if len(names) == 1:
+            res = topology.resample_region(fc["features"], d["id_prop"], str(names[0]),
+                                           tol=float(body.get("tol", 20.0)))
+        else:
+            res = topology.resample_regions(fc["features"], d["id_prop"], names,
+                                            tol=float(body.get("tol", 20.0)))
     except ValueError as e:
         raise HTTPException(422, str(e))
     except Exception as e:
@@ -1487,7 +1495,39 @@ async def regions_resample(ds_id: str, request: Request):
                                  f"{' + '.join(str(n) for n in names)} at {res['tol']:g} px",
                                  names),
             "counts": res["counts"], "tol": res["tol"],
-            "handles": res.get("handles"), "arcPoints": res.get("arcPoints")}
+            "handles": res.get("handles"), "arcPoints": res.get("arcPoints"),
+            "kept": res.get("kept", [])}
+
+
+@app.post("/api/datasets/{ds_id}/regions/delete-point")
+async def regions_delete_point(ds_id: str, request: Request):
+    """Delete one point of a region's outline without opening any border, and
+    re-space the rest of that stretch to close the gap. Body: {fc, region,
+    point:[x, y], respace?}. A point on a border shared with a neighbour goes
+    from both; a point where regions meet, or the end of a shared border, is
+    refused with a sentence saying why (422)."""
+    try:
+        d = ds.get_dataset(ds_id)
+    except KeyError:
+        raise HTTPException(404, "unknown dataset")
+    body = await request.json()
+    fc, region, point = body.get("fc"), body.get("region"), body.get("point")
+    if not fc or not region or not point or len(point) != 2:
+        raise HTTPException(400, "need 'fc', 'region' and 'point': [x, y]")
+    try:
+        res = topology.delete_point(fc["features"], d["id_prop"], str(region), point,
+                                    respace=bool(body.get("respace", True)))
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"delete-point failed: {e}")
+    who = " and ".join(res["removedFrom"])
+    return {**provenance.stamped(res["features"], fc, "delete-point",
+                                 f"{who}, {res['stretch']}"
+                                 + (", re-spaced" if res["respaced"] else ""),
+                                 res["removedFrom"]),
+            "removedFrom": res["removedFrom"], "respaced": res["respaced"],
+            "stretch": res["stretch"]}
 
 
 @app.post("/api/datasets/{ds_id}/regions/merge")
@@ -1637,6 +1677,55 @@ async def regions_load(ds_id: str, request: Request):
     provenance.stamp(fc, "load-regions", Path(str(path)).name)
     geo.save_edited(ds_id, fc)
     return JSONResponse(fc)
+
+
+@app.post("/api/datasets/{ds_id}/regions/read-file")
+async def regions_read_file(ds_id: str, request: Request):
+    """Read a region file and hand it back, changing NOTHING. Body: {path}.
+
+    Load regions file used to replace the map, the undo history and the working
+    copy the moment a file was picked. Now the client reads first, asks whether
+    to add the file's regions to the map or replace the map with them, and does
+    that as an ordinary, undoable edit that Save then writes.
+    """
+    try:
+        d = ds.get_dataset(ds_id)
+    except KeyError:
+        raise HTTPException(404, "unknown dataset")
+    body = await request.json()
+    path = (body or {}).get("path")
+    if not path:
+        raise HTTPException(400, "need 'path'")
+    try:
+        fc = geo.read_regions_file(ds_id, str(path))
+    except Exception as e:
+        raise HTTPException(400, f"could not read {Path(str(path)).name}: {e}")
+
+    def names_of(features):
+        return [str((f.get("properties") or {}).get(d["id_prop"]) or "") for f in features]
+
+    # A file with hemi in it: the annotator is asked whether to bring the damage
+    # too. Damage can be in this file, or beside it in files that hold nothing
+    # but damage (the one-file-per-region export writes bubble.1.geojson and so
+    # on). Other region files in the folder -- other versions of the regions --
+    # are never gathered: only a file whose every region is damage counts.
+    has_hemi = any(n.strip().lower() == "hemi" for n in names_of(fc.get("features") or []))
+    beside = {"files": [], "features": []}
+    if has_hemi:
+        here = Path(str(path))
+        for q in sorted(here.parent.glob("*.geojson")):
+            if _same_file(q, here):
+                continue
+            try:
+                sfc = geo.read_regions_file(ds_id, str(q))
+            except Exception:
+                continue
+            sf = sfc.get("features") or []
+            if sf and all(n and DMG.parse_name(n)[0] for n in names_of(sf)):
+                beside["files"].append(q.name)
+                beside["features"].extend(sf)
+    return JSONResponse({**fc, "_readFrom": str(path), "_hasHemi": has_hemi,
+                         "_damageBeside": beside})
 
 
 @app.post("/api/datasets/{ds_id}/regions/load-multi")

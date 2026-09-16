@@ -205,7 +205,16 @@ def run_snap(ds_id: str, before_fc: dict, after_fc: dict,
 
 
 def load_regions_file(ds_id: str, path: str) -> dict:
-    """Load a region set from disk and make it this dataset's working copy.
+    """Load a region set from disk and make it this dataset's working copy."""
+    fc = read_regions_file(ds_id, path)
+    save_edited(ds_id, fc)
+    return fc
+
+
+def read_regions_file(ds_id: str, path: str) -> dict:
+    """Read a region set from disk WITHOUT touching the working copy -- so the
+    annotator can be asked "add these, or replace what is on the map?" before
+    anything changes.
 
     GeoJSON as before; a .csv/.tsv/.txt is read as a vertex table (one row per
     vertex, grouped by region name -- see tableio for the columns it accepts,
@@ -226,5 +235,4 @@ def load_regions_file(ds_id: str, path: str) -> dict:
             raise ValueError("not a GeoJSON FeatureCollection")
     # smooth away spikes / heal invalid polygons on load
     fc["features"] = topology.clean_features(fc.get("features", []), d["id_prop"], spike=3.0)
-    save_edited(ds_id, fc)
     return fc

@@ -1,12 +1,13 @@
-import { ModifyMode, ImmutableFeatureCollection } from '@deck.gl-community/editable-layers';
+import { ModifyMode } from '@deck.gl-community/editable-layers';
 
 // Editing a region's points.
 //
 // The library's ModifyMode deletes a point on ANY click on it, the left button
 // included. Nobody could discover that, and a press meant to start a drag could
 // delete a point instead. So here a click on a point does nothing at all, and
-// deleting is a deliberate RIGHT-click, handled by deletePointAt() from the
-// viewer's context-menu handler.
+// deleting is a deliberate RIGHT-click, handled by the viewer's context-menu
+// handler -- which asks the server, so a point on a shared border goes from both
+// regions and the rest of that stretch re-spaces.
 //
 // The right-click is taken there, and only there: deck does not reliably pass
 // the right button through to the mode as a click, and handling it in both
@@ -26,35 +27,4 @@ export function existingPointProps(object) {
   const pr = object && object.properties;
   return pr && pr.guideType === 'editHandle' && pr.editHandleType === 'existing'
     && pr.featureIndex >= 0 && Array.isArray(pr.positionIndexes) ? pr : null;
-}
-
-// The ring a point belongs to: a Polygon's [ring, point] or a MultiPolygon's
-// [polygon, ring, point] -- everything but the last index.
-function ringOf(geometry, positionIndexes) {
-  let node = geometry && geometry.coordinates;
-  for (let i = 0; i < positionIndexes.length - 1; i += 1) node = node && node[positionIndexes[i]];
-  return Array.isArray(node) ? node : null;
-}
-
-// Delete one point. Returns { updatedData, editContext }, or { refused: true }
-// when the ring would drop below a triangle -- 4 positions, since a GeoJSON
-// ring repeats its first point at the end.
-export function deletePointAt(fc, pointProps) {
-  const feature = fc && fc.features && fc.features[pointProps.featureIndex];
-  const ring = feature && ringOf(feature.geometry, pointProps.positionIndexes);
-  if (!ring || ring.length <= 4) return { refused: true };
-  try {
-    const updatedData = new ImmutableFeatureCollection(fc)
-      .removePosition(pointProps.featureIndex, pointProps.positionIndexes)
-      .getObject();
-    return {
-      updatedData,
-      editContext: {
-        featureIndexes: [pointProps.featureIndex],
-        positionIndexes: pointProps.positionIndexes,
-      },
-    };
-  } catch (e) {
-    return { refused: true };
-  }
 }

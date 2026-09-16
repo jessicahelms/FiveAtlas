@@ -4,6 +4,7 @@ import Sidebar from './Sidebar';
 import ChannelPanel from './ChannelPanel';
 import DatasetBar from './DatasetBar';
 import * as api from './api';
+import { parseName, isDamage, nextNumber, formatName } from './damage';
 
 const MOVE_EDITS = new Set([
   'addPosition', 'removePosition', 'movePosition', 'finishMovePosition',
@@ -573,7 +574,12 @@ export default function App() {
   const [layers, setLayers] = useState(DEFAULT_LAYERS);
 
   // ---- undo/redo history ----
+  // Anything recorded is unsaved until Save writes it -- and record() is the one
+  // path every change takes (point drags go through onEdit -> record, not
+  // commit, so setting this only in commit left a dragged point saying "saved").
+  const [dirty, setDirty] = useState(false);
   const record = useCallback((nextFc) => {
+    setDirty(true);
     const base = historyRef.current.slice(0, histIdxRef.current + 1);
     base.push(nextFc);
     while (base.length > 200) base.shift();
@@ -581,9 +587,6 @@ export default function App() {
     histIdxRef.current = base.length - 1;
     setHistTick((t) => t + 1);
   }, []);
-  // Anything committed is unsaved until Save writes it. The top bar shows
-  // this, so "have I saved?" is answerable without hunting for a message.
-  const [dirty, setDirty] = useState(false);
   // What the last Save wrote, shown right under the Save button. The message
   // used to go to the bottom of the sidebar, far off-screen, and named only the
   // snapshot file -- so a save looked like it had done nothing.
@@ -592,8 +595,15 @@ export default function App() {
   const [saveTarget, setSaveTarget] = useState(null);
   // "Point deleted" / "can't go below 3 points", shown under Edit points.
   const [pointMsg, setPointMsg] = useState(null);
+  // Resample points for the selected region (Edit points): a preview drawn on the
+  // map but not recorded, until Apply. The ref is what async code reads.
+  const [regionResample, setRegionResample] = useState(null);
+  const regionResampleRef = useRef(null);
+  const regionResampleTimer = useRef(null);
+  // Load regions file: read, then ask add / replace (and about damage) first.
+  const [loadAsk, setLoadAsk] = useState(null);
   const commit = useCallback((nextFc) => {
-    fcRef.current = nextFc; setFc(nextFc); record(nextFc); setDirty(true);
+    fcRef.current = nextFc; setFc(nextFc); record(nextFc);
   }, [record]);
   const initHistory = useCallback((fc0) => {
     setDirty(false);                     // freshly loaded == saved
@@ -608,6 +618,7 @@ export default function App() {
     const prevFc = historyRef.current[histIdxRef.current];
     fcRef.current = prevFc;
     setFc(prevFc);
+    setDirty(true);
     setBorderArc(null); setHistTick((t) => t + 1);
   }, []);
   const redo = useCallback(() => {
@@ -616,6 +627,7 @@ export default function App() {
     const nextFc = historyRef.current[histIdxRef.current];
     fcRef.current = nextFc;
     setFc(nextFc);
+    setDirty(true);
     setBorderArc(null); setHistTick((t) => t + 1);
   }, []);
   const canUndo = histIdxRef.current > 0;
@@ -893,6 +905,12 @@ export default function App() {
   }, [propRadius]);
 
   const onEdit = useCallback(({ updatedData, editType, editContext }) => {
+    // Dragging a point of a resample PREVIEW builds on the previewed outline, so
+    // the preview is kept (and recorded with the drag) rather than thrown away.
+    if (regionResampleRef.current) {
+      regionResampleRef.current = null;
+      setRegionResample(null);
+    }
     let data = updatedData;
     if (propEdit && (editType === 'movePosition' || editType === 'finishMovePosition')
         && editContext && editContext.featureIndexes && editContext.positionIndexes) {
@@ -1183,7 +1201,7 @@ export default function App() {
     if (!res.inserted) {
       setBorderMsg(res.nearExisting
         ? 'There is already a point there - drag it to move the border.'
-        : 'Right-click the red border to add a point.');
+        : 'Right-click the red line to add a point there, or a point to delete it.');
       return;
     }
     setBorderSegmentIndex(segmentIndex);
@@ -1200,7 +1218,7 @@ export default function App() {
       ?? borderSegmentIndex);
     if (editType === 'removePosition') {
       dragStartArcRef.current = null;
-      setBorderMsg('Point clicks are protected - drag points to move, or right-click the red border to add one.');
+      setBorderMsg('Clicking a point does nothing — drag it to move it, right-click it to delete it, or right-click the red line to add one.');
       return;
     }
     if (editType === 'addPosition') {
@@ -1961,7 +1979,15 @@ export default function App() {
     setBusy(true); setError(null);
     try {
       const r = await api.saveRegionsAs(dsId, fc, path);
-      if (r.cancelled) return;
+      if (r.cancelled) {
+        // the first Save of a dataset IS the choice of file: cancelling it
+        // means nothing was written, and that must be said
+        if (!saveTarget) {
+          setSaveResult({ failed: true,
+            message: 'No file was chosen, so nothing was saved. Press Save to choose where.' });
+        }
+        return;
+      }
       if (r.refused) {
         setSaveResult({ refused: true, message: r.message, suggested: r.suggested });
         return;
@@ -1974,13 +2000,161 @@ export default function App() {
     } catch (e) {
       setSaveResult({ failed: true, message: apiDetail(e) });
     } finally { setBusy(false); }
-  }, [dsId, fc]);
+  }, [dsId, fc, saveTarget]);
 
-  const doForgetSaveTarget = useCallback(async () => {
-    if (!dsId) return;
-    try { await api.forgetSaveTarget(dsId); setSaveTarget(null); }
-    catch (e) { setSaveResult({ failed: true, message: apiDetail(e) }); }
-  }, [dsId]);
+  // One Save button, the way Word works: the first Save of a dataset asks where
+  // (the dialog starts beside the originals, already named), every Save after
+  // that writes the same file with no dialog. (change) picks a different file.
+  const doSavePrimary = useCallback(() => (saveTarget ? doSave() : doSaveAs()),
+    [saveTarget, doSave, doSaveAs]);
+
+  // ---- Deleting a point (Edit points, and Edit shared borders) -------------------
+  // Right-click a point. The server deletes it without opening any border: from
+  // both regions if it sits on a shared border, then re-spaces the rest of that
+  // stretch so no long gap is left where it was. Refusals come back as sentences.
+  const deletePointFrom = useCallback(async (region, point, fromBorder) => {
+    const cur = fcRef.current;
+    if (!dsId || !cur || !region || !point) return;
+    const say = fromBorder ? setBorderMsg : setPointMsg;
+    setBusy(true);
+    try {
+      const res = await api.deletePoint(dsId, cur, region, [point[0], point[1]], true);
+      const next = asFc(res, cur);
+      commit(next);
+      setMoved((prev) => { const n = new Set(prev); (res.removedFrom || []).forEach((x) => n.add(x)); return n; });
+      const who = (res.removedFrom || [region]).join(' and ');
+      say(`Point deleted from ${who}`
+        + (res.respaced ? ` — the rest of that ${res.stretch} re-spaced to close the gap` : '')
+        + '. Ctrl+Z brings it back.');
+      if (fromBorder && borderPicks.length === 2) {
+        // redraw the red arc from the new outlines
+        try {
+          const sb = await api.sharedBorder(dsId, borderPicks[0], borderPicks[1], next, { bridge: false });
+          const arcs = normalizeBorderArcs(sb && sb.arcs);
+          if (arcs.length) {
+            setBorderSegments(arcs); setBorderSegmentIndex(0); setBorderArc(borderArcsFc(arcs));
+          }
+        } catch (e) { /* the deletion stands; the arc refreshes on the next pick */ }
+      }
+    } catch (e) {
+      say(apiDetail(e));
+    } finally { setBusy(false); }
+  }, [dsId, commit, borderPicks]);
+
+  // ---- Resample points for ONE region (Edit points) ----------------------------
+  const cancelRegionResample = useCallback(() => {
+    const rr = regionResampleRef.current;
+    if (rr && rr.baseFc) { fcRef.current = rr.baseFc; setFc(rr.baseFc); }
+    regionResampleRef.current = null;
+    setRegionResample(null);
+  }, []);
+
+  const previewRegionResample = useCallback((tolValue) => {
+    setResampleTol(tolValue);
+    if (regionResampleTimer.current) clearTimeout(regionResampleTimer.current);
+    const name = selectedName;
+    regionResampleTimer.current = setTimeout(async () => {
+      if (!name || !dsId) return;
+      const prev = regionResampleRef.current;
+      // always from the outline as it was before any preview, never a preview
+      const source = prev && prev.name === name && prev.dsId === dsId ? prev.baseFc : fcRef.current;
+      setBusy(true);
+      try {
+        const res = await api.resampleRegions(dsId, [name], source, tolValue);
+        const previewFc = asFc(res, source);
+        const state = { name, dsId, tol: res.tol, counts: res.counts, handles: res.handles,
+                        kept: res.kept || [], baseFc: source, fc: previewFc };
+        regionResampleRef.current = state;
+        fcRef.current = previewFc; setFc(previewFc);
+        setRegionResample(state);
+      } catch (e) {
+        setPointMsg(apiDetail(e));
+      } finally { setBusy(false); }
+    }, 300);
+  }, [dsId, selectedName]);
+
+  const applyRegionResample = useCallback(() => {
+    const rr = regionResampleRef.current;
+    if (!rr) return;
+    if (rr.dsId !== dsId || rr.name !== selectedName) {
+      cancelRegionResample();
+      setPointMsg('That preview was for a different region — move the slider again.');
+      return;
+    }
+    regionResampleRef.current = null;
+    setRegionResample(null);
+    commit(rr.fc); setBaseline(rr.fc);
+    setMoved((prev) => { const n = new Set(prev); (rr.counts || []).forEach((c) => n.add(c.region)); return n; });
+    const nb = (rr.counts || []).filter((c) => c.shared).map((c) => c.region);
+    setPointMsg(`Resampled ${rr.name}: ${rr.handles.before} → ${rr.handles.after} points`
+      + (nb.length ? `, kept joined to ${nb.join(', ')}` : '') + '. Ctrl+Z undoes it.');
+  }, [dsId, selectedName, commit, cancelRegionResample]);
+
+  // a preview never survives leaving Edit points or picking another region
+  useEffect(() => {
+    const rr = regionResampleRef.current;
+    if (rr && (mode !== 'modify' || rr.name !== selectedName)) cancelRegionResample();
+  }, [mode, selectedName, cancelRegionResample]);
+
+  // ---- Load regions file: add or replace, and the hemi damage question ----------
+  const answerLoadDamage = useCallback((yes) => {
+    setLoadAsk((a) => (a && a.fc ? { ...a, withDamage: yes } : a));
+  }, []);
+
+  const answerLoad = useCallback((choice) => {
+    const ask = loadAsk;
+    if (!choice || !ask || !ask.fc) { setLoadAsk(null); return; }
+    const aliases = designations && designations.aliases;
+    const damageQuestion = ask.hasHemi && (ask.damageInFile > 0 || ask.damageBeside.length > 0);
+    if (damageQuestion && ask.withDamage == null) return;          // must be answered
+    const dropDamage = damageQuestion && ask.withDamage === false;
+    let incoming = (ask.fc.features || []).filter(
+      (f) => !dropDamage || !isDamage(featureName(f, idProp), aliases));
+    if (damageQuestion && ask.withDamage === true) incoming = incoming.concat(ask.damageBeside);
+    const withoutReadInfo = (o) => {
+      const c = { ...o };
+      delete c._readFrom; delete c._hasHemi; delete c._damageBeside;
+      return c;
+    };
+    const cur = fcRef.current || { type: 'FeatureCollection', features: [] };
+    let next;
+    let renamed = 0;
+    if (choice === 'replace') {
+      next = stampFc({ ...withoutReadInfo(ask.fc), type: 'FeatureCollection', features: incoming },
+        identityRef.current, 'load-regions', `${ask.name}, replacing the map`,
+        incoming.map((f) => featureName(f, idProp)));
+    } else {
+      // Two regions with one name are ONE region in this app (edits act on all
+      // its parts), so a name already on the map is never reused silently:
+      // damage takes the next free number, anatomy gets the file's name added.
+      const taken = new Set(cur.features.map((f) => featureName(f, idProp)));
+      const stem = ask.name.replace(/\.[^.]+$/, '');
+      const added = incoming.map((f) => {
+        const nm = featureName(f, idProp);
+        if (!taken.has(nm)) { taken.add(nm); return f; }
+        const dmg = parseName(nm, aliases);
+        let fresh;
+        if (dmg.tag) {
+          fresh = formatName(dmg.tag, nextNumber([...taken], dmg.tag, aliases));
+        } else {
+          fresh = `${nm} (${stem})`;
+          for (let i = 2; taken.has(fresh); i += 1) fresh = `${nm} (${stem} ${i})`;
+        }
+        taken.add(fresh);
+        renamed += 1;
+        return { ...f, properties: renameFeatureProperties(f, idProp, { [idProp]: fresh }).props };
+      });
+      next = stampFc({ ...cur, features: [...cur.features, ...added] }, identityRef.current,
+        'add-regions-file', `${added.length} from ${ask.name}`, added.map((f) => featureName(f, idProp)));
+    }
+    commit(next); setBaseline(next);
+    setSelected([]); selAnchorRef.current = null;
+    if (choice === 'replace') { setMoved(new Set()); setMode('view'); clearBorder(); }
+    const dmgNote = damageQuestion ? (ask.withDamage ? ', damage included' : ', damage left out') : '';
+    setLoadAsk({ done: choice === 'replace'
+      ? `The map now holds the ${incoming.length} regions from ${ask.name}${dmgNote}. Ctrl+Z brings back what was there; Save to keep it.`
+      : `Added ${incoming.length} regions from ${ask.name}${dmgNote}${renamed ? ` (${renamed} renamed so no name is used twice)` : ''}. Ctrl+Z undoes it; Save to keep it.` });
+  }, [loadAsk, designations, idProp, commit, clearBorder]);
 
   useEffect(() => {
     setSaveTarget(null);
@@ -2232,16 +2406,29 @@ export default function App() {
     } catch (e) { setError(String(e)); } finally { setBusy(false); }
   }, [dsId, clearBorder, initHistory]);
 
+  // Load regions file: nothing changes when the file is picked. It is read, and
+  // the annotator chooses Add or Replace -- it used to replace the map, the undo
+  // history and the working copy the instant a file was chosen.
   const loadRegionsFromFile = useCallback(async () => {
-    setBusy(true); setError(null);
+    setBusy(true); setError(null); setLoadAsk(null);
     try {
       const { path } = await api.browseFile();
       if (!path) return;
-      const r = await api.loadRegionsFile(dsId, path);
-      setFc(r); setBaseline(r); initHistory(r);
-      setMoved(new Set()); setSelected([]); setSnapInfo(null); setMode('view'); clearBorder();
-    } catch (e) { setError(String(e)); } finally { setBusy(false); }
-  }, [dsId, clearBorder, initHistory]);
+      const r = await api.readRegionsFile(dsId, path);
+      const aliases = designations && designations.aliases;
+      const feats = r.features || [];
+      const beside = r._damageBeside || { files: [], features: [] };
+      setLoadAsk({
+        path, name: path.split(/[\\/]/).pop(), fc: r, count: feats.length,
+        hasHemi: !!r._hasHemi,
+        damageInFile: feats.filter((f) => isDamage(featureName(f, idProp), aliases)).length,
+        damageBeside: beside.features || [], besideFiles: beside.files || [],
+        withDamage: null,
+      });
+    } catch (e) {
+      setLoadAsk({ error: `Could not read that file: ${apiDetail(e)}` });
+    } finally { setBusy(false); }
+  }, [dsId, designations, idProp]);
 
   // Export refuses to write broken geometry. On a block we surface the problem
   // list and let the user Repair, force it through, or go fix it by hand.
@@ -2318,8 +2505,8 @@ export default function App() {
         datasets={datasets} activeId={dsId} onSelect={stageDataset}
         onOpenFolder={openFolder} onOpenPath={loadOpened} busy={dsBusy}
         canSave={!!(dsId && fc)} dirty={dirty} busySave={busy}
-        onSave={doSave} onReset={doReset}
-        onSaveAs={doSaveAs} saveTarget={saveTarget} onForgetSaveTarget={doForgetSaveTarget}
+        onSave={doSavePrimary} onReset={doReset}
+        onSaveAs={doSaveAs} saveTarget={saveTarget}
         saveResult={saveResult} onDismissSave={() => setSaveResult(null)}
         onRevealSave={(p) => api.revealInFolder(p).catch((e) => setError(apiDetail(e)))}
         onUndo={undo} onRedo={redo} canUndo={canUndo} canRedo={canRedo}
@@ -2443,6 +2630,10 @@ export default function App() {
                 }}
                 onDeleteSelected={deleteSelectedRegions}
                 pointMsg={pointMsg}
+                regionResample={regionResample} onRegionResampleTol={previewRegionResample}
+                onApplyRegionResample={applyRegionResample}
+                onCancelRegionResample={cancelRegionResample}
+                loadAsk={loadAsk} onAnswerLoad={answerLoad} onLoadDamage={answerLoadDamage}
                 overlapAsk={overlapAsk} onAnswerOverlap={answerOverlap}
                 onToggleTranslate={onToggleTranslate}
                 mode={mode}
@@ -2555,8 +2746,9 @@ export default function App() {
                 cleanPreview={cleanFound && cleanFound.res.freed}
                 gapPreview={gapFind && gapFind.gap} onPickGap={onPickGap}
                 propRing={propRing} onRegionMenu={openRegionMenu}
-                onPointDeleted={() => setPointMsg('Point deleted — Ctrl+Z brings it back.')}
-                onPointRefused={() => setPointMsg('A region needs at least 3 points, so that one stays.')}
+                onDeletePoint={(region, point) => deletePointFrom(region, point, false)}
+                onDeleteBorderPoint={(point) => borderPicks.length === 2
+                  && deletePointFrom(borderPicks[0], point, true)}
                 onGrabVertex={onGrabVertex} onReleaseDrag={onReleaseDrag}
                 geneBitmap={geneBitmap} geneBounds={geneBounds} geneMode={geneMode}
                 stainInfo={stainInfo} stainChannels={stainChannels}

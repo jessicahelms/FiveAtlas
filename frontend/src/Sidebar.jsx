@@ -9,6 +9,8 @@ function displayName(feature, idProp) {
 
 export default function Sidebar({
   info, fc, sources, selected, onSelectName, onRegionMenu, onDeleteSelected, pointMsg,
+  regionResample, onRegionResampleTol, onApplyRegionResample, onCancelRegionResample,
+  loadAsk, onAnswerLoad, onLoadDamage,
   overlapAsk, onAnswerOverlap, onToggleTranslate,
   mode, onToggleModify, onToggleBorder, onToggleSplit, onToggleDissolve, onToggleDraw,
   borderPicks, borderMsg, borderShared, onClearBorder, onShareBorders, onMerge,
@@ -278,12 +280,57 @@ export default function Sidebar({
 
         {mode === 'modify' && (
           <div className="hint dim">
-            <b>Drag</b> a point to move it · <b>right-click</b> a point to delete it ·
-            <b> click the outline</b> between two points to add one. Ctrl+Z undoes any
-            of it.
+            <b>Drag</b> a point to move it · <b>right-click</b> a point to delete it —
+            the rest of that border re-spaces to close the gap, and a point it shares
+            with a neighbour goes from both · <b>click the outline</b> between two
+            points to add one. Ctrl+Z undoes any of it.
           </div>
         )}
         {mode === 'modify' && pointMsg && <div className="hint">{pointMsg}</div>}
+
+        {/* Resample points for this one region. Its borders stay joined: every
+            neighbour's side of a shared border is re-pointed with it. */}
+        {mode === 'modify' && selectedName && (
+          <div className="prop">
+            <div className="pts-head">Resample points</div>
+            <div className="rng">
+              <span>fine</span>
+              <input type="range" min="20" max="600" step="10" value={resampleTol}
+                onChange={(e) => onRegionResampleTol && onRegionResampleTol(Number(e.target.value))}
+                disabled={busy} />
+              <span>coarse</span>
+            </div>
+            <div className="prop-readout">
+              <span>spacing</span>
+              <span className="v">{resampleTol} px</span>
+            </div>
+            {regionResample && regionResample.handles && (
+              <>
+                <div className="pts-head">
+                  points on {regionResample.name}:{' '}
+                  <b>{regionResample.handles.before} → {regionResample.handles.after}</b>
+                </div>
+                {(() => {
+                  const nb = (regionResample.counts || []).filter((c) => c.shared).map((c) => c.region);
+                  return nb.length > 0 && (
+                    <div className="hint dim">
+                      Its borders with {nb.join(', ')} are re-pointed too, so none of them opens.
+                    </div>
+                  );
+                })()}
+                {(regionResample.kept || []).length > 0 && (
+                  <div className="hint dim">
+                    Part of it is too small for this spacing and was left as it was.
+                  </div>
+                )}
+                <div className="row">
+                  <button className="btn sm primary" onClick={onApplyRegionResample} disabled={busy}>Apply</button>
+                  <button className="btn sm" onClick={onCancelRegionResample} disabled={busy}>Cancel</button>
+                </div>
+              </>
+            )}
+          </div>
+        )}
 
         <button className={mode === 'translate' ? 'btn on' : 'btn'}
           onClick={onToggleTranslate}
@@ -788,6 +835,76 @@ export default function Sidebar({
         <SecTitle k="data">Files &amp; export</SecTitle>
         {isOpen('data') && (<>
         <button className="btn" onClick={onLoadFile} disabled={busy}>📂 Load regions file…</button>
+
+        {/* Picking a file changes nothing: add or replace is chosen here. */}
+        {loadAsk && (
+          <div className="pts">
+            {loadAsk.error && (
+              <>
+                <div className="hint">{loadAsk.error}</div>
+                <button className="btn sm" onClick={() => onAnswerLoad && onAnswerLoad(null)}>Close</button>
+              </>
+            )}
+            {loadAsk.done && (
+              <>
+                <div className="hint">{loadAsk.done}</div>
+                <button className="btn sm" onClick={() => onAnswerLoad && onAnswerLoad(null)}>OK</button>
+              </>
+            )}
+            {loadAsk.fc && (() => {
+              const dmg = loadAsk.hasHemi
+                && (loadAsk.damageInFile > 0 || loadAsk.damageBeside.length > 0);
+              const mustAnswer = dmg && loadAsk.withDamage == null;
+              const parts = [];
+              if (loadAsk.damageInFile > 0) parts.push(`${loadAsk.damageInFile} in this file`);
+              if (loadAsk.damageBeside.length > 0) {
+                parts.push(`${loadAsk.damageBeside.length} in ${loadAsk.besideFiles.length} file`
+                  + `${loadAsk.besideFiles.length === 1 ? '' : 's'} beside it`);
+              }
+              return (
+                <>
+                  <div className="pts-head">
+                    {loadAsk.name} — {loadAsk.count} region{loadAsk.count === 1 ? '' : 's'}
+                  </div>
+                  {dmg && (
+                    <>
+                      <div className="hint">This file has <b>hemi</b>. Load the damage with it?</div>
+                      <div className="hint dim" title={loadAsk.besideFiles.join(', ')}>
+                        Damage found: {parts.join(', ')}.
+                      </div>
+                      <div className="row">
+                        <button className={loadAsk.withDamage === true ? 'btn sm on' : 'btn sm'}
+                          onClick={() => onLoadDamage && onLoadDamage(true)}>Yes</button>
+                        <button className={loadAsk.withDamage === false ? 'btn sm on' : 'btn sm'}
+                          onClick={() => onLoadDamage && onLoadDamage(false)}>No</button>
+                      </div>
+                    </>
+                  )}
+                  <div className="row">
+                    <button className="btn sm primary" disabled={busy || mustAnswer}
+                      title="put these regions on the map alongside what is already there"
+                      onClick={() => onAnswerLoad && onAnswerLoad('add')}>
+                      Add to the map
+                    </button>
+                    <button className="btn sm" disabled={busy || mustAnswer}
+                      title="swap everything on the map for this file"
+                      onClick={() => onAnswerLoad && onAnswerLoad('replace')}>
+                      Replace the map
+                    </button>
+                    <button className="btn sm" onClick={() => onAnswerLoad && onAnswerLoad(null)}>Cancel</button>
+                  </div>
+                  <div className="hint dim">
+                    {mustAnswer ? 'Choose Yes or No for the damage first. ' : ''}
+                    Add keeps what is on the map and puts these beside it — a name already
+                    in use is changed so it isn't shared. Replace swaps the whole map for
+                    this file. Either way Ctrl+Z undoes it, and nothing is written until
+                    you Save.
+                  </div>
+                </>
+              );
+            })()}
+          </div>
+        )}
         <button className="btn" onClick={onValidate} disabled={busy}>✓ Check geometry</button>
 
         {!confirmRestore ? (

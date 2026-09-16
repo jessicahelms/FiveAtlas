@@ -2298,6 +2298,445 @@ def resample_regions(features, id_prop, names, tol=20.0, precision=1.0):
                         "after": sum(len(a) for a in arcs_after)}}
 
 
+# ---- a region's outline, point by point -----------------------------------------
+#
+# Resample points (Edit points) and deleting a point both work on one region's
+# outline while keeping every border it shares joined. They share these helpers:
+# each outline point is labelled by what it lies on, and a stretch shared with a
+# neighbour is always re-pointed in BOTH regions with the same point list.
+
+
+def _near_boundaries(features, idx, name, body, eps):
+    """{name: outline} for every other region within reach of `body` -- all lobes
+    of a name together."""
+    near = body.buffer(eps * 4)
+    out = {}
+    for other, ks in idx.items():
+        if other == name:
+            continue
+        g = _body(features, ks)
+        if not g.is_empty and g.intersects(near):
+            out[other] = g.boundary
+    return out
+
+
+def _point_labels(pts, boundaries, eps):
+    """For each point, the names of the regions whose outline it lies on (within
+    `eps`), as a sorted tuple: () free ground, (N,) one neighbour, (N, M, ...) a
+    junction where several meet."""
+    import shapely as _sh
+    arr = _sh.points(pts)
+    labels = [[] for _ in pts]
+    for nm in sorted(boundaries):
+        for i, hit in enumerate(_sh.dwithin(arr, boundaries[nm], eps)):
+            if hit:
+                labels[i].append(nm)
+    return [tuple(lb) for lb in labels]
+
+
+def _single_polygon(ring, holes):
+    """`ring` (with `holes`) as ONE valid Polygon, or None."""
+    try:
+        cand = Polygon(ring, holes)
+        if not cand.is_valid:
+            cand = cand.buffer(0)
+    except Exception:
+        return None
+    return cand if (not cand.is_empty and cand.geom_type == "Polygon") else None
+
+
+def _area_drift_ok(new, old, max_drift):
+    return abs(new.area - old.area) / max(old.area, 1e-9) <= max_drift
+
+
+def _swap_stretch(out, idx, nm, orig_pts, new_pts, swap_eps, max_drift):
+    """Re-point one stretch of region `nm`'s outline, in `out`: its run of points
+    along `orig_pts` becomes `new_pts`. Returns an undo record (feature index,
+    old geometry), or None if it could not be done cleanly -- and then nothing
+    changed.
+
+    Cleanly includes that nothing of the old stretch is left behind: an old point
+    still on the stretch (away from its two fixed ends) but off the new line
+    would be a bump -- a gap or overlap along the very border this keeps closed."""
+    import shapely as _sh
+    from shapely.geometry import MultiPolygon
+    old_line = LineString(orig_pts)
+    new_line = LineString(new_pts)
+    for k in idx[nm]:
+        parts = _polys(_geom_at(out, k))
+        for pi, npoly in enumerate(parts):
+            ring = _swap_ring_span(list(npoly.exterior.coords), old_line, new_pts, swap_eps)
+            if ring is None:
+                continue
+            cand = _single_polygon(ring, [list(r.coords) for r in npoly.interiors])
+            if cand is None or not _area_drift_ok(cand, npoly, max_drift):
+                continue
+            arr = _sh.points(list(cand.exterior.coords))
+            along = _sh.line_locate_point(old_line, arr)
+            inner = (along > swap_eps) & (along < old_line.length - swap_eps)
+            on_old = _sh.dwithin(arr, old_line, swap_eps)
+            off_new = ~_sh.dwithin(arr, new_line, 0.5)
+            if (inner & on_old & off_new).any():
+                continue
+            newparts = parts[:pi] + [cand] + parts[pi + 1:]
+            ng = newparts[0] if len(newparts) == 1 else MultiPolygon(newparts)
+            undo = (k, out[k]["geometry"])
+            out[k]["geometry"] = mapping(ng)
+            return undo
+    return None
+
+
+def _even_count(pts, count):
+    """`pts` re-pointed evenly into exactly `count` points, both ends kept. A
+    closed run (first point == last) stays closed."""
+    line = LineString(pts)
+    if count < 2 or line.length <= 0:
+        return [tuple(p) for p in pts]
+    return _even_points(pts, line.length / (count - 1))
+
+
+def resample_region(features, id_prop, name, tol=20.0, eps=0.5, max_drift=0.05):
+    """Even out the points around ONE region's whole outline without breaking
+    any of its borders -- Resample points in Edit points.
+
+    Every point of the outline is labelled by what it lies on: nothing (free
+    ground), one other region's edge, or several (a junction, where three
+    regions meet). The outline is cut wherever that label changes, and then:
+
+      * a stretch shared with one other region is re-pointed at even `tol`
+        spacing in BOTH regions, with the same point list, so the border stays
+        exactly coincident. That includes the coast a region shares with
+        hemi's outline. Skip this and resampling one region would open a
+        hairline gap along every neighbour -- exactly what Share borders fixes;
+      * a free stretch is re-pointed in this region only, and joins the shared
+        stretches at points that do not move;
+      * junction points, and the two ends of every stretch, never move -- so
+        regions that met at a point still meet there.
+
+    "Shared" means within `eps` (half a pixel): borders joined by Share borders
+    coincide exactly, and a looser tolerance reaches around corners and past
+    junctions -- tested, it clipped corners and dropped the point where three
+    regions meet. A border that only runs NEAR a neighbour is treated as free,
+    as it was never actually joined.
+
+    Conservative by design. A shared stretch is only re-pointed if the same
+    stretch is found in the neighbour's outline and replacing it there leaves
+    no old point behind; otherwise it is left as it was in both. A part whose
+    area would change by more than `max_drift`, or that would stop being one
+    valid polygon, is left exactly as it was (and reported in `kept`) -- and its
+    neighbours are not touched either. Holes are not resampled.
+
+    Returns {features, counts, tol, handles, kept}: the same shape as
+    resample_regions, with `handles` counting this region's own points and
+    `counts` listing every region that changed.
+    """
+    from shapely.geometry import MultiPolygon
+
+    idx = _index_all(features, id_prop)
+    name = str(name)
+    if name not in idx:
+        raise ValueError(f"region not found: {name!r}")
+    tol = float(tol)
+    if tol <= 0:
+        raise ValueError("resample spacing must be greater than zero")
+    swap_eps = eps * 1.5
+
+    out = json.loads(json.dumps(features))
+    body_before = _body(features, idx[name])
+    boundaries = _near_boundaries(features, idx, name, body_before, eps)
+    nb_names = sorted(boundaries)
+
+    kept = []
+    handles_before = handles_after = 0
+
+    for k in idx[name]:
+        parts = _polys(_geom_at(features, k))
+        rebuilt = []
+        for poly in parts:
+            holes = [list(r.coords) for r in poly.interiors]
+            coords = [tuple(c) for c in list(poly.exterior.coords)[:-1]]
+            n = len(coords)
+            handles_before += n
+            if n < 4:
+                rebuilt.append(poly)
+                handles_after += n
+                continue
+            labels = _point_labels(coords, boundaries, eps)
+            starts = [i for i in range(n) if labels[i] and labels[i] != labels[i - 1]]
+
+            if not starts:
+                if any(labels):
+                    # the whole outline lies on one other region's edge: there
+                    # is no free stretch to even out without moving that one
+                    rebuilt.append(poly)
+                    handles_after += n
+                    continue
+                # an island: nothing shared, even out the whole ring. Same rule
+                # as every other stretch -- even spacing, which ADDS points to a
+                # sparse outline as readily as it thins a dense one (the slider
+                # runs fine to coarse). _resample_line would only ever thin.
+                ring = [tuple(c) for c in _even_points(coords + [coords[0]], tol)]
+                cand = _single_polygon(ring, holes) if len(ring) >= 4 else None
+                if cand is None or not _area_drift_ok(cand, poly, max_drift):
+                    kept.append(name)
+                    rebuilt.append(poly)
+                    handles_after += n
+                else:
+                    rebuilt.append(cand)
+                    handles_after += len(ring) - 1
+                continue
+
+            # rotate so the outline starts where a shared stretch begins; then
+            # plain grouping gives every run, with no wrap-around to merge
+            order = list(range(starts[0], n)) + list(range(0, starts[0]))
+            groups = []
+            for i in order:
+                if groups and groups[-1]["label"] == labels[i]:
+                    groups[-1]["pts"].append(coords[i])
+                else:
+                    groups.append({"label": labels[i], "pts": [coords[i]]})
+
+            # pieces: consecutive ones share an end point, so the ring is their
+            # concatenation with that point dropped once
+            pieces = []
+            m = len(groups)
+            for gi, g in enumerate(groups):
+                nxt = groups[(gi + 1) % m]
+                if not g["label"]:
+                    seg = [groups[gi - 1]["pts"][-1]] + g["pts"] + [nxt["pts"][0]]
+                    pieces.append({"orig": seg, "new": _even_points(seg, tol), "with": None})
+                    continue
+                seg = g["pts"]
+                shared = g["label"][0] if len(g["label"]) == 1 and len(seg) >= 3 else None
+                pieces.append({"orig": seg,
+                               "new": _even_points(seg, tol) if shared else seg,
+                               "with": shared})
+                if nxt["label"]:
+                    link = [seg[-1], nxt["pts"][0]]
+                    pieces.append({"orig": link, "new": link, "with": None})
+
+            def ring_from(use):
+                ring = []
+                for pc, u in zip(pieces, use):
+                    pts = pc["new"] if u else pc["orig"]
+                    ring.extend(pts[1:] if ring else pts)
+                if ring[0] != ring[-1]:
+                    ring.append(ring[0])
+                return ring
+
+            use = [True] * len(pieces)
+            cand = _single_polygon(ring_from(use), holes)
+            if cand is None or not _area_drift_ok(cand, poly, max_drift):
+                kept.append(name)
+                rebuilt.append(poly)
+                handles_after += n
+                continue
+
+            # shared stretches: re-point the neighbour too, or not at all
+            undo = []
+            for pi, pc in enumerate(pieces):
+                if not pc["with"]:
+                    continue
+                rec = _swap_stretch(out, idx, pc["with"], pc["orig"], pc["new"],
+                                    swap_eps, max_drift)
+                if rec is None:
+                    use[pi] = False
+                else:
+                    undo.append(rec)
+            ring = ring_from(use)
+            cand = _single_polygon(ring, holes)
+            if cand is None or not _area_drift_ok(cand, poly, max_drift):
+                for kk, geom in reversed(undo):          # leave everyone as they were
+                    out[kk]["geometry"] = geom
+                kept.append(name)
+                rebuilt.append(poly)
+                handles_after += n
+                continue
+            rebuilt.append(cand)
+            handles_after += len(ring) - 1
+
+        if rebuilt:
+            ng = rebuilt[0] if len(rebuilt) == 1 else MultiPolygon(rebuilt)
+            out[k]["geometry"] = mapping(ng)
+
+    counts = []
+    after = _body(out, idx[name])
+    counts.append({"region": name,
+                   "before": _vertex_count(body_before),
+                   "after": _vertex_count(after),
+                   "areaDrift": round((after.area - body_before.area)
+                                      / max(body_before.area, 1e-9) * 100, 3)})
+    for nm in nb_names:
+        b0 = _body(features, idx[nm])
+        b1 = _body(out, idx[nm])
+        if _vertex_count(b0) != _vertex_count(b1) or abs(b1.area - b0.area) > 1e-6:
+            counts.append({"region": nm, "before": _vertex_count(b0),
+                           "after": _vertex_count(b1),
+                           "areaDrift": round((b1.area - b0.area)
+                                              / max(b0.area, 1e-9) * 100, 3),
+                           "shared": True})
+    return {"features": out, "counts": counts, "tol": tol,
+            "handles": {"before": handles_before, "after": handles_after},
+            "kept": sorted(set(kept))}
+
+
+def delete_point(features, id_prop, name, point, respace=True, eps=0.5,
+                 max_drift=0.05, grab=2.0):
+    """Delete one point from a region's outline without opening any border, and
+    re-space the rest of that stretch so no long gap is left where it was.
+
+    What the point lies on decides what happens:
+      * where several regions meet (a junction): refused -- deleting it would
+        pull them apart;
+      * on a border shared with ONE other region: deleted from BOTH, and the
+        rest of that shared stretch re-pointed evenly in both, one point fewer;
+      * the very end of a shared border (where it stops being shared): refused
+        -- removing it would move where the two regions part, and open a gap;
+      * on free ground: deleted from this region, and that free stretch --
+        between the two fixed points bounding it -- re-pointed evenly.
+
+    "Re-pointed evenly" keeps the stretch's end points and spaces the rest
+    along the new outline. If that would change the region's area by more than
+    `max_drift` compared with just deleting the point, the point is deleted and
+    the others are left where they were. A region never drops below a triangle.
+
+    Returns {features, removedFrom, respaced, stretch} or raises ValueError with
+    a sentence saying why nothing changed.
+    """
+    from shapely.geometry import MultiPolygon
+
+    idx = _index_all(features, id_prop)
+    name = str(name)
+    if name not in idx:
+        raise ValueError(f"region not found: {name!r}")
+    target = Point(float(point[0]), float(point[1]))
+    swap_eps = eps * 1.5
+
+    best = None                      # (distance, feature k, part pi, vertex v)
+    for k in idx[name]:
+        for pi, poly in enumerate(_polys(_geom_at(features, k))):
+            for v, c in enumerate(list(poly.exterior.coords)[:-1]):
+                d = target.distance(Point(c))
+                if best is None or d < best[0]:
+                    best = (d, k, pi, v)
+    if best is None or best[0] > grab:
+        raise ValueError(f"no point of {name}'s outline is there")
+    _, k, pi, v = best
+
+    parts = _polys(_geom_at(features, k))
+    poly = parts[pi]
+    holes = [list(r.coords) for r in poly.interiors]
+    coords = [tuple(c) for c in list(poly.exterior.coords)[:-1]]
+    n = len(coords)
+    if n <= 3:
+        raise ValueError(f"{name} needs at least 3 points, so that one stays")
+
+    body = _body(features, idx[name])
+    boundaries = _near_boundaries(features, idx, name, body, eps)
+    labels = _point_labels(coords, boundaries, eps)
+    here = labels[v]
+    if len(here) >= 2:
+        raise ValueError(f"that point is where {name} meets {' and '.join(here)} -- "
+                         "deleting it would pull them apart")
+    if here and all(lb == here for lb in labels):
+        raise ValueError(f"all of {name}'s outline lies on {here[0]}'s edge -- "
+                         "delete the point from that border in Edit shared borders")
+
+    out = json.loads(json.dumps(features))
+
+    def ring_with(pts_first, rest):
+        ring = list(pts_first) + list(rest)
+        if ring[0] != ring[-1]:
+            ring.append(ring[0])
+        return ring
+
+    if not any(labels):
+        # an island: the whole outline is one free stretch, closed
+        loop = coords[v + 1:] + coords[:v]
+        loop = loop + [loop[0]]
+        deleted = loop
+        spaced = _even_count(loop, len(loop)) if respace else loop
+        stretch = "outline"
+        with_nb, orig = None, None
+        ring_del, ring_new = deleted, spaced
+    else:
+        def run_bounds(label):
+            lo = v
+            while labels[(lo - 1) % n] == label and (lo - 1) % n != v:
+                lo = (lo - 1) % n
+            hi = v
+            while labels[(hi + 1) % n] == label and (hi + 1) % n != v:
+                hi = (hi + 1) % n
+            return lo, hi
+
+        def cyc(a, b):
+            """indices a..b inclusive, walking forward round the ring"""
+            out_i, i = [a], a
+            while i != b:
+                i = (i + 1) % n
+                out_i.append(i)
+            return out_i
+
+        lo, hi = run_bounds(here)
+        if here:
+            if v in (lo, hi):
+                raise ValueError(f"that point is where {name}'s border with {here[0]} ends "
+                                 "-- drag it instead, or delete one further along")
+            span = cyc(lo, hi)                   # the shared run, ends fixed
+            with_nb, stretch = here[0], f"border with {here[0]}"
+        else:
+            a, b = (lo - 1) % n, (hi + 1) % n        # the fixed points bounding the free run
+            if a == b:
+                # only ONE point of the outline touches anything: the free stretch
+                # runs from it all the way round and back to it
+                span = [a] + cyc((a + 1) % n, (a - 1) % n) + [a]
+            else:
+                span = cyc(a, b)                     # free run + its two fixed ends
+            with_nb, stretch = None, "free edge"
+        orig = [coords[i] for i in span]
+        kept_pts = [coords[i] for i in span if i != v]
+        spaced = _even_count(kept_pts, len(kept_pts)) if respace and len(kept_pts) >= 3 else kept_pts
+        rest = [coords[i] for i in range(n) if i not in set(span)]
+        # rest runs forward from just after the span's end back round to its start
+        after_end = cyc((span[-1] + 1) % n, (span[0] - 1) % n) if rest else []
+        rest = [coords[i] for i in after_end]
+        ring_del = ring_with(kept_pts, rest)
+        ring_new = ring_with(spaced, rest)
+
+    cand_del = _single_polygon(ring_del, holes)
+    if cand_del is None or len(ring_del) < 4:
+        raise ValueError("deleting that point would make the outline cross itself -- "
+                         "drag it instead")
+    cand, respaced = cand_del, False
+    pts_for_neighbour = kept_pts if with_nb else None
+    if respace:
+        cand_new = _single_polygon(ring_new, holes)
+        if cand_new is not None and _area_drift_ok(cand_new, cand_del, max_drift):
+            cand, respaced = cand_new, True
+            if with_nb:
+                pts_for_neighbour = spaced
+
+    removed_from = [name]
+    if with_nb:
+        # the neighbour loses the same point, and gets the same new points, or
+        # nothing happens at all -- a border half-edited is a border opened
+        rec = _swap_stretch(out, idx, with_nb, orig, pts_for_neighbour, swap_eps, 1.0)
+        if rec is None and respaced:
+            respaced, cand = False, cand_del
+            rec = _swap_stretch(out, idx, with_nb, orig, kept_pts, swap_eps, 1.0)
+        if rec is None:
+            raise ValueError(f"that point could not be deleted from {with_nb} as well, "
+                             "so it stays (their border would open) -- try Share borders "
+                             "on the two first")
+        removed_from.append(with_nb)
+
+    parts[pi] = cand
+    ng = parts[0] if len(parts) == 1 else MultiPolygon(parts)
+    out[k]["geometry"] = mapping(ng)
+    return {"features": out, "removedFrom": removed_from, "respaced": respaced,
+            "stretch": stretch}
+
+
 # ---- creating regions ---------------------------------------------------------
 
 
