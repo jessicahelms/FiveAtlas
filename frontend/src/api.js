@@ -159,6 +159,34 @@ export async function loadRegionsMulti(ds, paths) {
   return r.json();
 }
 
+// Save, choosing the file. With no `path` the native Save dialog opens (on the
+// machine running FiveAtlas). Returns the normal save result plus `exported`,
+// or { cancelled } / { refused, message, suggested } -- an original region file
+// is never overwritten, and nothing is written in that case.
+export async function saveRegionsAs(ds, fc, path = null) {
+  const r = await fetch(`${API}/datasets/${ds}/regions/save-as`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fc, path }),
+  });
+  if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+  return r.json();
+}
+
+// The file Save also writes, if Save as picked one: { path }.
+export async function getSaveTarget(ds) {
+  const r = await fetch(`${API}/datasets/${ds}/regions/save-target`);
+  if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+  return r.json();
+}
+
+// Stop writing to that file (the file itself is left alone).
+export async function forgetSaveTarget(ds) {
+  const r = await fetch(`${API}/datasets/${ds}/regions/save-target`, { method: 'DELETE' });
+  if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+  return r.json();
+}
+
 // Show a saved file in Explorer / Finder. The server only accepts files inside
 // the app's own working folder.
 export async function revealInFolder(path) {

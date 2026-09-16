@@ -8,6 +8,7 @@ so the webapp's edits are identical to their batch pipeline.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -71,6 +72,58 @@ def save_edited(ds_id: str, fc: dict) -> dict:
 
     return {"saved": str(ep), "version": str(vp),
             "versions": len(list(vdir.glob("regions_*.geojson")))}
+
+
+# ---- "Save as": the file the annotator chose to keep their regions in --------
+#
+# Remembered per dataset in the app's own folder, so every later Save updates
+# that same file. `written` is every file the app has EVER written this way.
+# It matters because the scanner reads any *.geojson in a dataset folder as a
+# region source: a file saved next to the originals would look like an
+# original the next time the dataset opens, and the originals guard would then
+# refuse the annotator's own file.
+
+def _target_record(ds_id: str) -> Path:
+    return ds.workdir_for(ds_id) / "save_target.json"
+
+
+def get_save_target(ds_id: str) -> dict:
+    try:
+        rec = json.load(open(_target_record(ds_id), encoding="utf-8"))
+    except Exception:
+        rec = {}
+    written = rec.get("written") if isinstance(rec.get("written"), list) else []
+    return {"path": rec.get("path") or None, "written": [str(w) for w in written]}
+
+
+def set_save_target(ds_id: str, path: str) -> dict:
+    rec = get_save_target(ds_id)
+    rec["path"] = str(path)
+    if str(path) not in rec["written"]:
+        rec["written"].append(str(path))
+    with open(_target_record(ds_id), "w", encoding="utf-8") as f:
+        json.dump(rec, f, indent=1)
+    return rec
+
+
+def clear_save_target(ds_id: str) -> dict:
+    rec = get_save_target(ds_id)
+    rec["path"] = None                   # `written` is kept: those stay ours
+    with open(_target_record(ds_id), "w", encoding="utf-8") as f:
+        json.dump(rec, f, indent=1)
+    return rec
+
+
+def write_geojson_atomic(path, fc: dict) -> None:
+    """Write via a temp file and a rename, so a network drive dropping out mid-
+    write leaves the previous file intact rather than a half-written one. The
+    temp name does not end in .geojson, so a scan never mistakes it for regions.
+    """
+    p = Path(path)
+    tmp = p.with_name(p.name + ".fiveatlas-tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(json.dumps(fc))
+    os.replace(tmp, p)
 
 
 def restore_original(ds_id: str) -> dict:

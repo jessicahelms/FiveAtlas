@@ -588,6 +588,10 @@ export default function App() {
   // used to go to the bottom of the sidebar, far off-screen, and named only the
   // snapshot file -- so a save looked like it had done nothing.
   const [saveResult, setSaveResult] = useState(null);
+  // The file Save as picked for this dataset, which every Save also updates.
+  const [saveTarget, setSaveTarget] = useState(null);
+  // "Point deleted" / "can't go below 3 points", shown under Edit points.
+  const [pointMsg, setPointMsg] = useState(null);
   const commit = useCallback((nextFc) => {
     fcRef.current = nextFc; setFc(nextFc); record(nextFc); setDirty(true);
   }, [record]);
@@ -1015,6 +1019,7 @@ export default function App() {
   }, []);
 
   const onToggleModify = useCallback(() => {
+    setPointMsg(null);
     setMode((m) => (m === 'modify' ? 'view' : 'modify'));
     clearBorder(); clearSplit(); clearGap(); clearDraw(); clearClean();
   }, [clearBorder, clearSplit, clearGap, clearDraw, clearClean]);
@@ -1717,7 +1722,7 @@ export default function App() {
       if (res.needsOverlapChoice) {
         setOverlapAsk({ coords, overlaps: res.overlaps || [], suggest: res.suggest, area: res.area });
         const who = (res.overlaps || []).map((o) => o.name).join(', ');
-        setDrawMsg(`That outline lands on ${who} — say how it should sit.`);
+        setDrawMsg(`That outline lands on ${who} — replace or overlap?`);
         return;
       }
       setOverlapAsk(null);
@@ -1935,7 +1940,9 @@ export default function App() {
     try {
       const r = await api.saveRegions(dsId, fc);
       setDirty(false);
-      setSaveResult({ path: r.saved, version: r.version, versions: r.versions });
+      setSaveResult({ path: r.saved, version: r.version, versions: r.versions,
+                      exported: r.exported, exportError: r.exportError });
+      if (r.saveTarget !== undefined) setSaveTarget(r.saveTarget || null);
       const stamped = r.version ? String(r.version).split(/[\\/]/).pop() : null;
       setSnapInfo((s) => ({
         ...(s || {}),
@@ -1945,6 +1952,41 @@ export default function App() {
       }));
     } catch (e) { setError(String(e)); } finally { setBusy(false); }
   }, [dsId, fc]);
+
+  // Save as: pick the file (or accept a suggested one), and later Saves update it.
+  // Outcomes are shown in the same panel under Save -- including the refusal
+  // for an original file, which must be seen, not tucked into the sidebar.
+  const doSaveAs = useCallback(async (path = null) => {
+    if (!dsId || !fc) return;
+    setBusy(true); setError(null);
+    try {
+      const r = await api.saveRegionsAs(dsId, fc, path);
+      if (r.cancelled) return;
+      if (r.refused) {
+        setSaveResult({ refused: true, message: r.message, suggested: r.suggested });
+        return;
+      }
+      setDirty(false);
+      setSaveResult({ path: r.saved, version: r.version, versions: r.versions,
+                      exported: r.exported, exportError: r.exportError,
+                      originalFrame: r.originalFrame });
+      setSaveTarget(r.saveTarget || null);
+    } catch (e) {
+      setSaveResult({ failed: true, message: apiDetail(e) });
+    } finally { setBusy(false); }
+  }, [dsId, fc]);
+
+  const doForgetSaveTarget = useCallback(async () => {
+    if (!dsId) return;
+    try { await api.forgetSaveTarget(dsId); setSaveTarget(null); }
+    catch (e) { setSaveResult({ failed: true, message: apiDetail(e) }); }
+  }, [dsId]);
+
+  useEffect(() => {
+    setSaveTarget(null);
+    if (!dsId) return;
+    api.getSaveTarget(dsId).then((r) => setSaveTarget(r.path || null)).catch(() => {});
+  }, [dsId]);
 
   const doRestoreOriginal = useCallback(async () => {
     setBusy(true); setError(null);
@@ -2277,6 +2319,7 @@ export default function App() {
         onOpenFolder={openFolder} onOpenPath={loadOpened} busy={dsBusy}
         canSave={!!(dsId && fc)} dirty={dirty} busySave={busy}
         onSave={doSave} onReset={doReset}
+        onSaveAs={doSaveAs} saveTarget={saveTarget} onForgetSaveTarget={doForgetSaveTarget}
         saveResult={saveResult} onDismissSave={() => setSaveResult(null)}
         onRevealSave={(p) => api.revealInFolder(p).catch((e) => setError(apiDetail(e)))}
         onUndo={undo} onRedo={redo} canUndo={canUndo} canRedo={canRedo}
@@ -2399,6 +2442,7 @@ export default function App() {
                   applySelect(i, mods);
                 }}
                 onDeleteSelected={deleteSelectedRegions}
+                pointMsg={pointMsg}
                 overlapAsk={overlapAsk} onAnswerOverlap={answerOverlap}
                 onToggleTranslate={onToggleTranslate}
                 mode={mode}
@@ -2511,6 +2555,8 @@ export default function App() {
                 cleanPreview={cleanFound && cleanFound.res.freed}
                 gapPreview={gapFind && gapFind.gap} onPickGap={onPickGap}
                 propRing={propRing} onRegionMenu={openRegionMenu}
+                onPointDeleted={() => setPointMsg('Point deleted — Ctrl+Z brings it back.')}
+                onPointRefused={() => setPointMsg('A region needs at least 3 points, so that one stays.')}
                 onGrabVertex={onGrabVertex} onReleaseDrag={onReleaseDrag}
                 geneBitmap={geneBitmap} geneBounds={geneBounds} geneMode={geneMode}
                 stainInfo={stainInfo} stainChannels={stainChannels}

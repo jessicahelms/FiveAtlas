@@ -28,6 +28,7 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 
 import cachefs
 import config
@@ -225,7 +226,7 @@ def _last_folder():
     return ""
 
 
-def _picker_cmd(kind: str):
+def _picker_cmd(kind: str, initial: str = "", name: str = ""):
     """(argv, env) for spawning the picker.
 
     Frozen, sys.executable IS this app and nativedialog.py is not a file on disk,
@@ -237,27 +238,283 @@ def _picker_cmd(kind: str):
     goes through the environment as well, and ATLAS_CHILD marks the process as a
     helper that must never serve no matter what it does or does not parse.
     """
-    initial = _last_folder()
+    initial = initial or _last_folder()
     env = dict(os.environ)
     env["ATLAS_CHILD"] = "1"
     env["ATLAS_PICK_KIND"] = kind
     env["ATLAS_PICK_INITIAL"] = initial
+    env["ATLAS_PICK_NAME"] = name or ""
     if config.FROZEN:
-        return [sys.executable, "--pick", kind, initial], env
-    return [sys.executable, _DIALOG_SCRIPT, kind, initial], env
+        return [sys.executable, "--pick", kind, initial, name or ""], env
+    return [sys.executable, _DIALOG_SCRIPT, kind, initial, name or ""], env
 
 
-def _run_picker(kind: str) -> str:
+def _run_picker(kind: str, initial: str = "", name: str = "") -> str:
     """Spawn the picker in its own process so a modal dialog never blocks uvicorn."""
-    if kind not in ("folder", "file"):
+    if kind not in ("folder", "file", "save"):
         raise HTTPException(400, f"bad picker kind {kind!r}")
-    argv, env = _picker_cmd(kind)
+    argv, env = _picker_cmd(kind, initial, name)
     try:
         res = subprocess.run(argv, capture_output=True, text=True, timeout=600, env=env)
     except Exception as e:
         raise HTTPException(500, f"browse failed: {e}")
     lines = [ln for ln in (res.stdout or "").splitlines() if ln.strip()]
     return lines[-1].strip() if lines else ""
+
+
+def _same_file(a, b) -> bool:
+    """Whether two paths name the same file.
+
+    String comparison is not enough here, and getting it wrong would overwrite
+    a shared original: a mapped drive and its UNC form (S:\\... vs
+    \\\\server\\share\\...) spell one file two ways, and so do case and
+    8.3 short names on Windows. When both exist the filesystem answers
+    (samefile compares volume and file id); otherwise normalised strings.
+    """
+    try:
+        if os.path.exists(a) and os.path.exists(b):
+            return os.path.samefile(a, b)
+    except OSError:
+        pass
+    def keys(p):
+        out = {os.path.normcase(os.path.abspath(str(p)))}
+        try:
+            out.add(os.path.normcase(str(Path(p).resolve())))
+        except Exception:
+            pass
+        return out
+    return bool(keys(a) & keys(b))
+
+
+def _why_not_written(path, e) -> str:
+    """What to tell the annotator when a Save-as file could not be written --
+    in words, and about THEIR file, not the temp file the write goes through."""
+    if isinstance(e, FileNotFoundError):
+        why = "that folder can't be found (is the drive connected?)"
+    elif isinstance(e, PermissionError):
+        why = "there is no permission to write there"
+    elif isinstance(e, OSError) and e.strerror:
+        why = e.strerror
+    else:
+        why = f"{type(e).__name__}: {e}"
+    return f"Could not write {path}: {why}."
+
+
+def _is_original(ds_id: str, path) -> bool:
+    """A region file the dataset itself was scanned from -- a shared original
+    that Save as must never overwrite -- unless the app wrote it itself."""
+    try:
+        d = ds.get_dataset(ds_id)
+    except KeyError:
+        return False
+    written = geo.get_save_target(ds_id)["written"]
+    if any(_same_file(path, w) for w in written):
+        return False
+    return any(_same_file(path, r.get("path"))
+               for r in (d.get("sources", {}).get("regions") or []) if r.get("path"))
+
+
+def _suggest_new_name(ds_id: str, path) -> str:
+    """A name beside `path` that is neither an original nor someone else's file:
+    merged.regions.geojson -> merged.regions_edited.geojson (then _edited_2...).
+    It is written without a dialog, so it must not already exist unless the app
+    wrote it."""
+    p = Path(path)
+    stem = p.name[:-len(".geojson")] if p.name.lower().endswith(".geojson") else p.stem
+    written = geo.get_save_target(ds_id)["written"]
+    for n in range(1, 1000):
+        cand = p.with_name(f"{stem}_edited{'' if n == 1 else '_' + str(n)}.geojson")
+        mine = any(_same_file(cand, w) for w in written)
+        if not _is_original(ds_id, cand) and (not cand.exists() or mine):
+            return str(cand)
+    raise HTTPException(500, "could not find a free file name")
+
+
+def _in_original_frame(ds_id: str, fc: dict) -> dict:
+    """The regions in the coordinates the dataset's own files use.
+
+    The working copy is kept as displayed, rotation and flips included. A file
+    that sits next to the prediction GeoJSONs, or is opened in another tool,
+    has to line up with them and with the image, so it is turned back into
+    the original frame; the original frame is unrotated by definition, so the
+    `_orientation` marker is dropped.
+    """
+    feats = fc.get("features", [])
+    o = ORI.normalise(fc.get("_orientation") or ORI.get(ds_id))
+    if not ORI.is_identity(o):
+        try:
+            p = pyramid(ds_id)
+            W0, H0 = p.info()["width"], p.info()["height"]
+        except Exception:
+            w, h = _regions_extent(fc)
+            W0, H0 = ORI.out_size(w, h, ORI.invert(o))
+        dw, dh = ORI.out_size(W0, H0, o)
+        feats = ORI.transform_features(feats, ORI.invert(o), dw, dh)
+    out = {**fc, "features": feats}
+    out.pop("_orientation", None)
+    return out
+
+
+def _regions_from_body(body):
+    """(fc, actions) from a save body: the FeatureCollection itself (the original
+    contract) or {fc, actions}, where `actions` are edits the client made without
+    a round trip -- renames, colour changes, deletions, dragged points. They have
+    no endpoint to stamp them, so they are recorded at the save that commits them.
+
+    Refuses anything that is not a FeatureCollection. Without this, a body of
+    null/{}/[] resolved to fc={} and was written straight over the working copy:
+    the frontend sets fc=null while a dataset loads and the Save button is live
+    during that window, so switching datasets and clicking Save too early
+    silently replaced that dataset's edits with an empty file."""
+    if isinstance(body, dict) and body.get("type") == "FeatureCollection":
+        fc, actions = body, []
+    else:
+        fc = (body or {}).get("fc") or {}
+        actions = (body or {}).get("actions") or []
+    if not isinstance(fc, dict) or not isinstance(fc.get("features"), list):
+        raise HTTPException(
+            400, "expected a FeatureCollection (or {fc, actions}) with a "
+                 "'features' list; refusing to overwrite the working copy")
+    return fc, actions
+
+
+def _commit_save(ds_id: str, fc: dict, actions) -> dict:
+    """Stamp and write the working copy (plus its snapshot), then -- if the
+    annotator chose a file with Save as -- write that too.
+
+    The working copy always comes first and always stands: a Save-as file that
+    cannot be written (drive offline, no permission) is reported back, never
+    allowed to lose the edits."""
+    for a in actions if isinstance(actions, list) else []:
+        if isinstance(a, dict) and a.get("action"):
+            provenance.stamp(fc, a["action"], a.get("detail"), a.get("regions"))
+    provenance.stamp(fc, "save", f"{len(fc.get('features', []))} regions")
+    res = geo.save_edited(ds_id, fc)
+    out = {"saved": res["saved"], "version": res["version"],
+           "versions": res["versions"], "features": len(fc.get("features", [])),
+           "provenance": provenance.trail(fc),
+           "exported": None, "exportError": None}
+    target = geo.get_save_target(ds_id)["path"]
+    if target:
+        if _is_original(ds_id, target):
+            out["exportError"] = (f"{target} is one of the dataset's original region "
+                                  "files, which are never overwritten -- use Save as "
+                                  "to pick another file")
+        else:
+            try:
+                geo.write_geojson_atomic(target, _in_original_frame(ds_id, fc))
+                out["exported"] = target
+            except Exception as e:
+                out["exportError"] = (_why_not_written(target, e)
+                                      + " Your work IS saved in the app's own folder.")
+    out["saveTarget"] = target
+    return out
+
+
+@app.post("/api/datasets/{ds_id}/regions/save-as")
+async def regions_save_as(ds_id: str, request: Request):
+    """Save, choosing the file. Body: {fc, actions?, path?}.
+
+    With no `path` the native Save dialog opens, starting beside the file chosen
+    last time (else in the dataset's folder). The chosen file is remembered, so
+    later clicks on Save update it too; the app's own working copy and snapshots
+    are still written every time, as the backup.
+
+    The dataset's original region files are never overwritten -- they are the
+    shared predictions everyone else uses. Choosing one returns
+    {refused, message, suggested}: a free name beside it, and nothing written.
+    """
+    try:
+        d = ds.get_dataset(ds_id)
+    except KeyError:
+        raise HTTPException(404, "unknown dataset")
+    body = await request.json()
+    fc, actions = _regions_from_body(body)
+
+    path = (body or {}).get("path")
+    if not path:
+        current = geo.get_save_target(ds_id)["path"]
+        if current:
+            start, name = str(Path(current).parent), Path(current).name
+        else:
+            primary = scan.primary_regions_path(d)
+            start = str(Path(d["root"])) if d.get("root") else ""
+            name = (Path(primary).name[:-len(".geojson")] + "_edited.geojson"
+                    if primary and str(primary).lower().endswith(".geojson")
+                    else f"{ds_id}_regions.geojson")
+        # a modal dialog can sit open for minutes: keep it off the event loop, or
+        # every tile request queues behind it
+        path = await run_in_threadpool(_run_picker, "save", start, name)
+        if not path:
+            return {"cancelled": True}
+    path = str(path)
+    if not path.lower().endswith(".geojson"):
+        path += ".geojson"
+    if not os.path.isabs(path):
+        raise HTTPException(400, "need an absolute path")
+
+    if _is_original(ds_id, path):
+        return {"refused": True, "chosen": path,
+                "suggested": _suggest_new_name(ds_id, path),
+                "message": (f"{Path(path).name} is one of this dataset's original "
+                            "region files. It is never overwritten, so everyone keeps "
+                            "the original prediction.")}
+
+    # Remember the file only once it has actually been written: a location that
+    # cannot be written would otherwise turn every later Save into an error.
+    previous = geo.get_save_target(ds_id)["path"]
+    geo.clear_save_target(ds_id)          # this save writes only the new choice
+    out = _commit_save(ds_id, fc, actions)
+    try:
+        geo.write_geojson_atomic(path, _in_original_frame(ds_id, fc))
+    except Exception as e:
+        if previous:                       # a bad new choice must not lose the old one
+            geo.set_save_target(ds_id, previous)
+        out["exportError"] = (_why_not_written(path, e)
+                              + " Your work IS saved in the app's own folder.")
+        out["exported"] = None
+        out["saveTarget"] = previous
+        return out
+    geo.set_save_target(ds_id, path)
+    out["exported"] = path
+    out["saveTarget"] = path
+    o = ORI.normalise(fc.get("_orientation") or ORI.get(ds_id))
+    out["originalFrame"] = not ORI.is_identity(o)
+    return out
+
+
+@app.get("/api/datasets/{ds_id}/regions/save-target")
+def get_save_target(ds_id: str):
+    try:
+        ds.get_dataset(ds_id)
+    except KeyError:
+        raise HTTPException(404, "unknown dataset")
+    return {"path": geo.get_save_target(ds_id)["path"]}
+
+
+@app.delete("/api/datasets/{ds_id}/regions/save-target")
+def forget_save_target(ds_id: str):
+    """Stop writing to the Save-as file. The file itself is left alone."""
+    try:
+        ds.get_dataset(ds_id)
+    except KeyError:
+        raise HTTPException(404, "unknown dataset")
+    geo.clear_save_target(ds_id)
+    return {"path": None}
+
+
+def _revealable(p: Path) -> bool:
+    """Inside the app's working folder, or a file this app itself wrote with
+    Save as. Never an arbitrary location."""
+    try:
+        p.relative_to(Path(config.WORKDIR).resolve())
+        return True
+    except ValueError:
+        pass
+    for did in list(ds._REGISTRY):
+        if any(_same_file(p, w) for w in geo.get_save_target(did)["written"]):
+            return True
+    return False
 
 
 @app.post("/api/reveal")
@@ -268,8 +525,9 @@ async def reveal(request: Request):
     folder, which sits under AppData on Windows and ~/Library on a Mac -- both
     hidden by default, so pointing at them in words was not enough.
 
-    Only paths inside that working folder are accepted: the page asks to show
-    its own save, never an arbitrary location on the machine.
+    Only paths inside that working folder, or files this app wrote with Save
+    as, are accepted: the page asks to show its own save, never an arbitrary
+    location on the machine.
     """
     body = await request.json()
     raw = (body or {}).get("path")
@@ -277,9 +535,10 @@ async def reveal(request: Request):
         raise HTTPException(400, "need 'path'")
     try:
         p = Path(str(raw)).resolve()
-        p.relative_to(Path(config.WORKDIR).resolve())
     except Exception:
-        raise HTTPException(403, "only files inside the FiveAtlas working folder can be shown")
+        raise HTTPException(400, "not a usable path")
+    if not _revealable(p):
+        raise HTTPException(403, "only files FiveAtlas saved can be shown")
     if not p.exists():
         raise HTTPException(404, f"not found: {p}")
     try:
@@ -485,32 +744,8 @@ async def put_regions(ds_id: str, request: Request):
     except KeyError:
         raise HTTPException(404, "unknown dataset")
     body = await request.json()
-    # Body is the FeatureCollection itself (original contract), or {fc, actions}
-    # where `actions` are the edits the client made without a round trip --
-    # renames, colour changes, deletions, dragged points. They have no endpoint
-    # to stamp them, so they are recorded here, at the save that commits them.
-    if isinstance(body, dict) and body.get("type") == "FeatureCollection":
-        fc, actions = body, []
-    else:
-        fc = (body or {}).get("fc") or {}
-        actions = (body or {}).get("actions") or []
-    # Refuse to save something that is not a FeatureCollection. Without this, a
-    # body of null/{}/[] resolved to fc={} and was written straight over the
-    # working copy: the frontend sets fc=null while a dataset loads and the Save
-    # button is live during that window, so switching datasets and clicking Save
-    # too early silently replaced that dataset's edits with an empty file.
-    if not isinstance(fc, dict) or not isinstance(fc.get("features"), list):
-        raise HTTPException(
-            400, "expected a FeatureCollection (or {fc, actions}) with a "
-                 "'features' list; refusing to overwrite the working copy")
-    for a in actions if isinstance(actions, list) else []:
-        if isinstance(a, dict) and a.get("action"):
-            provenance.stamp(fc, a["action"], a.get("detail"), a.get("regions"))
-    provenance.stamp(fc, "save", f"{len(fc.get('features', []))} regions")
-    res = geo.save_edited(ds_id, fc)
-    return {"saved": res["saved"], "version": res["version"],
-            "versions": res["versions"], "features": len(fc.get("features", [])),
-            "provenance": provenance.trail(fc)}
+    fc, actions = _regions_from_body(body)
+    return _commit_save(ds_id, fc, actions)
 
 
 @app.post("/api/datasets/{ds_id}/regions/restore-original")
@@ -1768,17 +2003,8 @@ async def regions_export(ds_id: str, request: Request):
     frame = "original" if str((body or {}).get("frame") or "").lower() == "original" \
             else "displayed"
     if frame == "original":
-        if not ORI.is_identity(o):
-            try:
-                p = pyramid(ds_id)
-                W0, H0 = p.info()["width"], p.info()["height"]
-            except Exception:
-                w, h = _regions_extent(fc)
-                W0, H0 = ORI.out_size(w, h, ORI.invert(o))
-            dw, dh = ORI.out_size(W0, H0, o)
-            feats = ORI.transform_features(feats, ORI.invert(o), dw, dh)
-        fc = {**fc, "features": feats}
-        fc.pop("_orientation", None)
+        fc = _in_original_frame(ds_id, fc)
+        feats = fc["features"]
     else:
         # A client can post an fc that never carried the marker -- the frame is
         # still rotated, so say so, or the recipient has no way to know.

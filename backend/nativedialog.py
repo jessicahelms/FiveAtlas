@@ -18,6 +18,7 @@ Run as a script so it can be spawned in its own process and never fight uvicorn:
 
     python nativedialog.py folder [initial_dir]
     python nativedialog.py file   [initial_dir]
+    python nativedialog.py save   [initial_dir] [default_name]
 
 It prints the chosen path on the last stdout line, or nothing if cancelled.
 """
@@ -29,6 +30,8 @@ from pathlib import Path
 # ---- COM plumbing (ctypes; no third-party dependency) ------------------------
 CLSID_FileOpenDialog = "{DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7}"
 IID_IFileOpenDialog = "{D57C7288-D4AD-4768-BE02-9D969532D960}"
+CLSID_FileSaveDialog = "{C0B4E2F3-BA21-4773-8DBA-335EC946EB8B}"
+IID_IFileSaveDialog = "{84BCCD23-5FDE-4CDB-AEA4-AF64B83D78AB}"
 IID_IShellItem = "{43826D1E-E718-42EE-BC55-A1E261C37BFE}"
 
 CLSCTX_INPROC_SERVER = 1
@@ -39,6 +42,7 @@ FOS_FORCEFILESYSTEM = 0x00000040
 FOS_PATHMUSTEXIST = 0x00000800
 FOS_FILEMUSTEXIST = 0x00001000
 FOS_NOCHANGEDIR = 0x00000008
+FOS_OVERWRITEPROMPT = 0x00000002
 
 # IFileDialog vtable slots (IUnknown 0-2, IModalWindow 3, then IFileDialog)
 _SHOW = 3
@@ -46,16 +50,21 @@ _SET_FILE_TYPES = 4
 _SET_OPTIONS = 9
 _GET_OPTIONS = 10
 _SET_FOLDER = 12
+_SET_FILE_NAME = 15
 _SET_TITLE = 17
+_SET_DEFAULT_EXTENSION = 22
 _GET_RESULT = 20
 _RELEASE = 2
 # IShellItem
 _SI_GET_DISPLAY_NAME = 5
 
 
-def _pick_com(kind, initial=None, title=None):
+def _pick_com(kind, initial=None, title=None, name=None):
     """Show the modern Common Item Dialog. Returns a path, or '' if cancelled.
-    Raises if COM isn't usable, so the caller can fall back."""
+    Raises if COM isn't usable, so the caller can fall back.
+
+    kind "save" is the same dialog family in its Save shape: it takes a file
+    name, restricts to .geojson, and asks before replacing an existing file."""
     import ctypes
     from ctypes import POINTER, byref, c_void_p, c_wchar_p, c_uint32, c_int
 
@@ -76,20 +85,38 @@ def _pick_com(kind, initial=None, title=None):
         proto = ctypes.WINFUNCTYPE(restype, c_void_p, *argtypes)
         return proto(vtbl[slot])(ptr, *args)
 
+    saving = kind == "save"
     ole32.CoInitialize(None)
     dialog = c_void_p()
-    ole32.CoCreateInstance(byref(guid(CLSID_FileOpenDialog)), None,
-                           CLSCTX_INPROC_SERVER, byref(guid(IID_IFileOpenDialog)),
-                           byref(dialog))
+    ole32.CoCreateInstance(
+        byref(guid(CLSID_FileSaveDialog if saving else CLSID_FileOpenDialog)), None,
+        CLSCTX_INPROC_SERVER,
+        byref(guid(IID_IFileSaveDialog if saving else IID_IFileOpenDialog)),
+        byref(dialog))
     try:
         opts = c_uint32()
         vcall(dialog, _GET_OPTIONS, ctypes.HRESULT, [POINTER(c_uint32)], byref(opts))
         flags = opts.value | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_NOCHANGEDIR
-        flags |= FOS_PICKFOLDERS if kind == "folder" else FOS_FILEMUSTEXIST
+        if saving:
+            flags |= FOS_OVERWRITEPROMPT
+        else:
+            flags |= FOS_PICKFOLDERS if kind == "folder" else FOS_FILEMUSTEXIST
         vcall(dialog, _SET_OPTIONS, ctypes.HRESULT, [c_uint32], flags)
 
         if title:
             vcall(dialog, _SET_TITLE, ctypes.HRESULT, [c_wchar_p], c_wchar_p(title))
+
+        if saving:
+            class FILTERSPEC(ctypes.Structure):
+                _fields_ = [("pszName", c_wchar_p), ("pszSpec", c_wchar_p)]
+            specs = (FILTERSPEC * 1)(FILTERSPEC("GeoJSON regions (*.geojson)", "*.geojson"))
+            vcall(dialog, _SET_FILE_TYPES, ctypes.HRESULT,
+                  [c_uint32, POINTER(FILTERSPEC)], 1, specs)
+            vcall(dialog, _SET_DEFAULT_EXTENSION, ctypes.HRESULT, [c_wchar_p],
+                  c_wchar_p("geojson"))
+            if name:
+                vcall(dialog, _SET_FILE_NAME, ctypes.HRESULT, [c_wchar_p],
+                      c_wchar_p(str(name)))
 
         # Opening straight in the last-used folder is most of the speed win: the
         # dialog never has to enumerate This PC (and any dead network drives).
@@ -112,12 +139,12 @@ def _pick_com(kind, initial=None, title=None):
         result = c_void_p()
         vcall(dialog, _GET_RESULT, ctypes.HRESULT, [POINTER(c_void_p)], byref(result))
         try:
-            name = c_wchar_p()
+            chosen = c_wchar_p()
             vcall(result, _SI_GET_DISPLAY_NAME, ctypes.HRESULT,
-                  [c_int, POINTER(c_wchar_p)], SIGDN_FILESYSPATH, byref(name))
-            path = name.value or ""
-            if name:
-                ctypes.windll.ole32.CoTaskMemFree(name)
+                  [c_int, POINTER(c_wchar_p)], SIGDN_FILESYSPATH, byref(chosen))
+            path = chosen.value or ""
+            if chosen:
+                ctypes.windll.ole32.CoTaskMemFree(chosen)
             return path
         finally:
             vcall(result, _RELEASE, ctypes.c_ulong, [])
@@ -130,7 +157,7 @@ def _as_str(s):
     return '"' + str(s).replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def _pick_mac(kind, initial=None, title=None):
+def _pick_mac(kind, initial=None, title=None, name=None):
     """Native Cocoa picker on macOS, driven through osascript.
 
     Preferred over tkinter here for two reasons: a Homebrew/pyenv Python often
@@ -141,9 +168,13 @@ def _pick_mac(kind, initial=None, title=None):
     """
     import subprocess
 
-    verb = "choose folder" if kind == "folder" else "choose file"
+    verb = {"folder": "choose folder", "save": "choose file name"}.get(kind, "choose file")
     parts = [verb, "with prompt", _as_str(title or "Select")]
-    if kind != "folder":
+    if kind == "save":
+        # `choose file name` is the Save panel; it asks before replacing a file.
+        if name:
+            parts += ["default name", _as_str(name)]
+    elif kind != "folder":
         # UTIs rather than extensions: "public.json" covers .json, and .geojson is
         # not a registered type on every macOS version, so allow plain text too.
         parts += ['of type {"public.json", "public.comma-separated-values-text", "public.plain-text", "public.data"}']
@@ -173,10 +204,12 @@ def _pick_mac(kind, initial=None, title=None):
     # `POSIX path of` puts a trailing slash on folders; the rest of the app is
     # happy either way, but strip it so paths compare equal to what scan.py stores.
     out = (res.stdout or "").strip()
+    if kind == "save" and out and not out.lower().endswith(".geojson"):
+        out += ".geojson"
     return out.rstrip("/") if kind == "folder" and out != "/" else out
 
 
-def _pick_tk(kind, initial=None, title=None):
+def _pick_tk(kind, initial=None, title=None, name=None):
     """Legacy fallback. Slow with network drives, but always available."""
     import tkinter as tk
     from tkinter import filedialog
@@ -188,31 +221,42 @@ def _pick_tk(kind, initial=None, title=None):
         kw["initialdir"] = str(initial)
     if kind == "folder":
         return filedialog.askdirectory(**kw) or ""
+    if kind == "save":
+        return filedialog.asksaveasfilename(
+            defaultextension=".geojson", initialfile=name or "",
+            filetypes=[("GeoJSON regions", "*.geojson")], **kw) or ""
     return filedialog.askopenfilename(
         filetypes=[("Regions (GeoJSON / CSV)", "*.geojson *.json *.csv *.tsv"),
                    ("All files", "*.*")], **kw) or ""
 
 
-def pick(kind="folder", initial=None, title=None):
-    """Pick a folder or a file. Modern dialog where possible, tkinter otherwise."""
+def pick(kind="folder", initial=None, title=None, name=None):
+    """Pick a folder, a file to open, or ("save") where to write a file.
+    Modern dialog where possible, tkinter otherwise."""
     if sys.platform == "win32":
         try:
-            return _pick_com(kind, initial, title)
+            return _pick_com(kind, initial, title, name)
         except Exception as e:                     # COM unavailable/misbehaving
             print(f"[nativedialog] COM picker unavailable ({e}); using tkinter",
                   file=sys.stderr)
     elif sys.platform == "darwin":
         try:
-            return _pick_mac(kind, initial, title)
+            return _pick_mac(kind, initial, title, name)
         except Exception as e:                     # osascript missing/refused
             print(f"[nativedialog] osascript picker unavailable ({e}); using tkinter",
                   file=sys.stderr)
-    return _pick_tk(kind, initial, title)
+    return _pick_tk(kind, initial, title, name)
+
+
+TITLES = {
+    "folder": "Select dataset folder",
+    "file": "Select a region file (GeoJSON or CSV)",
+    "save": "Save regions as",
+}
 
 
 if __name__ == "__main__":
     which = sys.argv[1] if len(sys.argv) > 1 else "folder"
     start = sys.argv[2] if len(sys.argv) > 2 else None
-    heading = ("Select dataset folder" if which == "folder"
-               else "Select a region file (GeoJSON or CSV)")
-    print(pick(which, start or None, heading))
+    default_name = sys.argv[3] if len(sys.argv) > 3 else None
+    print(pick(which, start or None, TITLES.get(which, "Select"), default_name or None))

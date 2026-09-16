@@ -35,6 +35,13 @@ body {
   word-break: break-all; user-select: all;
 }
 .savetoast-note { color: #8b95a4; margin-bottom: 8px; line-height: 1.4; }
+.savetoast.warn { border-color: #b8892a; }
+.savetoast.warn .savetoast-head { color: #ffcf4d; }
+/* which file Save writes, when Save as has chosen one */
+.dsbar-target {
+  font-size: 12px; color: #7fd49a; max-width: 240px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .dsbar-dirty { font-size: 12px; color: #ffcf4d; white-space: nowrap; }
 .dsbar-clean { font-size: 12px; color: #6b7482; white-space: nowrap; }
 .btn.sm { width: auto; margin: 0; padding: 6px 10px; white-space: nowrap; }

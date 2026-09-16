@@ -8,6 +8,7 @@ Usage:
     FiveAtlas                         start the app
     FiveAtlas --pick folder DIR       show the folder picker, print the choice
     FiveAtlas --pick file   DIR       show the file picker, print the choice
+    FiveAtlas --pick save   DIR NAME  show the Save dialog, print the choice
 
 The --pick mode exists because a modal dialog must not run inside the server
 process, and once frozen `sys.executable` is this exe rather than a Python
@@ -169,9 +170,11 @@ def _run_picker_mode() -> bool:
     if len(sys.argv) >= 3 and sys.argv[1] == "--pick":
         kind = sys.argv[2]
         initial = sys.argv[3] if len(sys.argv) > 3 else None
+        name = sys.argv[4] if len(sys.argv) > 4 else None
     elif os.environ.get("ATLAS_PICK_KIND"):
         kind = os.environ["ATLAS_PICK_KIND"]
         initial = os.environ.get("ATLAS_PICK_INITIAL") or None
+        name = os.environ.get("ATLAS_PICK_NAME") or None
     else:
         return False
 
@@ -179,13 +182,13 @@ def _run_picker_mode() -> bool:
     # Anything that is not "folder" used to fall through to the *file* picker,
     # so a typo silently opened a modal dialog and blocked until someone closed
     # it -- which on a headless machine is never. Refuse instead.
-    if kind not in ("folder", "file"):
-        print(f"[picker] unknown kind {kind!r}; expected 'folder' or 'file'",
+    if kind not in ("folder", "file", "save"):
+        print(f"[picker] unknown kind {kind!r}; expected 'folder', 'file' or 'save'",
               file=sys.stderr)
         return True
-    title = "Select dataset folder" if kind == "folder" else "Select a region file (GeoJSON or CSV)"
+    title = nativedialog.TITLES.get(kind, "Select")
     try:
-        print(nativedialog.pick(kind, initial or None, title))
+        print(nativedialog.pick(kind, initial or None, title, name or None))
     except Exception as e:
         print("", file=sys.stdout)
         print(f"[picker] {e}", file=sys.stderr)

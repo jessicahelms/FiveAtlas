@@ -16,8 +16,12 @@ import {
   DrawPolygonMode,
   DrawPolygonByDraggingMode,
 } from '@deck.gl-community/editable-layers';
+import { PointEditMode, existingPointProps, deletePointAt } from './pointEditMode';
 
-const MODES = { view: ViewMode, modify: ModifyMode, translate: TranslateMode };
+// Edit points uses PointEditMode: a plain click on a point never deletes it,
+// a right-click does (see handleContextMenu). The shared-border editor below
+// keeps the library's ModifyMode.
+const MODES = { view: ViewMode, modify: PointEditMode, translate: TranslateMode };
 
 // deck delivers a right-click to the mode as an ordinary click, so without this
 // check the right button ADDS A POINT before (or after) the shape is finished.
@@ -170,7 +174,7 @@ export default function Viewer({
   drawPoly, onDrawEdit,
   cleanPoly, onCleanEdit, cleanPreview,
   gapPreview, onPickGap,
-  propRing, onRegionMenu,
+  propRing, onRegionMenu, onPointDeleted, onPointRefused,
   onGrabVertex, onReleaseDrag,
   geneBitmap, geneBounds, geneMode, stainInfo, stainChannels, layers, regionsOff,
   bordersOff, fillsOff,
@@ -599,6 +603,22 @@ export default function Viewer({
         const coord = (pick && pick.coordinate)
           || (viewport && viewport.unproject([x - viewport.x, y - viewport.y]));
         if (coord) onAddBorderPoint([coord[0], coord[1]], pickedFeatureIndex(pick));
+        return;
+      }
+    }
+
+    // Edit points: right-click a point to delete it. Picked with a radius a
+    // little larger than the handle, so it does not take pixel-perfect aim.
+    if (mode === 'modify' && onEdit) {
+      const near = deck.pickObject({ x, y, radius: 10 });
+      const pr = near && existingPointProps(near.object);
+      if (pr) {
+        e.preventDefault();                // and no browser menu over the point
+        const res = deletePointAt(fc, pr);
+        if (res.refused) { if (onPointRefused) onPointRefused(); return; }
+        onEdit({ updatedData: res.updatedData, editType: 'removePosition',
+                 editContext: res.editContext });
+        if (onPointDeleted) onPointDeleted();
         return;
       }
     }

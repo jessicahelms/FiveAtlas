@@ -8,7 +8,7 @@ function displayName(feature, idProp) {
 }
 
 export default function Sidebar({
-  info, fc, sources, selected, onSelectName, onRegionMenu, onDeleteSelected,
+  info, fc, sources, selected, onSelectName, onRegionMenu, onDeleteSelected, pointMsg,
   overlapAsk, onAnswerOverlap, onToggleTranslate,
   mode, onToggleModify, onToggleBorder, onToggleSplit, onToggleDissolve, onToggleDraw,
   borderPicks, borderMsg, borderShared, onClearBorder, onShareBorders, onMerge,
@@ -276,7 +276,14 @@ export default function Sidebar({
           {selectedName ? ` · ${selectedName}` : ''}
         </button>
 
-        {/* vertex-count control (arrow keys / +−) disabled — paused per request */}
+        {mode === 'modify' && (
+          <div className="hint dim">
+            <b>Drag</b> a point to move it · <b>right-click</b> a point to delete it ·
+            <b> click the outline</b> between two points to add one. Ctrl+Z undoes any
+            of it.
+          </div>
+        )}
+        {mode === 'modify' && pointMsg && <div className="hint">{pointMsg}</div>}
 
         <button className={mode === 'translate' ? 'btn on' : 'btn'}
           onClick={onToggleTranslate}
@@ -461,7 +468,8 @@ export default function Sidebar({
               <div className="hint dim">
                 Trace the outline on the image — click each point, then <b>right-click
                 to finish</b> (or Enter). <b>Esc</b> throws the outline away.
-                Anything it covers is taken from the region underneath.
+                If it lands on a region that is already there, you'll be asked
+                whether it replaces that ground or overlaps it.
               </div>
             )}
             {!designations && (
@@ -485,7 +493,7 @@ export default function Sidebar({
               const within = rels.includes('inside');
               return (
               <div className="pts">
-                <div className="pts-head">How should this outline sit?</div>
+                <div className="pts-head">Replace or overlap?</div>
                 <div className="hint dim">
                   It lands on{' '}
                   {overlapAsk.overlaps.map((o, i) => (
@@ -500,24 +508,24 @@ export default function Sidebar({
                   {!wraps && (
                     <button className={overlapAsk.suggest === 'top' ? 'btn sm primary' : 'btn sm'}
                       disabled={busy}
-                      title="the new region takes the overlapping ground; the others are trimmed"
+                      title="the new region replaces what was there: the regions it covers give up that ground"
                       onClick={() => onAnswerOverlap && onAnswerOverlap('top')}>
-                      On top
-                    </button>
-                  )}
-                  {!within && (
-                    <button className="btn sm" disabled={busy}
-                      title="the new region gives up the overlap and is trimmed; nothing already there changes"
-                      onClick={() => onAnswerOverlap && onAnswerOverlap('bottom')}>
-                      Underneath
+                      Replace
                     </button>
                   )}
                   <button className={overlapAsk.suggest === 'both' ? 'btn sm primary' : 'btn sm'}
                     disabled={busy}
-                    title="both keep their full shape and genuinely overlap, the way hemi wraps everything"
+                    title="both keep their whole shape and genuinely overlap, the way hemi wraps everything"
                     onClick={() => onAnswerOverlap && onAnswerOverlap('both')}>
-                    Overlap, keep both
+                    Overlap
                   </button>
+                  {!within && (
+                    <button className="btn sm" disabled={busy}
+                      title="the new region is trimmed to the free ground; nothing already there changes"
+                      onClick={() => onAnswerOverlap && onAnswerOverlap('bottom')}>
+                      Fit around
+                    </button>
+                  )}
                   <button className="btn sm" disabled={busy}
                     title="throw the outline away and draw again"
                     onClick={() => onAnswerOverlap && onAnswerOverlap(null)}>
@@ -525,13 +533,14 @@ export default function Sidebar({
                   </button>
                 </div>
                 <div className="hint dim">
-                  <b>On top</b> trims what is already there. <b>Underneath</b> trims
-                  the new shape instead. <b>Overlap</b> trims nothing — a region drawn
-                  around another is put behind it so the smaller one stays visible.
-                  {wraps && ' (“On top” is not offered: taking all of that region’s'
+                  <b>Replace</b> takes that ground from the regions already there.
+                  <b> Overlap</b> keeps both whole — a region drawn around another goes
+                  behind it, so the smaller one stays visible. <b>Fit around</b> trims
+                  the new shape to the free ground instead.
+                  {wraps && ' (Replace isn’t offered: taking all of that region’s'
                     + ' ground would erase it.)'}
-                  {within && ' (“Underneath” is not offered: there would be nothing'
-                    + ' left of the shape you drew.)'}
+                  {within && ' (Fit around isn’t offered: nothing would be left of the'
+                    + ' shape you drew.)'}
                 </div>
               </div>
               );
