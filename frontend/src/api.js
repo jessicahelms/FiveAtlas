@@ -159,6 +159,18 @@ export async function loadRegionsMulti(ds, paths) {
   return r.json();
 }
 
+// Show a saved file in Explorer / Finder. The server only accepts files inside
+// the app's own working folder.
+export async function revealInFolder(path) {
+  const r = await fetch(`${API}/reveal`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path }),
+  });
+  if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+  return r.json();
+}
+
 export async function browseFile() {
   const r = await fetch(`${API}/browse-file`, { method: 'POST' });
   if (!r.ok) throw new Error(`browse ${r.status}`);

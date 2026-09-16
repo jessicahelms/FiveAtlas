@@ -3,6 +3,7 @@ import { useState } from 'react';
 export default function DatasetBar({
   datasets, activeId, onSelect, onOpenFolder, onOpenPath, busy,
   canSave, dirty, busySave, onSave, onReset, onUndo, onRedo, canUndo, canRedo,
+  saveResult, onDismissSave, onRevealSave,
 }) {
   const [path, setPath] = useState('');
   return (
@@ -50,6 +51,32 @@ export default function DatasetBar({
           Reset
         </button>
       </div>
+
+      {/* Right under Save, so the answer to "did it save, and where?" is where
+          you are already looking. It stays until you close it or edit again. */}
+      {saveResult && !dirty && (
+        <div className="savetoast" role="status">
+          <div className="savetoast-head">
+            <b>✓ Saved</b>
+            <button className="savetoast-x" onClick={onDismissSave} title="close">×</button>
+          </div>
+          <div className="savetoast-path" title={saveResult.path}>{saveResult.path}</div>
+          <div className="savetoast-note">
+            A copy of this save was also kept in the <b>versions</b> folder beside it
+            {saveResult.versions ? ` (${saveResult.versions} so far)` : ''} — earlier
+            saves are never overwritten.
+          </div>
+          <div className="row">
+            <button className="btn sm primary" onClick={() => onRevealSave && onRevealSave(saveResult.path)}>
+              Open folder
+            </button>
+            <button className="btn sm"
+              onClick={() => navigator.clipboard && navigator.clipboard.writeText(saveResult.path)}>
+              Copy path
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

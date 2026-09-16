@@ -260,6 +260,44 @@ def _run_picker(kind: str) -> str:
     return lines[-1].strip() if lines else ""
 
 
+@app.post("/api/reveal")
+async def reveal(request: Request):
+    """Show a saved file in Explorer / Finder, already selected.
+
+    This is the "where did my save go?" button. Saves land in the app's working
+    folder, which sits under AppData on Windows and ~/Library on a Mac -- both
+    hidden by default, so pointing at them in words was not enough.
+
+    Only paths inside that working folder are accepted: the page asks to show
+    its own save, never an arbitrary location on the machine.
+    """
+    body = await request.json()
+    raw = (body or {}).get("path")
+    if not raw:
+        raise HTTPException(400, "need 'path'")
+    try:
+        p = Path(str(raw)).resolve()
+        p.relative_to(Path(config.WORKDIR).resolve())
+    except Exception:
+        raise HTTPException(403, "only files inside the FiveAtlas working folder can be shown")
+    if not p.exists():
+        raise HTTPException(404, f"not found: {p}")
+    try:
+        if sys.platform == "win32":
+            # /select opens the folder with the file highlighted
+            if p.is_file():
+                subprocess.Popen(["explorer", f"/select,{p}"])
+            else:
+                os.startfile(str(p))
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", "-R", str(p)] if p.is_file() else ["open", str(p)])
+        else:
+            subprocess.Popen(["xdg-open", str(p if p.is_dir() else p.parent)])
+    except Exception as e:
+        raise HTTPException(500, f"could not open a file window: {e}")
+    return {"shown": str(p)}
+
+
 @app.post("/api/browse")
 def browse():
     """Pop a native folder picker on the (local) machine and return the path."""

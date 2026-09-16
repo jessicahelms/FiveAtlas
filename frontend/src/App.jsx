@@ -584,11 +584,16 @@ export default function App() {
   // Anything committed is unsaved until Save writes it. The top bar shows
   // this, so "have I saved?" is answerable without hunting for a message.
   const [dirty, setDirty] = useState(false);
+  // What the last Save wrote, shown right under the Save button. The message
+  // used to go to the bottom of the sidebar, far off-screen, and named only the
+  // snapshot file -- so a save looked like it had done nothing.
+  const [saveResult, setSaveResult] = useState(null);
   const commit = useCallback((nextFc) => {
     fcRef.current = nextFc; setFc(nextFc); record(nextFc); setDirty(true);
   }, [record]);
   const initHistory = useCallback((fc0) => {
     setDirty(false);                     // freshly loaded == saved
+    setSaveResult(null);                 // and it is a different file now
     historyRef.current = [fc0];
     histIdxRef.current = 0;
     setHistTick((t) => t + 1);
@@ -1930,12 +1935,13 @@ export default function App() {
     try {
       const r = await api.saveRegions(dsId, fc);
       setDirty(false);
+      setSaveResult({ path: r.saved, version: r.version, versions: r.versions });
       const stamped = r.version ? String(r.version).split(/[\\/]/).pop() : null;
       setSnapInfo((s) => ({
         ...(s || {}),
         saved: stamped
-          ? `saved — snapshot ${stamped} (${r.versions} kept, nothing overwritten)`
-          : r.saved,
+          ? `saved to ${r.saved} — snapshot ${stamped} (${r.versions} kept, nothing overwritten)`
+          : `saved to ${r.saved}`,
       }));
     } catch (e) { setError(String(e)); } finally { setBusy(false); }
   }, [dsId, fc]);
@@ -2271,6 +2277,8 @@ export default function App() {
         onOpenFolder={openFolder} onOpenPath={loadOpened} busy={dsBusy}
         canSave={!!(dsId && fc)} dirty={dirty} busySave={busy}
         onSave={doSave} onReset={doReset}
+        saveResult={saveResult} onDismissSave={() => setSaveResult(null)}
+        onRevealSave={(p) => api.revealInFolder(p).catch((e) => setError(apiDetail(e)))}
         onUndo={undo} onRedo={redo} canUndo={canUndo} canRedo={canRedo}
       />
       <div className="app">
