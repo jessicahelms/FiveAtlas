@@ -17,6 +17,7 @@ import {
   DrawPolygonByDraggingMode,
 } from '@deck.gl-community/editable-layers';
 import { PointEditMode, existingPointProps } from './pointEditMode';
+import { fetchTile } from './tileFetch';
 
 // Edit points uses PointEditMode: a plain click on a point never deletes it,
 // a right-click does (see handleContextMenu). The shared-border editor below
@@ -147,9 +148,8 @@ function pyramidTileLayer({ id, levels, tileSize, width, height, opacity, urlFor
     getTileData: ({ index, signal }) => {
       const backendZ = maxLevel + index.z;
       if (backendZ < 0 || backendZ > maxLevel) return Promise.resolve(null);
-      return fetch(urlFor(backendZ, index.x, index.y), { signal })
-        .then((r) => (r.ok ? r.blob() : null))
-        .then((b) => (b ? createImageBitmap(b) : null));
+      // retries a failed tile: deck would otherwise keep it blank for good
+      return fetchTile(urlFor(backendZ, index.x, index.y), { signal });
     },
     renderSubLayers: (props) => {
       const bb = props.tile.boundingBox;

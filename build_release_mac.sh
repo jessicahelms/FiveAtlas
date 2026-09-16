@@ -197,12 +197,24 @@ YOUR DATA
   FiveAtlas press Open Folder and pick the experiment folder under Locations.
   Pasting a path works too: it must look like /Volumes/... (not smb://...).
 
+UPDATING FROM AN OLDER FIVEATLAS
+  Stop the old one first: close its browser tab and wait about ten minutes,
+  or quit FiveAtlas in Activity Monitor. While an old copy is still running,
+  opening the new one just opens the old one again. Then drag the new
+  FiveAtlas into Applications and choose Replace. The first-launch Terminal
+  line above is needed again for the new copy.
+
+SAVING
+  Press Save at the top right. The first time, it asks where to save the
+  regions file; every Save after that updates the same file, and "(change)"
+  beside it picks another. The panel under Save shows exactly where it went.
+  Your original files are never overwritten.
+
 WHERE THINGS GO
-  Your original files are never modified. Edits, the dated backups of every
-  Save, and the log (FiveAtlas.log) live in
+  A dated backup of every Save, and the log (FiveAtlas.log), live in
      ~/Library/Application Support/FiveAtlas
   (Finder: Shift+Cmd+G and paste that path.) If FiveAtlas will not start, that
-  log is what to send. Use Export in the sidebar to write GeoJSON out.
+  log is what to send.
 EOF
 
 # 4. dmg ---------------------------------------------------------------------

@@ -2276,6 +2276,13 @@ def stains_tile(ds_id: str, z: int, x: int, y: int, s: str = ""):
         png = ss.composite_tile(spec, level, x, y, orient=ORI.get(ds_id))
     except KeyError:
         raise HTTPException(404, "stain stack closed while reading")
+    except Exception as e:
+        # A read that broke on the way -- a network drive or a cloud-synced
+        # folder (Box) stalling mid-file. Log it and answer "try again": the
+        # viewer retries a failed tile rather than leaving that square blank.
+        print(f"[stains] {ds_id} tile z={z} x={x} y={y}: {type(e).__name__}: {e}",
+              file=sys.stderr)
+        raise HTTPException(503, "reading the stain tile failed -- try again")
     if png is None:
         return Response(status_code=204)
     return Response(content=png, media_type="image/png",

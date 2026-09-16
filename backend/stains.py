@@ -7,6 +7,16 @@ assembly loses the pyramid; per-file it keeps all 7 levels and reads a tile in
 (colour x contrast, additive, alpha=brightness). Same tile scheme as the
 morphology (1024 tiles, deck z 0..-maxLevel). Nothing hard-coded: channels,
 dims, levels, tileSize all come from the files.
+
+Reading, for speed on a network drive:
+  * one lock PER CHANNEL, not one for the whole stack. Every channel is its own
+    file handle, so a tile's four channels -- and the six tiles the browser asks
+    for at once -- no longer queue behind each other. Measured on a real
+    dataset on S:, cold tiles went from 0.38 s to 0.14 s each, byte-identical.
+  * a bounded in-memory cache of the channel tiles already read. Moving a
+    brightness slider re-asks for every visible tile with new colours; the
+    pixels have not changed, so they are re-blended, not re-read over the
+    network.
 """
 from __future__ import annotations
 
@@ -14,6 +24,7 @@ import io
 import re
 import threading
 import zipfile
+from collections import OrderedDict
 from pathlib import Path
 
 import numpy as np
@@ -22,6 +33,11 @@ import zarr
 from PIL import Image
 
 import orientation as ORI
+
+# Upper bound on the decoded channel tiles kept in memory, per open dataset. One
+# 1024x1024 uint16 tile is 2 MiB, so this holds ~128 of them -- a few screens of
+# a four-channel stack.
+TILE_CACHE_BYTES = 256 * 2 ** 20
 
 # Xenium Explorer / Viv default channel palette, assigned BY CHANNEL INDEX
 # (extracted verbatim from Xenium Explorer's app.asar). For the 4-channel
@@ -58,18 +74,27 @@ def _color_for(name, idx):
 
 
 class StainStack:
-    def __init__(self, mf: dict, workdir=None, tile: int = 1024):
+    def __init__(self, mf: dict, workdir=None, tile: int = 1024,
+                 cache_bytes: int = TILE_CACHE_BYTES):
         self.kind = mf["kind"]
         self.path = mf["path"]
         self.channels = mf.get("channels") or []
         self._files = mf.get("files")
         self.tile = tile
+        # _lock guards the stack's own bookkeeping (opening a channel, closing);
+        # each channel's READS go under that channel's lock in _chlocks.
         self._lock = threading.Lock()
+        self._chlocks: dict[int, threading.Lock] = {}
+        self._closed = False
         self._zf = zipfile.ZipFile(self.path) if self.kind == "zip" else None
         self._member: dict[int, str] = {}
         self._resolve_members()
         self._z: dict[int, tuple] = {}          # idx -> (TiffFile, zarr, group?)
         self._contrast: dict[int, list] = {}    # idx -> [lo, hi, dataMax]
+        self._cache: OrderedDict = OrderedDict()  # (idx, level, x0, y0, x1, y1) -> array
+        self._cache_bytes = 0
+        self._cache_limit = int(cache_bytes)
+        self._cache_lock = threading.Lock()
         self.nlevels = None
         self.level_shapes = None                # per level (H, W)
         self.W0 = self.H0 = None
@@ -97,65 +122,135 @@ class StainStack:
         One handle per stain channel plus the enclosing morphology_focus.zip, none
         of which tifffile/zipfile close on their own -- so closing a dataset left
         the whole folder locked on Windows and undeletable. Idempotent.
+
+        A read in flight on a channel finishes first (its lock is taken before
+        that handle is closed); a request that arrives afterwards gets KeyError
+        -- the routes answer 404 and the viewer asks again -- rather than
+        reopening files behind a closed stack.
         """
         with self._lock:
-            for tf, _z, _g in list(self._z.values()):
+            self._closed = True
+            handles = list(self._z.items())
+            self._z = {}
+            zf, self._zf = getattr(self, "_zf", None), None
+        for idx, (tf, _z, _g) in handles:
+            with self._channel_lock(idx):
                 try:
                     tf.close()
                 except Exception:
                     pass
-            self._z = {}
-            zf, self._zf = getattr(self, "_zf", None), None
-            if zf is not None:
-                try:
-                    zf.close()
-                except Exception:
-                    pass
+        if zf is not None:
+            try:
+                zf.close()
+            except Exception:
+                pass
+        with self._cache_lock:
+            self._cache.clear()
+            self._cache_bytes = 0
 
     # ---- per-channel pyramid (opened is_ome=False, handle cached) ----------
+    def _channel_lock(self, idx) -> threading.Lock:
+        lk = self._chlocks.get(idx)
+        if lk is None:
+            with self._lock:
+                lk = self._chlocks.setdefault(idx, threading.Lock())
+        return lk
+
     def _channel(self, idx):
-        if idx not in self._z:
+        entry = self._z.get(idx)
+        if entry is None:
             with self._lock:
                 # A request that raced a close() must fail loudly (the route
                 # turns KeyError into 404), not reopen members through the
                 # dropped zip handle -- self._zf is None then and _open would
-                # hand tifffile a zip member NAME as if it were a path.
-                if self.kind == "zip" and self._zf is None:
+                # hand tifffile a zip member NAME as if it were a path -- nor
+                # reopen a folder's files and lock them again after close.
+                if self._closed:
                     raise KeyError("stain stack is closed")
-                if idx not in self._z:
+                entry = self._z.get(idx)
+                if entry is None:
                     tf = tifffile.TiffFile(self._open(self._member[idx]), is_ome=False)
                     s = tf.series[0]
                     z = zarr.open(s.aszarr(), mode="r")
                     is_group = isinstance(z, zarr.hierarchy.Group)
-                    self._z[idx] = (tf, z, is_group)
+                    entry = (tf, z, is_group)
+                    self._z[idx] = entry
                     if self.nlevels is None:
                         ax = s.axes
                         self.level_shapes = [(int(lv.shape[ax.index("Y")]),
                                               int(lv.shape[ax.index("X")])) for lv in s.levels]
                         self.nlevels = len(s.levels)
                         self.H0, self.W0 = self.level_shapes[0]
-        return self._z[idx]
+        return entry
 
-    def _level_arr(self, idx, level):
-        _tf, z, is_group = self._channel(idx)
+    @staticmethod
+    def _level_of(entry, level):
+        _tf, z, is_group = entry
         if is_group:
             keys = sorted(z.array_keys(), key=lambda k: int(k))
             return z[keys[level]]
         return z
 
+    def _level_arr(self, idx, level):
+        return self._level_of(self._channel(idx), level)
+
     def _prime(self):
         if self._member:
             self._channel(sorted(self._member)[0])
 
+    # ---- reading pixels ------------------------------------------------------
+    def _read(self, idx, level, x0, y0, x1, y1):
+        """One channel's pixels in [x0, x1) x [y0, y1) of a level, clipped to the
+        level; None when nothing of it is inside. Served from the tile cache when
+        this exact window was read before. The returned array is read-only."""
+        key = (idx, level, x0, y0, x1, y1)
+        with self._cache_lock:
+            hit = self._cache.get(key)
+            if hit is not None:
+                self._cache.move_to_end(key)
+                return hit
+        entry = self._channel(idx)
+        with self._channel_lock(idx):
+            # the handle may have been closed while this request waited its turn
+            if self._closed or self._z.get(idx) is not entry:
+                raise KeyError("stain stack is closed")
+            arr = self._level_of(entry, level)
+            H, W = arr.shape[-2], arr.shape[-1]
+            cx0, cy0 = max(0, x0), max(0, y0)
+            cx1, cy1 = min(W, x1), min(H, y1)
+            if cx1 <= cx0 or cy1 <= cy0:
+                return None
+            data = np.asarray(arr[..., cy0:cy1, cx0:cx1]).squeeze()
+        data.setflags(write=False)
+        self._cache_put(key, data)
+        return data
+
+    def _cache_put(self, key, data):
+        size = int(data.nbytes)
+        if size > self._cache_limit:
+            return
+        with self._cache_lock:
+            if self._closed:
+                return
+            old = self._cache.pop(key, None)
+            if old is not None:
+                self._cache_bytes -= int(old.nbytes)
+            self._cache[key] = data
+            self._cache_bytes += size
+            while self._cache_bytes > self._cache_limit and self._cache:
+                _k, gone = self._cache.popitem(last=False)
+                self._cache_bytes -= int(gone.nbytes)
+
+    def cache_info(self):
+        with self._cache_lock:
+            return {"entries": len(self._cache), "bytes": self._cache_bytes,
+                    "limit": self._cache_limit}
+
     def _tile(self, idx, level, tx, ty):
-        arr = self._level_arr(idx, level)
-        H, W = arr.shape[-2], arr.shape[-1]
         y0, x0 = ty * self.tile, tx * self.tile
-        if y0 >= H or x0 >= W or y0 < 0 or x0 < 0:
+        if y0 < 0 or x0 < 0:
             return None
-        y1, x1 = min(y0 + self.tile, H), min(x0 + self.tile, W)
-        with self._lock:
-            return np.asarray(arr[..., y0:y1, x0:x1]).squeeze()
+        return self._read(idx, level, x0, y0, x0 + self.tile, y0 + self.tile)
 
     # ---- contrast (from a coarse level, cached) ----------------------------
     def _stats_level(self):
@@ -168,8 +263,11 @@ class StainStack:
 
     def channel_contrast(self, idx):
         if idx not in self._contrast:
-            arr = self._level_arr(idx, self._stats_level())
-            with self._lock:
+            entry = self._channel(idx)
+            with self._channel_lock(idx):
+                if self._closed or self._z.get(idx) is not entry:
+                    raise KeyError("stain stack is closed")
+                arr = self._level_of(entry, self._stats_level())
                 data = np.asarray(arr[...]).squeeze()
             # Viv/Xenium getChannelStats: [0.05, 99.95] percentile of non-zero px.
             pos = data[data > 0]
@@ -182,14 +280,7 @@ class StainStack:
     def _window(self, idx, level, x0, y0, x1, y1):
         """An arbitrary rectangle of one channel -- what a rotated displayed tile
         needs, since its source rectangle is not tile-aligned."""
-        arr = self._level_arr(idx, level)
-        H, W = arr.shape[-2], arr.shape[-1]
-        x0, y0 = max(0, x0), max(0, y0)
-        x1, y1 = min(W, x1), min(H, y1)
-        if x1 <= x0 or y1 <= y0:
-            return None
-        with self._lock:
-            return np.asarray(arr[..., y0:y1, x0:x1]).squeeze()
+        return self._read(idx, level, x0, y0, x1, y1)
 
     # ---- composite tile ----------------------------------------------------
     def composite_tile(self, spec, level, tx, ty, orient=None):

@@ -321,14 +321,18 @@ jobs:
           R="$HOME/Library/Caches/FiveAtlas_build/release"
           BODY="$RUNNER_TEMP/notes.md"
 
+          # The new features go on the page in BIG letters: the section title is
+          # a top-level heading, and each "### feature" in CHANGELOG.md is
+          # printed one size up, so every change reads as a headline with its
+          # explanation underneath -- not as small print above the downloads.
           awk -v ver="$GITHUB_REF_NAME" '
             $0 ~ "^## "ver"$" { grab=1; next }
             grab && /^## /    { exit }
             grab              { print }
-          ' CHANGELOG.md > "$RUNNER_TEMP/whatsnew.md" || true
+          ' CHANGELOG.md | sed -E 's/^### /## /' > "$RUNNER_TEMP/whatsnew.md" || true
           if [ -s "$RUNNER_TEMP/whatsnew.md" ]; then
-            { echo "## What's new in $GITHUB_REF_NAME"
-              cat "$RUNNER_TEMP/whatsnew.md"; echo; } > "$BODY"
+            { echo "# What's new in FiveAtlas $GITHUB_REF_NAME"
+              cat "$RUNNER_TEMP/whatsnew.md"; echo; echo "---"; echo; } > "$BODY"
           else
             echo "::warning title=changelog::no '## $GITHUB_REF_NAME' section in CHANGELOG.md -- the release page will carry install instructions only"
             : > "$BODY"
@@ -343,9 +347,14 @@ jobs:
             echo "|---|---|"
             echo "| **Windows** 10 / 11 | \`FiveAtlas-${V}-win64.zip\` |"
             echo "| **Mac** (Apple Silicon) | \`FiveAtlas-${V}-macos-arm64.dmg\` |"
+            echo "| **Instructions** for every feature (PDF) | \`FiveAtlas-instructions.pdf\` |"
             echo
-            echo "Both are under **Assets** below. The Windows zip is published by the"
+            echo "All of them are under **Assets** below. The Windows zip is published by the"
             echo "Windows build job and can appear a few minutes after the Mac files."
+            echo
+            echo "**Updating?** Close the FiveAtlas you already have first (Windows: close its"
+            echo "black window; Mac: close its tab and wait ten minutes, or quit it in Activity"
+            echo "Monitor). While an old copy is still running, the new one just opens the old one."
             echo; } >> "$BODY"
 
           { echo "## Install (Mac)"; echo '```'; cat "$R/README.txt"; echo '```'; echo; } >> "$BODY"
@@ -365,6 +374,13 @@ jobs:
               --notes-file "$BODY"
           fi
           gh release upload "$GITHUB_REF_NAME" "$R"/*.dmg "$R"/*.zip "$R/SHA256SUMS" --clobber
+          # The annotators' instruction sheet, beside the downloads it explains.
+          # Only this job uploads it (the Windows job does so only when it had
+          # to create the release itself), so two --clobber uploads never race.
+          if [ -f docs/FiveAtlas-instructions.pdf ]; then
+            gh release upload "$GITHUB_REF_NAME" docs/FiveAtlas-instructions.pdf --clobber \
+              || echo "::warning title=instructions::could not attach the instructions PDF"
+          fi
           # The runner screenshots are NOT published here. They are build
           # evidence for us (nobody on this project owns a Mac), not something
           # the person following a download link needs to scroll past -- that

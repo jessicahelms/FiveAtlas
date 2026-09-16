@@ -3,7 +3,90 @@
 Each release's section below lands at the top of its GitHub release page,
 above the install instructions. Keep entries short and in plain language --
 they are read by annotators, not developers. The heading must be `## vX.Y.Z`
-exactly; CI matches it against the tag.
+exactly; CI matches it against the tag. Inside a section, `### ` headings
+are allowed: on the release page they are printed one size up, so each new
+feature reads as a big title with its explanation under it.
+
+## v1.3.0
+
+### Stains load all the way, and faster
+
+- A stain square that failed to load once (a slow network drive, Box still
+  downloading the file) used to stay **blank until you reloaded the page**,
+  so only part of the stain showed. Now it is **asked for again
+  automatically**, and the whole stain fills in.
+- Stain squares load **more than twice as fast** from a network drive: the
+  channels are read side by side instead of one after another.
+- Moving a **brightness slider** re-colours what is already loaded instead
+  of reading every square from the drive again.
+
+### Save is one button, and it tells you where your work went
+
+- **Save, Reset, Undo and Redo** now sit together at the top right of the
+  window, where they never scroll away. Beside them, **● unsaved** means
+  you have edits that are not on disk yet; **saved** means everything is.
+- The **first** time you press Save on a dataset, it asks where to put the
+  file. It opens in the dataset's own folder with a name already filled in
+  (for example `merged.regions_edited.geojson`). **Every Save after that
+  writes the same file without asking.** "Saving to *file* (change)" beside
+  the button shows which file; press **(change)** to pick a different one.
+- After every Save, a panel right under the button says **exactly where it
+  went**, with **Open folder** and **Copy path** buttons.
+- It will **never overwrite the dataset's original region files**. If you
+  pick one, it says so and offers a new name beside it instead.
+- A dated copy of every Save is still kept in the app's own folder, so an
+  earlier save can always be recovered.
+
+### Delete points with a right-click
+
+- In **Edit points**, **right-click a point to delete it**. The rest of that
+  border re-spaces itself so no long empty stretch is left, and a point on a
+  border you share with a neighbour is removed from **both** regions, so
+  the border never opens up.
+- Works on the red border in **Edit shared borders** too.
+- A point where three regions meet, or where a shared border ends, is
+  protected: the app tells you why instead of pulling the regions apart.
+
+### Resample points now works in Edit points
+
+- The **Resample points** slider (fine to coarse) now works on a single
+  region in Edit points, not only on shared borders. You see
+  "points on *region*: before → after" while you drag, then press
+  **Apply** or **Cancel**. Every neighbour's side of a shared border is
+  re-pointed with it, so no border opens.
+
+### Load regions file asks: add, or replace?
+
+- **Load regions file** reads the file first and then asks: **Add to the
+  map** (keep what is there and put these beside it; a name that is already
+  used gets changed so it isn't shared) or **Replace the map**. Ctrl+Z
+  undoes either one, and nothing is written until you press Save.
+- If the file contains **hemi**, it asks **"Load the damage with it?" Yes /
+  No**. That covers damage inside the same file and damage-only files
+  (like `separation.4.geojson`) sitting in the same folder.
+
+### Drawing over a region: Replace, Overlap, or Fit around
+
+- When a region you draw lands on another one, you choose what happens:
+  - **Replace**: the new region takes that ground from the regions there.
+  - **Overlap**: both keep their whole shape. A region drawn around another
+    goes behind it, so the smaller one stays visible.
+  - **Fit around**: the new region is trimmed to the free ground, and
+    nothing already there changes.
+- **Right-click any region** for **Bring to front** / **Send to back**.
+- New **Move region** button: drag a whole region to a new spot without
+  changing its shape.
+
+### Easier to find your way around
+
+- Bigger section titles with clear dividers: **What loaded**, **Regions**,
+  **Edit regions**, **Files & export**.
+- The screen you see when opening a dataset lists **every file the app can
+  load, by its real name**: imagery, stains, `transcripts.zarr`, each
+  region file, the annotation notes and the metadata file. Each has its own
+  tick box. (The confusing "genes — 9" line is gone.)
+- The **Snap neighbors** button is gone. Use **Share borders** to tidy the
+  join between regions.
 
 ## v1.2.2
 

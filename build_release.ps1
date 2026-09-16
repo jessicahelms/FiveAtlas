@@ -151,12 +151,20 @@ about 2 seconds.
 The first time Windows may say "Windows protected your PC" because the app
 is not code-signed. Click "More info" then "Run anyway".
 
-To load your data: click the folder button at the top, or "Open folder..."
-in the sidebar, and pick the folder that holds your experiment.xenium file.
+UPDATING from an older FiveAtlas: close the old one's console window FIRST.
+While an old copy is still running, starting the new one just opens the old
+one again.
 
-Your original files are never modified. Edits are saved under:
+To load your data: click "Open folder..." at the top and pick the folder that
+holds your experiment.xenium file. A list of everything the app can load from
+it appears -- untick anything you don't want, then press Load.
+
+SAVING: press Save at the top right. The first time, it asks where to save the
+regions file; every Save after that updates the same file, and "(change)"
+beside it picks another. The panel under Save shows exactly where it went.
+Your original files are never overwritten, and a dated backup of every save
+is also kept under:
    %LOCALAPPDATA%\FiveAtlas
-Use Export in the sidebar to write GeoJSON out where you want it.
 "@ | Set-Content -Encoding utf8 (Join-Path $Staged "README.txt")
 
 # 3. zip ---------------------------------------------------------------------

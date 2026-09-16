@@ -198,19 +198,23 @@ jobs:
 
           if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             echo "::warning title=release::no release yet (macOS build slow or failed) -- creating it for the Windows download"
+            # same big-letters layout as the macOS job's page
             awk -v ver="$GITHUB_REF_NAME" '
               $0 ~ "^## "ver"$" { grab=1; next }
               grab && /^## /    { exit }
               grab              { print }
-            ' CHANGELOG.md > "$RUNNER_TEMP/whatsnew.md" || true
+            ' CHANGELOG.md | sed -E 's/^### /## /' > "$RUNNER_TEMP/whatsnew.md" || true
             BODY="$RUNNER_TEMP/notes.md"
             if [ -s "$RUNNER_TEMP/whatsnew.md" ]; then
-              { echo "## What's new in $GITHUB_REF_NAME"; cat "$RUNNER_TEMP/whatsnew.md"; echo; } > "$BODY"
+              { echo "# What's new in FiveAtlas $GITHUB_REF_NAME"; cat "$RUNNER_TEMP/whatsnew.md"; echo; } > "$BODY"
             else
               : > "$BODY"
             fi
             gh release create "$GITHUB_REF_NAME" --title "FiveAtlas $GITHUB_REF_NAME" \
               --notes-file "$BODY" || true
+            # the macOS job normally attaches the instructions; it did not get here
+            [ -f docs/FiveAtlas-instructions.pdf ] && \
+              gh release upload "$GITHUB_REF_NAME" docs/FiveAtlas-instructions.pdf --clobber || true
           fi
 
           gh release upload "$GITHUB_REF_NAME" "$ZIP" "$R/SHA256SUMS-windows.txt" --clobber
