@@ -34,10 +34,23 @@ keep that window open while you work and close it to stop the app.
 ### Updating to a new version
 
 When a newer FiveAtlas is out, a line at the top of the sidebar says so and
-links to the download page. **Stop the old FiveAtlas before starting the new
-one** — on Windows close its black window; on a Mac close its tab and wait about
-ten minutes, or quit FiveAtlas in Activity Monitor. While an old copy is still
-running, starting the new one just opens the old one again.
+links to the download page. The version you are running is always shown in the
+top-left corner of the window.
+
+- **Windows:** unzip the new version and open its `FiveAtlas.exe`. Since 1.3.1
+  the new version starts in its own tab even if the old one is still open;
+  close the old black window when you are done with it.
+- **Mac, updating from 1.3.0 or older:** quit the old FiveAtlas first — open
+  **Activity Monitor**, search **FiveAtlas**, select it, press the stop button
+  and choose **Quit** (or restart the Mac). Then drag the new FiveAtlas into
+  Applications (**Replace**), run the Terminal line below once more, and open
+  it. An old copy that is still running cannot be switched automatically:
+  macOS wakes the running copy instead of starting the new one.
+- **Mac, updating from 1.3.1 or newer:** drag the new FiveAtlas into
+  Applications (**Replace**) and run the Terminal line once more. If the old
+  one is still running, its tab says the new version has been installed and
+  offers **Restart FiveAtlas**; with no tab open, it steps aside within a
+  minute, so opening the app starts the new one.
 
 ---
 
@@ -163,8 +176,10 @@ with `python docs/make_instructions.py` after changing a feature).
 ## Troubleshooting
 
 - *"Python was not found"* (from source) → install Python and re-run `setup.bat`.
-- The new version still looks like the old one → an old FiveAtlas is still
-  running; close it (see *Updating* above) and start the new one again.
+- The new version still looks like the old one → check the top-left corner of
+  the window. If it shows an older number, or no number at all (1.3.0 and older
+  do not show one), an old FiveAtlas is still running; quit it (see *Updating*
+  above) and open the new one again.
 - Port 8000 in use (from source) → close other app/console windows first.
 - Developers changing the UI: run `npm run build` in `frontend/` to refresh the
   bundled build (end users just use what's shipped).

@@ -198,11 +198,15 @@ YOUR DATA
   Pasting a path works too: it must look like /Volumes/... (not smb://...).
 
 UPDATING FROM AN OLDER FIVEATLAS
-  Stop the old one first: close its browser tab and wait about ten minutes,
-  or quit FiveAtlas in Activity Monitor. While an old copy is still running,
-  opening the new one just opens the old one again. Then drag the new
-  FiveAtlas into Applications and choose Replace. The first-launch Terminal
-  line above is needed again for the new copy.
+  Drag the new FiveAtlas into Applications and choose Replace, then run the
+  first-launch Terminal line above once more for the new copy.
+  From 1.3.1 on: if the old one is still running, its tab says the new
+  version has been installed and offers "Restart FiveAtlas"; with no tab
+  open, it steps aside within a minute, so opening the app starts the new
+  one. Coming from 1.3.0 or older: quit the old FiveAtlas first (Activity
+  Monitor -> search FiveAtlas -> stop button -> Quit, or restart the Mac) --
+  macOS wakes a running copy instead of starting the new one.
+  The version you are running is shown in the top-left corner of the window.
 
 SAVING
   Press Save at the top right. The first time, it asks where to save the

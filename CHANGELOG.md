@@ -7,6 +7,34 @@ exactly; CI matches it against the tag. Inside a section, `### ` headings
 are allowed: on the release page they are printed one size up, so each new
 feature reads as a big title with its explanation under it.
 
+## v1.3.1
+
+### Updating now really opens the new version
+
+- **Mac, this one time:** before you open 1.3.1, quit the old FiveAtlas.
+  Open **Activity Monitor**, search **FiveAtlas**, select it, press the stop
+  button at the top and choose **Quit** (or just restart your Mac). A copy
+  that is still running can't be switched over automatically, because macOS
+  wakes the old copy instead of starting the new one. This is the last
+  time you'll need to do this.
+- **Mac, from now on:** drag a newer FiveAtlas into Applications while the
+  old one is running and the open tab says **"FiveAtlas … has been
+  installed"**, with a **Restart FiveAtlas** button — one click switches.
+  With no tab open, the old one steps aside within a minute, so opening the
+  app starts the new one.
+- **Windows:** open the new FiveAtlas.exe even while the old one is still
+  running — the new version now starts in its own tab instead of handing
+  you the old one. Close the old black window when you're done with it.
+
+### The page always loads fresh
+
+- After an update your browser can no longer show a saved copy of the old
+  version's page.
+
+### See which version you're on
+
+- The top-left corner of the window now says **FiveAtlas 1.3.1**.
+
 ## v1.3.0
 
 ### Stains load all the way, and faster

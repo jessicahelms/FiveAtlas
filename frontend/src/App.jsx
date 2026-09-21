@@ -658,6 +658,39 @@ export default function App() {
     })();
   }, []);
 
+  // Which FiveAtlas this is -- shown at the top, so "which version am I on?"
+  // has an answer at a glance -- and whether a different one has been
+  // installed over it since it started (Mac: Finder replaces a running app,
+  // and opening it again only wakes this old process). Asked again every 20 s
+  // so the Restart offer appears soon after an update is dragged in.
+  const [appVersion, setAppVersion] = useState(null);
+  const [restartState, setRestartState] = useState(null); // null | 'restarting' | message
+  useEffect(() => {
+    let alive = true;
+    const ask = async () => {
+      try {
+        const v = await api.getVersion();
+        if (alive) setAppVersion(v);
+      } catch (e) { /* server gone or restarting: keep what we knew */ }
+    };
+    ask();
+    const t = setInterval(ask, 20000);
+    return () => { alive = false; clearInterval(t); };
+  }, []);
+
+  const restartIntoInstalled = useCallback(async () => {
+    if (dirty && !window.confirm('You have edits that are not saved yet. '
+      + 'Restart anyway? Unsaved edits will be lost — press Cancel, then Save, to keep them.')) {
+      return;
+    }
+    try {
+      await api.restartApp();
+      setRestartState('restarting');
+    } catch (e) {
+      setRestartState(apiDetail(e));
+    }
+  }, [dirty]);
+
   // Heartbeat: tells the server a UI is attached. On a Mac the app has no
   // window and nothing the Dock can quit, so the server stops itself once this
   // has been silent for ~10 minutes after the last tab closes (the browser
@@ -2510,6 +2543,11 @@ export default function App() {
         saveResult={saveResult} onDismissSave={() => setSaveResult(null)}
         onRevealSave={(p) => api.revealInFolder(p).catch((e) => setError(apiDetail(e)))}
         onUndo={undo} onRedo={redo} canUndo={canUndo} canRedo={canRedo}
+        version={appVersion && appVersion.version}
+        installedVersion={appVersion && appVersion.installed
+          && appVersion.installed !== appVersion.version ? appVersion.installed : null}
+        canRestart={!!(appVersion && appVersion.canRestart)}
+        onRestart={restartIntoInstalled} restartState={restartState}
       />
       <div className="app">
         {pendingDs && (

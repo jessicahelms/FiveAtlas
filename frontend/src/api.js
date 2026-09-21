@@ -506,6 +506,23 @@ export async function updateCheck() {
   return r.json(); // { current, latest?, url?, newer?, error? }
 }
 
+// The version running, and (Mac) the version now installed in its place --
+// they differ when FiveAtlas.app was replaced while this one kept running.
+export async function getVersion() {
+  const r = await fetch(`${API}/version`, { cache: 'no-store' });
+  if (!r.ok) throw new Error(`version ${r.status}`);
+  return r.json(); // { version, installed, canRestart }
+}
+
+// Switch to the FiveAtlas installed over this one (Mac). The answer comes back
+// before this server exits; the new one opens its own tab a few seconds later.
+// A refusal (not the Mac app) comes back as a 409 whose detail says what to do.
+export async function restartApp() {
+  const r = await fetch(`${API}/restart`, { method: 'POST' });
+  if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+  return r.json();
+}
+
 export async function compositeBitmap(ds, spec, { mode = 'glow', binUm = null, palette = null } = {}) {
   const r = await fetch(`${API}/datasets/${ds}/genes/composite.png`, {
     method: 'POST',

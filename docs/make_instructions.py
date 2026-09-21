@@ -60,12 +60,16 @@ ITEMS = [
     "Updating: when a newer FiveAtlas is out, a line at the top of the sidebar "
     "says so and links to the download page, which has the Windows and the Mac "
     "download on one page. Updating is always your choice — nothing downloads "
-    "itself. Before you start the new version, stop the old one: on Windows "
-    "close its black window; on a Mac close its tab and wait about ten minutes, "
-    "or quit FiveAtlas in Activity Monitor. While an old copy is still running, "
-    "starting the new one just opens the old one again. On a Mac, drag the new "
-    "FiveAtlas into Applications, choose Replace, and run the Terminal line "
-    "above once more.",
+    "itself. The version you are running is shown in the top-left corner of the "
+    "window. On Windows, unzip the new version and open its FiveAtlas.exe — it "
+    "starts in its own tab even if the old one is still open; close the old "
+    "black window when you are done with it. On a Mac, drag the new FiveAtlas "
+    "into Applications, choose Replace, and run the Terminal line above once "
+    "more. If the old one is still running, its tab says the new version has "
+    "been installed and offers Restart FiveAtlas; with no tab open, it steps "
+    "aside within a minute, so opening the app starts the new one. (Updating a "
+    "Mac from 1.3.0 or older: quit the old FiveAtlas in Activity Monitor first, "
+    "or restart the Mac — those versions cannot be switched automatically.)",
 
     # -- opening a dataset ---------------------------------------------------------------
     "Your data lives on the shared drive. On a Mac, connect to it in the Finder "

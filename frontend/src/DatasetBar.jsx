@@ -4,12 +4,21 @@ export default function DatasetBar({
   datasets, activeId, onSelect, onOpenFolder, onOpenPath, busy,
   canSave, dirty, busySave, onSave, onReset, onUndo, onRedo, canUndo, canRedo,
   saveResult, onDismissSave, onRevealSave, onSaveAs, saveTarget,
+  version, installedVersion, canRestart, onRestart, restartState,
 }) {
   const shown = saveResult && (saveResult.exported || saveResult.path);
   const warn = saveResult && (saveResult.refused || saveResult.failed || saveResult.exportError);
   const [path, setPath] = useState('');
   return (
+    <>
     <div className="dsbar">
+      {/* Which FiveAtlas this is, always in view: after an update, the first
+          question is "am I on the new one?" and there was nowhere to look. */}
+      {version && (
+        <span className="dsbar-version" title="the FiveAtlas version you are running">
+          FiveAtlas {version}
+        </span>
+      )}
       <span className="dsbar-title">Dataset</span>
       <select value={activeId || ''} onChange={(e) => onSelect(e.target.value)}>
         {(!activeId || !datasets.some((d) => d.id === activeId)) && <option value="">—</option>}
@@ -133,5 +142,36 @@ export default function DatasetBar({
         </div>
       )}
     </div>
+
+    {/* A different FiveAtlas was installed while this one kept running (Mac:
+        Finder replaces a running app, and opening it again only wakes this old
+        process). Say so across the top, and offer the one click that switches. */}
+    {installedVersion && (
+      <div className="update-strip" role="status">
+        {restartState === 'restarting' ? (
+          <span>
+            Restarting — FiveAtlas {installedVersion} opens in a new tab in a few
+            seconds. You can close this tab.
+          </span>
+        ) : (
+          <>
+            <span>
+              <b>FiveAtlas {installedVersion} has been installed</b>
+              {version ? ` (this tab is still ${version})` : ''}.{' '}
+              {canRestart
+                ? 'Save your work, then restart to switch to it.'
+                : 'Save your work, then close FiveAtlas and open it again to switch.'}
+            </span>
+            {canRestart && (
+              <button className="btn sm primary" onClick={onRestart}>
+                Restart FiveAtlas
+              </button>
+            )}
+            {restartState && <span className="update-strip-note">{restartState}</span>}
+          </>
+        )}
+      </div>
+    )}
+    </>
   );
 }

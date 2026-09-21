@@ -352,9 +352,11 @@ jobs:
             echo "All of them are under **Assets** below. The Windows zip is published by the"
             echo "Windows build job and can appear a few minutes after the Mac files."
             echo
-            echo "**Updating?** Close the FiveAtlas you already have first (Windows: close its"
-            echo "black window; Mac: close its tab and wait ten minutes, or quit it in Activity"
-            echo "Monitor). While an old copy is still running, the new one just opens the old one."
+            echo "**Updating a Mac from 1.3.0 or older?** Quit the old FiveAtlas first: open"
+            echo "Activity Monitor, search FiveAtlas, press the stop button and choose Quit (or"
+            echo "restart the Mac) -- macOS wakes a running copy instead of starting the new one."
+            echo "From 1.3.1 on the app switches over by itself, and the version you are running"
+            echo "is shown in the top-left corner of the window."
             echo; } >> "$BODY"
 
           { echo "## Install (Mac)"; echo '```'; cat "$R/README.txt"; echo '```'; echo; } >> "$BODY"

@@ -3,10 +3,24 @@
 ## [Download FiveAtlas for Windows or Mac](https://github.com/jessicahelms/FiveAtlas/releases/latest)
 
 One page with both downloads, always the newest version, plus the instructions
-PDF. **Already have FiveAtlas? Close the old one before starting the new one**,
-or the new one just opens the old one again (details in [INSTALL.md](INSTALL.md#updating-to-a-new-version)).
+PDF. **Updating a Mac from 1.3.0 or older? Quit the old FiveAtlas in Activity
+Monitor first** (details in [INSTALL.md](INSTALL.md#updating-to-a-new-version)).
+The version you are running is shown in the top-left corner of the window.
 
-# What's new in v1.3.0
+# What's new in v1.3.1
+
+## Updating now really opens the new version
+Windows: the new FiveAtlas starts in its own tab even while the old one is still
+open. Mac: from 1.3.1 on, a running FiveAtlas notices when a newer one is dragged
+into Applications and offers **Restart FiveAtlas** — one click switches.
+
+## The page always loads fresh
+After an update, the browser can no longer show a saved copy of the old page.
+
+## See which version you're on
+The top-left corner of the window says **FiveAtlas 1.3.1**.
+
+# New in v1.3.0
 
 ## Stains load all the way, and faster
 A stain square that failed to load no longer stays blank: it is asked for again

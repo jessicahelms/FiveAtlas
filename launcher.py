@@ -210,6 +210,20 @@ def _free_port(preferred: int = 8050) -> int:
     return preferred
 
 
+def _page_url(port: int, version: str) -> str:
+    """The address the browser is sent to. The version rides along as ?v= so a
+    browser can never answer it from a cached copy of an OLDER version's page --
+    every version is served at the same http://127.0.0.1:8050/, and that is how
+    people "updated" and kept seeing the old app. The page ignores the value."""
+    from urllib.parse import quote
+    return f"http://127.0.0.1:{port}/?v={quote(str(version or ''))}"
+
+
+def _port_of(url: str) -> int:
+    from urllib.parse import urlsplit
+    return int(urlsplit(url).port)
+
+
 def _open_when_up(url: str, timeout: float = 30.0):
     """Open the browser once the server actually answers, so the first paint
     isn't a connection error."""
@@ -218,7 +232,7 @@ def _open_when_up(url: str, timeout: float = 30.0):
         s = socket.socket()
         s.settimeout(0.4)
         try:
-            s.connect(("127.0.0.1", int(url.rsplit(":", 1)[1])))
+            s.connect(("127.0.0.1", _port_of(url)))
             break
         except OSError:
             time.sleep(0.2)
@@ -258,6 +272,45 @@ def _already_running(port: int) -> bool:
             return bool(json.loads(r.read().decode()).get("ok"))
     except Exception:
         return False
+
+
+def _running_version(port: int):
+    """The version of the FiveAtlas serving on this port: its version string,
+    "" when it is a FiveAtlas too old to say, or None when none is running.
+    /api/version exists from 1.3.1; before that the version is the one FastAPI
+    publishes in /openapi.json."""
+    import json
+    import urllib.request
+    if not _already_running(port):
+        return None
+    for path, pick in (("/api/version", lambda d: d.get("version")),
+                       ("/openapi.json", lambda d: (d.get("info") or {}).get("version"))):
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=4.0) as r:
+                v = pick(json.loads(r.read().decode()))
+            if v:
+                return str(v)
+        except Exception:
+            continue
+    return ""
+
+
+def _reuse_running(running, mine: str) -> bool:
+    """Hand the browser to the FiveAtlas already running, or start this one?
+
+    Reuse it when it is this same version (a second double-click, or the tab
+    storm this guard was written for) or a newer one (an old copy opened by
+    mistake must not stand in for the newer app). An OLDER one must not be
+    reused: that was "I downloaded the new version and I'm on the old" -- the
+    new copy found the old one still up, opened it, and exited. It is left
+    running (its tab may hold unsaved edits) and this one starts beside it.
+    """
+    if running is None:
+        return False
+    if not running:
+        return False                  # a FiveAtlas too old to report a version
+    from appversion import version_key
+    return version_key(running) >= version_key(mine)
 
 
 def _claim_browser_open(workdir: Path, window: float = 60.0, burst: int = 3) -> bool:
@@ -324,8 +377,20 @@ def _claim_browser_open(workdir: Path, window: float = 60.0, burst: int = 3) -> 
                 pass
 
 
-def _watchdog(backend, every: float = 15.0, silence: float = 600.0):
-    """Stop the server once the UI has been gone for a long while.
+def _watchdog(backend, every: float = 15.0, silence: float = 600.0,
+              stale_grace: float = 45.0, stop=None):
+    """Stop the server once the UI has been gone for a long while -- or at once
+    when a different FiveAtlas has been installed over this one and no tab is
+    using it.
+
+    The second rule is what makes updating work on a Mac. Finder replaces a
+    running FiveAtlas.app without a murmur, and opening the app again then only
+    re-activates THIS process (macOS matches a running app by its bundle and
+    never starts the new copy), so the old version would carry on for another
+    ten minutes and people saw no change. Now: with a tab open, the page itself
+    offers Restart (see /api/version and /api/restart); with none open for
+    `stale_grace` seconds, this steps aside so the next double-click starts the
+    new copy.
 
     The packaged Mac app has no window, no console and -- because the process
     has no Cocoa event loop -- nothing the Dock can quit. If the user simply
@@ -344,13 +409,35 @@ def _watchdog(backend, every: float = 15.0, silence: float = 600.0):
         about once a minute, which still resets the count every tick or two,
         and a laptop asleep neither ticks nor counts.
     Quitting on purpose is the Quit button in the sidebar (POST /api/quit).
+    `stop` replaces the SIGTERM, for tests.
     """
     import signal
+    import appversion
+    import config
+
+    def _default_stop():
+        try:
+            os.kill(os.getpid(), signal.SIGTERM)
+        except Exception:
+            os._exit(0)
+    stop = stop or _default_stop
+
     ticks_needed = max(1, int(silence / every))
     missed = 0
     while True:
         time.sleep(every)
         last = getattr(backend, "LAST_PING", None)
+        newer = None
+        try:
+            newer = appversion.replaced_on_disk(config.VERSION)
+        except Exception:
+            pass
+        if newer and (last is None or time.monotonic() - last > stale_grace):
+            print(f"[watchdog] FiveAtlas {newer} has been installed over this "
+                  f"{config.VERSION} and no tab is using it -- stopping, so opening "
+                  "the app starts the new one.")
+            stop()
+            return
         if last is None:
             continue                          # no UI has ever connected
         if time.monotonic() - last < every * 2:
@@ -359,10 +446,7 @@ def _watchdog(backend, every: float = 15.0, silence: float = 600.0):
             missed += 1
         if missed >= ticks_needed:
             print(f"[watchdog] no UI heartbeat for ~{int(silence)}s -- stopping.")
-            try:
-                os.kill(os.getpid(), signal.SIGTERM)
-            except Exception:
-                os._exit(0)
+            stop()
             return
 
 
@@ -416,12 +500,15 @@ def main():
 
     preferred = int(os.environ.get("ATLAS_PORT", "8050"))
 
-    # If a FiveAtlas is already up, hand the browser to it and get out of the
-    # way. Starting a second server would give the user two half-states over the
-    # same workdir, and -- much worse -- a second browser tab every time.
-    if _already_running(preferred):
-        url = f"http://127.0.0.1:{preferred}"
-        print(f"FiveAtlas is already running at {url} -- opening that instead.")
+    # If this same FiveAtlas (or a newer one) is already up, hand the browser to
+    # it and get out of the way. Starting a second server would give the user
+    # two half-states over the same workdir, and -- much worse -- a second
+    # browser tab every time. An OLDER one is not reused: see _reuse_running.
+    running = _running_version(preferred)
+    if _reuse_running(running, config.VERSION):
+        url = _page_url(preferred, running)
+        print(f"FiveAtlas {running} is already running at "
+              f"http://127.0.0.1:{preferred} -- opening that instead.")
         if not os.environ.get("ATLAS_NO_BROWSER") and \
                 _claim_browser_open(config.WORKDIR):
             try:
@@ -429,6 +516,10 @@ def main():
             except Exception:
                 pass
         return
+    if running is not None:
+        print(f"An older FiveAtlas ({running or 'an old version'}) is still running at "
+              f"http://127.0.0.1:{preferred} -- starting {config.VERSION} beside it. "
+              "Close the old one when you are done with it.")
 
     try:
         import app as backend
@@ -439,6 +530,7 @@ def main():
 
     port = _free_port(preferred)
     url = f"http://127.0.0.1:{port}"
+    page = _page_url(port, config.VERSION)   # what the browser is sent to
 
     # There is no console window to close on macOS -- say how to stop it there.
     stop = ("Close the browser tab when you are done -- FiveAtlas stops "
@@ -447,14 +539,14 @@ def main():
             else "Keep this window open while you use the app; close it to stop.")
 
     print("=" * 62)
-    print("  FiveAtlas  -  Five Lab region editor")
+    print(f"  FiveAtlas {config.VERSION}  -  Five Lab region editor")
     print(f"  {url}")
     print(f"  edits are saved in: {config.WORKDIR}")
     print(f"  {stop}")
     print("=" * 62)
 
     if not os.environ.get("ATLAS_NO_BROWSER") and _claim_browser_open(config.WORKDIR):
-        threading.Thread(target=_open_when_up, args=(url,), daemon=True).start()
+        threading.Thread(target=_open_when_up, args=(page,), daemon=True).start()
     else:
         print("  (not opening a browser -- go to the address above)")
     if sys.platform == "darwin":

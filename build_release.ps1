@@ -151,9 +151,10 @@ about 2 seconds.
 The first time Windows may say "Windows protected your PC" because the app
 is not code-signed. Click "More info" then "Run anyway".
 
-UPDATING from an older FiveAtlas: close the old one's console window FIRST.
-While an old copy is still running, starting the new one just opens the old
-one again.
+UPDATING from an older FiveAtlas: just open this FiveAtlas.exe. It starts in
+its own browser tab even if an older FiveAtlas is still open; close the old
+console window when you are done with it. The version you are running is
+shown in the top-left corner of the window.
 
 To load your data: click "Open folder..." at the top and pick the folder that
 holds your experiment.xenium file. A list of everything the app can load from

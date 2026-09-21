@@ -30,6 +30,7 @@ from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
+import appversion
 import cachefs
 import config
 import datasets as ds
@@ -176,6 +177,42 @@ def quit_app():
             os._exit(0)
     threading.Timer(0.4, _stop).start()
     return {"ok": True, "stopping": True}
+
+
+@app.get("/api/version")
+def version_info():
+    """The version running, and -- on a Mac -- the version now installed in its
+    place. They differ when FiveAtlas.app was replaced while this one kept
+    running; the page then offers Restart (see /api/restart)."""
+    return {"version": config.VERSION,
+            "installed": appversion.installed_version(),
+            "canRestart": appversion.bundle_dir() is not None}
+
+
+@app.post("/api/restart")
+def restart_app():
+    """Switch to the FiveAtlas installed over this one (Mac): start the app bundle
+    again a moment after this process has exited, so the new copy -- not this
+    one -- takes the port and opens its own tab. macOS alone would only wake this
+    old process when the app is opened again."""
+    import signal
+    import threading
+
+    app_dir = appversion.bundle_dir()
+    if app_dir is None:
+        raise HTTPException(409, "restarting by itself only works in the Mac app "
+                                 "-- close FiveAtlas and open it again")
+    subprocess.Popen(["/bin/sh", "-c", 'sleep 2; /usr/bin/open -n "$0"', str(app_dir)],
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, start_new_session=True)
+
+    def _stop():
+        try:
+            os.kill(os.getpid(), signal.SIGTERM)
+        except Exception:
+            os._exit(0)
+    threading.Timer(0.4, _stop).start()
+    return {"ok": True, "restarting": True}
 
 
 @app.get("/api/datasets")
@@ -2300,7 +2337,15 @@ if _DIST.exists():
 
     @app.get("/")
     def _spa_index():
-        return FileResponse(str(_DIST / "index.html"))
+        return _index_page()
+
+    def _index_page():
+        # The page must never come out of the browser's cache: every version is
+        # served at the same address (http://127.0.0.1:8050/), so a cached copy
+        # of an OLD version's page kept showing after an update. The page then
+        # names hashed script files, so those can be cached as long as liked.
+        return FileResponse(str(_DIST / "index.html"),
+                            headers={"Cache-Control": "no-cache"})
 
     @app.get("/{path:path}")
     def _spa_fallback(path: str):
@@ -2315,7 +2360,7 @@ if _DIST.exists():
             f = (_DIST / path).resolve()
             f.relative_to(_DIST.resolve())
         except (ValueError, OSError):
-            return FileResponse(str(_DIST / "index.html"))
+            return _index_page()
         if f.is_file():
             return FileResponse(str(f))
-        return FileResponse(str(_DIST / "index.html"))   # SPA fallback
+        return _index_page()                              # SPA fallback
