@@ -33,9 +33,22 @@ keep that window open while you work and close it to stop the app.
 
 ### Updating to a new version
 
-When a newer FiveAtlas is out, a line at the top of the sidebar says so and
-links to the download page. The version you are running is always shown in the
-top-left corner of the window.
+**From 1.3.3 on, FiveAtlas updates itself.** When a newer version is out it
+downloads in the background (the sidebar shows the progress), and a bar across
+the top then says **"FiveAtlas … is ready"** with a **Restart to update**
+button. Save your work and click it: FiveAtlas closes and the new version opens
+in a new tab a few seconds later, from the same place it was installed. If you
+don't click it, the switch happens the next time you open FiveAtlas.
+
+It can't update itself when it has no permission to replace its own folder
+(for example a Mac account that is not an administrator), or when it is run
+from source. If an update can't be installed, the old version simply carries on
+and the sidebar links to the download page — update by hand as below.
+
+The version you are running is always shown in the top-left corner of the
+window.
+
+**By hand** (1.3.2 and older, or when the automatic update can't):
 
 - **Windows:** unzip the new version and open its `FiveAtlas.exe`. Since 1.3.1
   the new version starts in its own tab even if the old one is still open;
