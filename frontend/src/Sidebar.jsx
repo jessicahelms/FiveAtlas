@@ -34,7 +34,7 @@ export default function Sidebar({
   onNotesCreate, onDismissNotes, identity, onIdentity,
   onLoadFile, onExport, onExportAnnData,
   snapInfo, busy, error,
-  uiSettings, onUiSettings, updateInfo,
+  uiSettings, onUiSettings, updateInfo, selfUpdate,
 }) {
   const [confirmRestore, setConfirmRestore] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -98,9 +98,24 @@ export default function Sidebar({
           FiveAtlas {updateInfo.latest} is out
           {updateInfo.headline ? <> — <b>{updateInfo.headline}</b></> : null}
           {' '}(you have {updateInfo.current}).{' '}
-          <a href={updateInfo.url} target="_blank" rel="noreferrer">
-            Open the download page
-          </a>
+          {selfUpdate && selfUpdate.state === 'downloading' ? (
+            <span>
+              Downloading it in the background
+              {selfUpdate.progress != null ? ` — ${Math.round(selfUpdate.progress * 100)}%` : ''}…
+            </span>
+          ) : selfUpdate && selfUpdate.state === 'ready' ? (
+            <span>It's ready — <b>Restart to update</b> at the top.</span>
+          ) : (
+            // not the installed app, no permission to replace it, or the
+            // automatic update failed: the download page, as before
+            <>
+              {selfUpdate && selfUpdate.state === 'failed' && selfUpdate.error
+                ? <span>{selfUpdate.error}. </span> : null}
+              <a href={updateInfo.url} target="_blank" rel="noreferrer">
+                Open the download page
+              </a>
+            </>
+          )}
         </div>
       )}
 

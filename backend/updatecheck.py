@@ -1,13 +1,15 @@
 """Is a newer FiveAtlas on the Releases page? Asked politely, remembered briefly.
 
-No auto-download and no self-replacement -- an unsigned app cannot swap its own
-bundle under Gatekeeper, and silently replacing a tool mid-annotation is not a
-behaviour this lab wants anyway. The app just says "a newer one exists" and
-hands over the download page; the person updates when they choose to.
+This only finds out. Fetching and installing the newer version is
+selfupdate.py's job, and it never replaces the app mid-annotation: the person
+restarts when they choose to (or the switch happens the next time FiveAtlas
+is opened). Where it cannot update itself, the page links to the download
+page instead.
 """
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 import time
@@ -54,7 +56,7 @@ def _headline(body):
 
 
 def check(current: str):
-    """-> {current, latest, headline, url, newer} | {current, error}. Never raises, never
+    """-> {current, latest, headline, url, assets, newer} | {current, error}. Never raises, never
     blocks long: one 4-second request, cached for hours, offline is fine."""
     with _lock:
         now = time.time()
@@ -64,9 +66,13 @@ def check(current: str):
             cached["newer"] = ("latest" in cached
                                and _parse(cached["latest"]) > _parse(current))
             return cached
+    # ATLAS_UPDATE_API: a stand-in for GitHub's "latest release" answer, for the
+    # self-update tests (tests/self_update_e2e.py). Never set in normal use.
+    api = (os.environ.get("ATLAS_UPDATE_API")
+           or f"https://api.github.com/repos/{REPO}/releases/latest")
     try:
         req = urllib.request.Request(
-            f"https://api.github.com/repos/{REPO}/releases/latest",
+            api,
             headers={"Accept": "application/vnd.github+json",
                      "User-Agent": f"FiveAtlas/{current}"})
         with urllib.request.urlopen(req, timeout=4) as r:
@@ -75,7 +81,11 @@ def check(current: str):
         result = {"latest": latest,
                   "headline": _headline(data.get("body")),
                   "url": data.get("html_url")
-                  or f"https://github.com/{REPO}/releases/latest"}
+                  or f"https://github.com/{REPO}/releases/latest",
+                  # file name -> download link, for selfupdate.py
+                  "assets": {a.get("name"): a.get("browser_download_url")
+                             for a in (data.get("assets") or [])
+                             if a.get("name") and a.get("browser_download_url")}}
     except Exception as e:
         # offline / rate-limited / air-gapped lab machine: not an event
         return {"current": current, "error": type(e).__name__}

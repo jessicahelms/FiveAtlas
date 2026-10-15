@@ -523,6 +523,21 @@ export async function restartApp() {
   return r.json();
 }
 
+// The background download of a newer FiveAtlas (selfupdate.py).
+export async function updateStatus() {
+  const r = await fetch(`${API}/update/status`, { cache: 'no-store' });
+  if (!r.ok) throw new Error(`update status ${r.status}`);
+  return r.json(); // { state, version, error, progress, canApply, reason? }
+}
+
+// Switch to the downloaded version. Like restartApp, the answer comes back
+// before this server exits and the new version opens its own tab.
+export async function applyUpdate() {
+  const r = await fetch(`${API}/update/apply`, { method: 'POST' });
+  if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+  return r.json(); // { ok, version }
+}
+
 export async function compositeBitmap(ds, spec, { mode = 'glow', binUm = null, palette = null } = {}) {
   const r = await fetch(`${API}/datasets/${ds}/genes/composite.png`, {
     method: 'POST',

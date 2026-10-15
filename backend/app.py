@@ -130,10 +130,47 @@ def health():
 @app.get("/api/update-check")
 def update_check():
     """Is a newer release on GitHub? Cached for hours; offline returns quietly.
-    The app never downloads or installs anything itself -- it only points at
-    the Releases page when a newer version exists."""
+    When there is one and this is the installed app, it starts downloading in
+    the background (selfupdate.py); nothing is installed until the person
+    restarts, or next opens the app."""
     import updatecheck
-    return updatecheck.check(config.VERSION)
+    import selfupdate
+    res = updatecheck.check(config.VERSION)
+    try:
+        selfupdate.prepare(res)
+    except Exception as e:
+        print(f"[update] {type(e).__name__}: {e}", file=sys.stderr)
+    return {k: v for k, v in res.items() if k != "assets"}
+
+
+@app.get("/api/update/status")
+def update_status():
+    """Where the background update is: unsupported | idle | downloading |
+    ready | failed, with progress and the version it is for."""
+    import selfupdate
+    return selfupdate.status()
+
+
+@app.post("/api/update/apply")
+def update_apply():
+    """Switch to the downloaded version: a helper waits for this process to
+    exit, swaps the installed copy and starts the new one, which opens its own
+    tab. The page asks about unsaved edits before calling this."""
+    import signal
+    import threading
+    import selfupdate
+    try:
+        version = selfupdate.apply()
+    except RuntimeError as e:
+        raise HTTPException(409, str(e))
+
+    def _stop():
+        try:
+            os.kill(os.getpid(), signal.SIGTERM)
+        except Exception:
+            os._exit(0)
+    threading.Timer(0.4, _stop).start()
+    return {"ok": True, "version": version}
 
 
 @app.get("/api/selftest")

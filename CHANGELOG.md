@@ -11,6 +11,20 @@ The first `### ` title of a section is also what the app's update banner
 shows ("FiveAtlas 1.3.2 is out — Faster on laptops"), so lead with the change
 people will care about most and keep that title short.
 
+## v1.3.3
+
+### Updates install themselves
+
+- From this version on, a new FiveAtlas downloads in the background, and a bar
+  at the top offers **Restart to update** — one click, and the new version
+  opens in a new tab. Not clicked? It switches the next time you open
+  FiveAtlas.
+- Nothing is replaced while you work, and you are asked first if there are
+  unsaved edits. If an update can't be installed, you keep the version you
+  have and get the download link instead.
+- **This one time**, install 1.3.3 by hand as usual; every update after it is
+  automatic.
+
 ## v1.3.2
 
 ### Faster on laptops

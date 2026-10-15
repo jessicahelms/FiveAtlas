@@ -201,6 +201,13 @@ def _free_port(preferred: int = 8050) -> int:
     for candidate in (preferred, 0):
         s = socket.socket()
         try:
+            # As uvicorn binds (SO_REUSEADDR on POSIX): a port the previous
+            # FiveAtlas let go of a moment ago -- after "Restart to update" --
+            # sits in TIME_WAIT for ~30 s, and without this the new version
+            # landed on a random port instead of 8050. Not on Windows, where
+            # the option would let two servers share a live port.
+            if sys.platform != "win32":
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             s.bind(("127.0.0.1", candidate))
             return s.getsockname()[1]
         except OSError:
@@ -520,6 +527,19 @@ def main():
         print(f"An older FiveAtlas ({running or 'an old version'}) is still running at "
               f"http://127.0.0.1:{preferred} -- starting {config.VERSION} beside it. "
               "Close the old one when you are done with it.")
+
+    # A newer version downloaded last session and not yet switched to: switch
+    # now, before serving (the helper waits for this process to exit, swaps the
+    # installed copy and starts the new one, which opens the tab). Only when no
+    # other FiveAtlas is running -- it may be using the very folder to swap.
+    try:
+        import selfupdate
+        if running is None and selfupdate.apply_on_launch():
+            print("  Updating FiveAtlas -- the new version opens in a few seconds.")
+            return
+        selfupdate.cleanup_after_update()
+    except Exception as e:
+        print(f"[update] {type(e).__name__}: {e}", file=sys.stderr)
 
     try:
         import app as backend
