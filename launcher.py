@@ -201,6 +201,13 @@ def _free_port(preferred: int = 8050) -> int:
     for candidate in (preferred, 0):
         s = socket.socket()
         try:
+            # As uvicorn binds (SO_REUSEADDR on POSIX): a port the previous
+            # FiveAtlas let go of a moment ago -- after "Restart to update" --
+            # sits in TIME_WAIT for ~30 s, and without this the new version
+            # landed on a random port instead of 8050. Not on Windows, where
+            # the option would let two servers share a live port.
+            if sys.platform != "win32":
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             s.bind(("127.0.0.1", candidate))
             return s.getsockname()[1]
         except OSError:

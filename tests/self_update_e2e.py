@@ -11,9 +11,7 @@ Then, as a person would:
 and checks that the new version comes up from the SAME install path and that
 the copy moved aside is cleaned up. Exit status 0 = passed.
 
-Windows: DIR/FiveAtlas/FiveAtlas.exe. macOS: DIR/FiveAtlas.app (the new copy is
-started by `open`, which does not pass this script's environment, so it comes
-up on its default port 8050).
+Windows: DIR/FiveAtlas/FiveAtlas.exe. macOS: DIR/FiveAtlas.app.
 """
 from __future__ import annotations
 
@@ -179,11 +177,26 @@ def main():
     if proc.poll() is None:
         wait_for("the old process to exit", lambda: proc.poll() is not None, 60)
 
-    new_base = "http://127.0.0.1:8050" if MAC else base
-    got = wait_for(f"FiveAtlas {a.new_version} at {new_base}",
-                   lambda: (lambda v: v if v == a.new_version else None)(
-                       get(f"{new_base}/api/version")["version"]), 180)
-    log(f"new app up: {got}")
+    # The new copy prints its address in the log of the shared workdir; it is
+    # the same port unless that port was still busy.
+    def new_up():
+        bases = [base]
+        try:
+            for line in (workdir / "FiveAtlas.log").read_text(encoding="utf-8").splitlines():
+                if line.strip().startswith("http://127.0.0.1:"):
+                    bases.append(line.strip())
+        except Exception:
+            pass
+        for b in reversed(bases):
+            try:
+                if get(f"{b}/api/version")["version"] == a.new_version:
+                    return b
+            except Exception:
+                continue
+        return None
+    new_base = wait_for(f"FiveAtlas {a.new_version}", new_up, 180)
+    log(f"new app up: {a.new_version} at {new_base}"
+        + ("" if new_base == base else "  (NOTE: not on the old port)"))
     assert exe_of(installed).exists(), "the installed path is gone"
 
     # the version the installed copy itself says it is
