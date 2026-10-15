@@ -95,7 +95,9 @@ export default function Sidebar({
 
       {updateInfo && updateInfo.newer && (
         <div className="hint">
-          FiveAtlas {updateInfo.latest} is out (you have {updateInfo.current}).{' '}
+          FiveAtlas {updateInfo.latest} is out
+          {updateInfo.headline ? <> — <b>{updateInfo.headline}</b></> : null}
+          {' '}(you have {updateInfo.current}).{' '}
           <a href={updateInfo.url} target="_blank" rel="noreferrer">
             Open the download page
           </a>

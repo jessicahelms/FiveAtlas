@@ -503,7 +503,7 @@ export async function exportAnnData(ds, fc) {
 export async function updateCheck() {
   const r = await fetch(`${API}/update-check`);
   if (!r.ok) throw new Error(`update-check ${r.status}`);
-  return r.json(); // { current, latest?, url?, newer?, error? }
+  return r.json(); // { current, latest?, headline?, url?, newer?, error? }
 }
 
 // The version running, and (Mac) the version now installed in its place --
