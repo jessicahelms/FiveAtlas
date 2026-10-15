@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import SuggestionBox from './SuggestionBox';
 
 export default function DatasetBar({
   datasets, activeId, onSelect, onOpenFolder, onOpenPath, busy,
@@ -74,6 +75,7 @@ export default function DatasetBar({
           title="throw away every edit since the last save and reload">
           Reset
         </button>
+        <SuggestionBox version={version} />
       </div>
 
       {/* Right under Save, so the answer to "did it save, and where?" is where

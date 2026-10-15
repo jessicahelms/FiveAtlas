@@ -25,6 +25,12 @@ people will care about most and keep that title short.
 - **This one time**, install 1.3.3 by hand as usual; every update after it is
   automatic.
 
+### SugJESStions
+
+- A **💡 SugJESStions** button at the top right: the suggestion box for Jess.
+  Type an idea, a bug, or a wish and press Send — it goes straight to her.
+  Only what you type is sent, plus the FiveAtlas version and Windows or Mac.
+
 ## v1.3.2
 
 ### Faster on laptops
