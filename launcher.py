@@ -521,6 +521,19 @@ def main():
               f"http://127.0.0.1:{preferred} -- starting {config.VERSION} beside it. "
               "Close the old one when you are done with it.")
 
+    # A newer version downloaded last session and not yet switched to: switch
+    # now, before serving (the helper waits for this process to exit, swaps the
+    # installed copy and starts the new one, which opens the tab). Only when no
+    # other FiveAtlas is running -- it may be using the very folder to swap.
+    try:
+        import selfupdate
+        if running is None and selfupdate.apply_on_launch():
+            print("  Updating FiveAtlas -- the new version opens in a few seconds.")
+            return
+        selfupdate.cleanup_after_update()
+    except Exception as e:
+        print(f"[update] {type(e).__name__}: {e}", file=sys.stderr)
+
     try:
         import app as backend
     except Exception as e:

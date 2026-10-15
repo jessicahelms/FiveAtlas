@@ -5,6 +5,7 @@ export default function DatasetBar({
   canSave, dirty, busySave, onSave, onReset, onUndo, onRedo, canUndo, canRedo,
   saveResult, onDismissSave, onRevealSave, onSaveAs, saveTarget,
   version, installedVersion, canRestart, onRestart, restartState,
+  updateReady, onApplyUpdate, updateApplyState,
 }) {
   const shown = saveResult && (saveResult.exported || saveResult.path);
   const warn = saveResult && (saveResult.refused || saveResult.failed || saveResult.exportError);
@@ -168,6 +169,33 @@ export default function DatasetBar({
               </button>
             )}
             {restartState && <span className="update-strip-note">{restartState}</span>}
+          </>
+        )}
+      </div>
+    )}
+
+    {/* A newer release has been downloaded in the background (selfupdate.py).
+        One click switches; left alone, it switches the next time FiveAtlas is
+        opened. Not shown when the Mac strip above is already offering one. */}
+    {updateReady && !installedVersion && (
+      <div className="update-strip" role="status">
+        {updateApplyState === 'restarting' ? (
+          <span>
+            Updating — FiveAtlas {updateReady.version} opens in a new tab in a few
+            seconds. You can close this tab.
+          </span>
+        ) : (
+          <>
+            <span>
+              <b>FiveAtlas {updateReady.version} is ready</b>
+              {updateReady.headline ? <> — {updateReady.headline}</> : null}.{' '}
+              Save your work, then restart to update (or it updates the next time
+              you open FiveAtlas).
+            </span>
+            <button className="btn sm primary" onClick={onApplyUpdate}>
+              Restart to update
+            </button>
+            {updateApplyState && <span className="update-strip-note">{updateApplyState}</span>}
           </>
         )}
       </div>

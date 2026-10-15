@@ -678,6 +678,40 @@ export default function App() {
     return () => { alive = false; clearInterval(t); };
   }, []);
 
+  // The newer release downloading in the background (selfupdate.py): asked
+  // every few seconds while it downloads, then rarely. 'ready' puts the
+  // "Restart to update" strip across the top.
+  const [selfUpdate, setSelfUpdate] = useState(null);
+  const [updateApplyState, setUpdateApplyState] = useState(null); // null | 'restarting' | message
+  const updateWanted = !!(updateInfo && updateInfo.newer);
+  useEffect(() => {
+    if (!updateWanted) return undefined;
+    let alive = true;
+    let timer = null;
+    const ask = async () => {
+      let s = null;
+      try { s = await api.updateStatus(); } catch (e) { /* restarting / offline */ }
+      if (!alive) return;
+      if (s) setSelfUpdate(s);
+      timer = setTimeout(ask, s && s.state === 'downloading' ? 3000 : 30000);
+    };
+    ask();
+    return () => { alive = false; clearTimeout(timer); };
+  }, [updateWanted]);
+
+  const applySelfUpdate = useCallback(async () => {
+    if (dirty && !window.confirm('You have edits that are not saved yet. '
+      + 'Update anyway? Unsaved edits will be lost — press Cancel, then Save, to keep them.')) {
+      return;
+    }
+    try {
+      await api.applyUpdate();
+      setUpdateApplyState('restarting');
+    } catch (e) {
+      setUpdateApplyState(apiDetail(e));
+    }
+  }, [dirty]);
+
   const restartIntoInstalled = useCallback(async () => {
     if (dirty && !window.confirm('You have edits that are not saved yet. '
       + 'Restart anyway? Unsaved edits will be lost — press Cancel, then Save, to keep them.')) {
@@ -2548,6 +2582,12 @@ export default function App() {
           && appVersion.installed !== appVersion.version ? appVersion.installed : null}
         canRestart={!!(appVersion && appVersion.canRestart)}
         onRestart={restartIntoInstalled} restartState={restartState}
+        updateReady={selfUpdate && selfUpdate.canApply ? {
+          version: selfUpdate.version,
+          headline: updateInfo && updateInfo.latest === selfUpdate.version
+            ? updateInfo.headline : null,
+        } : null}
+        onApplyUpdate={applySelfUpdate} updateApplyState={updateApplyState}
       />
       <div className="app">
         {pendingDs && (
@@ -2723,7 +2763,7 @@ export default function App() {
                 onNotesCreate={doNotesCreate} onDismissNotes={() => setNotesReport(null)}
                 identity={identity} onIdentity={doSetIdentity}
                 uiSettings={uiSettings} onUiSettings={applyUiSettings}
-                updateInfo={updateInfo}
+                updateInfo={updateInfo} selfUpdate={selfUpdate}
                 onLoadFile={loadRegionsFromFile} onExport={doExport}
                 onExportAnnData={sources && sources.sources
                   && sources.sources.transcripts ? doExportAnnData : null}
