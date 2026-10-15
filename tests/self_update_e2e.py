@@ -124,9 +124,14 @@ def main():
     a = ap.parse_args()
 
     install_root = Path(a.install).resolve()
-    if install_root.exists():
-        shutil.rmtree(install_root)
-    install_root.mkdir(parents=True)
+    install_root.mkdir(parents=True, exist_ok=True)
+    # Only ever remove FiveAtlas itself and update leftovers -- on a Mac the
+    # install folder is /Applications.
+    for p in install_root.iterdir():
+        if p.name in ("FiveAtlas", "FiveAtlas.app") or p.name.startswith((
+                "FiveAtlas.old-", ".FiveAtlas-old-", "FiveAtlas-update-",
+                ".FiveAtlas-update-", ".FiveAtlas-unpack-")):
+            shutil.rmtree(p, ignore_errors=True)
     workdir = Path(tempfile.mkdtemp(prefix="fa-e2e-wd-"))
     new_zip = Path(a.new_zip).resolve()
     zip_name = new_zip.name

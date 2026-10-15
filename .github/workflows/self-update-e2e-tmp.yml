@@ -1,0 +1,52 @@
+# TEMPORARY -- runs tests/self_update_e2e.py on a real Mac against two builds
+# of the feat/self-update branch (1.3.90 -> 1.3.91). Removed before merging.
+name: Self-update e2e (temporary)
+
+on:
+  push:
+    branches: [feat/self-update]
+    paths: [".github/workflows/self-update-e2e-tmp.yml"]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  mac:
+    runs-on: macos-14
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      OLD_RUN: "38805941159"
+      NEW_RUN: "38805949746"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Fetch the two builds
+        run: |
+          gh run download "$OLD_RUN" -R "$GITHUB_REPOSITORY" -D "$RUNNER_TEMP/old"
+          gh run download "$NEW_RUN" -R "$GITHUB_REPOSITORY" -D "$RUNNER_TEMP/new"
+          ls -R "$RUNNER_TEMP/old" "$RUNNER_TEMP/new" | grep -E "\.zip$"
+      - name: Restart to update, in /Applications
+        run: |
+          python3 tests/self_update_e2e.py --install /Applications \
+            --old-zip "$(ls "$RUNNER_TEMP"/old/*/FiveAtlas-1.3.90-macos-arm64.zip)" \
+            --new-zip "$(ls "$RUNNER_TEMP"/new/*/FiveAtlas-1.3.91-macos-arm64.zip)" \
+            --new-version 1.3.91 --mode click
+      - name: Switch over on next launch, in /Applications
+        run: |
+          sleep 5
+          python3 tests/self_update_e2e.py --install /Applications \
+            --old-zip "$(ls "$RUNNER_TEMP"/old/*/FiveAtlas-1.3.90-macos-arm64.zip)" \
+            --new-zip "$(ls "$RUNNER_TEMP"/new/*/FiveAtlas-1.3.91-macos-arm64.zip)" \
+            --new-version 1.3.91 --mode launch
+      - name: Logs
+        if: always()
+        run: |
+          for f in /tmp/fa-e2e-wd-*/FiveAtlas.log "$TMPDIR"/fa-e2e-wd-*/FiveAtlas.log \
+                   "$HOME/Library/Application Support/FiveAtlas/FiveAtlas.log" \
+                   /tmp/fa-e2e-wd-*/updates/* "$TMPDIR"/fa-e2e-wd-*/updates/*; do
+            [ -f "$f" ] && { echo "===== $f"; tail -60 "$f"; }
+          done
+          ls -la /Applications | grep -i fiveatlas || true
