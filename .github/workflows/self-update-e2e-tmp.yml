@@ -27,20 +27,20 @@ jobs:
         run: |
           gh run download "$OLD_RUN" -R "$GITHUB_REPOSITORY" -D "$RUNNER_TEMP/old"
           gh run download "$NEW_RUN" -R "$GITHUB_REPOSITORY" -D "$RUNNER_TEMP/new"
-          ls -R "$RUNNER_TEMP/old" "$RUNNER_TEMP/new" | grep -E "\.zip$"
+          OLDZIP="$(find "$RUNNER_TEMP/old" -name 'FiveAtlas-1.3.90-macos-arm64.zip' | head -1)"
+          NEWZIP="$(find "$RUNNER_TEMP/new" -name 'FiveAtlas-1.3.91-macos-arm64.zip' | head -1)"
+          [ -n "$OLDZIP" ] && [ -n "$NEWZIP" ] || { find "$RUNNER_TEMP/old" "$RUNNER_TEMP/new"; exit 1; }
+          echo "OLDZIP=$OLDZIP" >> "$GITHUB_ENV"
+          echo "NEWZIP=$NEWZIP" >> "$GITHUB_ENV"
       - name: Restart to update, in /Applications
         run: |
           python3 tests/self_update_e2e.py --install /Applications \
-            --old-zip "$(ls "$RUNNER_TEMP"/old/*/FiveAtlas-1.3.90-macos-arm64.zip)" \
-            --new-zip "$(ls "$RUNNER_TEMP"/new/*/FiveAtlas-1.3.91-macos-arm64.zip)" \
-            --new-version 1.3.91 --mode click
+            --old-zip "$OLDZIP" --new-zip "$NEWZIP" --new-version 1.3.91 --mode click
       - name: Switch over on next launch, in /Applications
         run: |
           sleep 5
           python3 tests/self_update_e2e.py --install /Applications \
-            --old-zip "$(ls "$RUNNER_TEMP"/old/*/FiveAtlas-1.3.90-macos-arm64.zip)" \
-            --new-zip "$(ls "$RUNNER_TEMP"/new/*/FiveAtlas-1.3.91-macos-arm64.zip)" \
-            --new-version 1.3.91 --mode launch
+            --old-zip "$OLDZIP" --new-zip "$NEWZIP" --new-version 1.3.91 --mode launch
       - name: Logs
         if: always()
         run: |
