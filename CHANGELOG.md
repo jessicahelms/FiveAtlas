@@ -7,6 +7,24 @@ exactly; CI matches it against the tag. Inside a section, `### ` headings
 are allowed: on the release page they are printed one size up, so each new
 feature reads as a big title with its explanation under it.
 
+The first `### ` title of a section is also what the app's update banner
+shows ("FiveAtlas 1.3.2 is out — Faster on laptops"), so lead with the change
+people will care about most and keep that title short.
+
+## v1.3.2
+
+### Faster on laptops
+
+- Stain brightness and colour sliders change the picture as you drag,
+  instead of a few seconds after you let go.
+- Zooming in fills in faster, and the viewer works the graphics chip less on
+  high-resolution laptop screens.
+
+### Updates say what's new
+
+- When a newer FiveAtlas is out, the notice at the top of the sidebar now
+  says what it brings, not just its version number.
+
 ## v1.3.1
 
 ### Updating now really opens the new version

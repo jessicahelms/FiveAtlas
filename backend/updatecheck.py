@@ -8,6 +8,7 @@ hands over the download page; the person updates when they choose to.
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 import urllib.request
@@ -31,8 +32,29 @@ def _parse(v):
     return tuple((out + [0, 0, 0])[:3])
 
 
+def _headline(body):
+    """The release's first "What's new" title, for the banner to say WHY to
+    update ("FiveAtlas 1.3.2 is out -- Faster on laptops").
+
+    CI writes the release body as "# What's new in FiveAtlas vX" followed by
+    the CHANGELOG section with its ### titles printed as "## ". Only a title
+    under that heading counts: a release with no CHANGELOG section carries the
+    install instructions alone, and their headings are not news.
+    """
+    inside = False
+    for line in str(body or "").splitlines():
+        s = line.strip()
+        if s.startswith("# "):
+            inside = s[2:].lower().replace("’", "'").startswith("what's new")
+            continue
+        if inside and s.startswith("## "):
+            title = re.sub(r"[*_`]", "", s[3:]).strip().rstrip(".!:;")
+            return title[:100] or None
+    return None
+
+
 def check(current: str):
-    """-> {current, latest, url, newer} | {current, error}. Never raises, never
+    """-> {current, latest, headline, url, newer} | {current, error}. Never raises, never
     blocks long: one 4-second request, cached for hours, offline is fine."""
     with _lock:
         now = time.time()
@@ -51,6 +73,7 @@ def check(current: str):
             data = json.loads(r.read().decode())
         latest = str(data.get("tag_name") or "").lstrip("v")
         result = {"latest": latest,
+                  "headline": _headline(data.get("body")),
                   "url": data.get("html_url")
                   or f"https://github.com/{REPO}/releases/latest"}
     except Exception as e:
