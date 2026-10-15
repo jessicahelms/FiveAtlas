@@ -68,8 +68,8 @@ class Pyramid:
         pass that may never happen in an idle server. Until then Windows keeps
         the whole dataset folder locked: closing a dataset and then trying to
         move or rename it fails with "the file is open in another program".
-        Idempotent, and safe to call while requests are in flight (the lock is
-        the same one _read_window takes).
+        Idempotent, and safe to call while requests are in flight: a read that
+        loses the race raises KeyError, which the tile route turns into a 404.
         """
         with self._lock:
             self._root = None
@@ -104,11 +104,20 @@ class Pyramid:
         return root  # single-level image: only level 0
 
     def _read_window(self, level, plane, y0, y1, x0, x1) -> np.ndarray:
-        a = self._arr(level)
-        with self._lock:
+        # Deliberately NOT under self._lock. tifffile's zarr store already holds
+        # the file handle's own lock around each seek+read and decodes outside
+        # it, so concurrent tile requests decode JPEG2000 on separate cores.
+        # Holding our lock here serialised every decode onto one core -- a new
+        # view filled in one tile at a time.
+        try:
+            a = self._arr(level)
             if self.zc is None:
                 return np.asarray(a[y0:y1, x0:x1])
             return np.asarray(a[plane, y0:y1, x0:x1])
+        except Exception:
+            if self._tif is None:            # raced a close(): say so plainly
+                raise KeyError("pyramid is closed")
+            raise
 
     def _plane(self, plane: Optional[int]) -> int:
         if self.zc is None:
@@ -185,7 +194,9 @@ class Pyramid:
         if u8 is None:
             return None
         buf = io.BytesIO()
-        Image.fromarray(u8, mode="L").save(buf, format="PNG")
+        # compress_level=1: about half the encode time of the default (6) for a
+        # somewhat larger file -- served from localhost, so the bytes are cheap.
+        Image.fromarray(u8, mode="L").save(buf, format="PNG", compress_level=1)
         return buf.getvalue()
 
     def overview_png(self, max_side: int = 1024) -> bytes:

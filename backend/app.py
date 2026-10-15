@@ -39,6 +39,7 @@ from PIL import Image as PILImage
 
 import orientation as ORI
 import scan
+import tilecache
 import damage as DMG
 import notes
 import provenance
@@ -237,6 +238,10 @@ def _evict(ds_id: str):
                 closer()
             except Exception as e:
                 print(f"[evict] {ds_id}: {type(e).__name__}: {e}", file=sys.stderr)
+    # AFTER the readers are gone: a tile route reads the generation before it
+    # gets a reader, so any request that could still see an old reader holds the
+    # old generation, and its tile is never served again.
+    tilecache.drop_dataset(ds_id)
 
 
 @app.delete("/api/datasets/{ds_id}")
@@ -738,8 +743,15 @@ def info(ds_id: str, noimg: int = 0):
                 "levels": 1, "tileSize": 512, "nZ": 1, "offline": True}
 
 
+def _okey(o) -> tuple:
+    """Orientation as a hashable tile-cache key part."""
+    o = ORI.normalise(o)
+    return (o["rot"], bool(o["flipH"]), bool(o["flipV"]))
+
+
 @app.get("/api/datasets/{ds_id}/tiles/{z}/{x}/{y}.png")
 def tile(ds_id: str, z: int, x: int, y: int, plane: Optional[int] = None):
+    gen = tilecache.generation(ds_id)      # before the reader -- see _evict
     try:
         p = pyramid(ds_id)
     except NoImagery:
@@ -747,9 +759,17 @@ def tile(ds_id: str, z: int, x: int, y: int, plane: Optional[int] = None):
     except KeyError:
         raise HTTPException(404, "unknown dataset")
     level = (p.nlevels - 1) - z
-    png = p.tile_png(level, x, y, plane, orient=ORI.get(ds_id))
+    o = ORI.get(ds_id)
+    key = (ds_id, gen, "morph", level, x, y, plane, _okey(o))
+    png = tilecache.get(key)
     if png is None:
-        return Response(status_code=204)
+        try:
+            png = p.tile_png(level, x, y, plane, orient=o)
+        except KeyError:
+            raise HTTPException(404, "dataset closed while reading")
+        if png is None:
+            return Response(status_code=204)
+        tilecache.put(key, png)
     return Response(content=png, media_type="image/png",
                     headers={"Cache-Control": "max-age=3600"})
 
@@ -2285,6 +2305,41 @@ def stains_contrast(ds_id: str, idx: int):
         return ss.channel_contrast(idx)
     except KeyError:
         raise HTTPException(404, "stain stack closed while reading")
+
+
+@app.get("/api/datasets/{ds_id}/stains/raw/{idx}/{z}/{x}/{y}")
+def stains_raw_tile(ds_id: str, idx: int, z: int, x: int, y: int):
+    """One stain channel's tile as raw little-endian uint16 (tile x tile), for
+    the browser to colour and blend on the GPU. No contrast or colour in the
+    URL: those never reach the server, so a slider move fetches nothing.
+
+    Not in tilecache: StainStack already keeps the decoded channel tiles, and a
+    second copy as bytes would only double the memory."""
+    try:
+        ss = stainstack(ds_id)
+    except KeyError:
+        raise HTTPException(404, "no morphology_focus stains")
+    if not ss.has_channel(idx):
+        raise HTTPException(404, "no such stain channel")
+    level = (ss.nlevels - 1) - z
+    if level < 0 or level >= ss.nlevels:
+        raise HTTPException(404, "bad z")
+    try:
+        t = ss.channel_tile(idx, level, x, y, orient=ORI.get(ds_id))
+    except KeyError:
+        raise HTTPException(404, "stain stack closed while reading")
+    except Exception as e:
+        # as stains_tile: a read that broke on the way (network drive, Box)
+        # answers "try again", and the viewer retries the tile
+        print(f"[stains] {ds_id} raw ch={idx} z={z} x={x} y={y}: {type(e).__name__}: {e}",
+              file=sys.stderr)
+        raise HTTPException(503, "reading the stain tile failed -- try again")
+    if t is None:
+        return Response(status_code=204)
+    data = t.astype("<u2", copy=False).tobytes()
+    return Response(content=data, media_type="application/octet-stream",
+                    headers={"Cache-Control": "max-age=3600",
+                             "X-Tile-Size": str(ss.tile)})
 
 
 @app.get("/api/datasets/{ds_id}/stains/tiles/{z}/{x}/{y}.png")
