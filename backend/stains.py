@@ -220,7 +220,10 @@ class StainStack:
             cx1, cy1 = min(W, x1), min(H, y1)
             if cx1 <= cx0 or cy1 <= cy0:
                 return None
-            data = np.asarray(arr[..., cy0:cy1, cx0:cx1]).squeeze()
+            data = np.asarray(arr[..., cy0:cy1, cx0:cx1])
+        # drop only the leading singleton axes: squeeze() also flattened a
+        # 1-pixel-wide edge tile to 1-D, which then failed to pad (a 500)
+        data = data.reshape(data.shape[-2:])
         data.setflags(write=False)
         self._cache_put(key, data)
         return data
@@ -281,6 +284,52 @@ class StainStack:
         """An arbitrary rectangle of one channel -- what a rotated displayed tile
         needs, since its source rectangle is not tile-aligned."""
         return self._read(idx, level, x0, y0, x1, y1)
+
+    # ---- one channel, untouched --------------------------------------------
+    def has_channel(self, idx) -> bool:
+        return idx in self._member
+
+    def channel_tile(self, idx, level, tx, ty, orient=None):
+        """One channel's tile as raw uint16, tile x tile, in DISPLAY orientation.
+
+        What the browser composites on the GPU: colour, contrast and the additive
+        blend happen in a shader, so moving a slider costs a uniform update
+        instead of a request per visible tile. Reads go through _read, so they
+        share the decoded-tile cache; placement maths as composite_tile, so the
+        two stay registered.
+        """
+        if idx not in self._member or self.nlevels is None:
+            return None
+        if level < 0 or level >= self.nlevels:
+            return None
+        T = self.tile
+        if orient is None or ORI.is_identity(orient):
+            t = self._tile(idx, level, tx, ty)
+            if t is None:
+                return None
+            pad = np.zeros((T, T), np.uint16)
+            pad[: t.shape[0], : t.shape[1]] = t
+            return pad
+        H, W = self.level_shapes[level]
+        win = ORI.source_window(tx, ty, T, orient, W, H)
+        if win is None:
+            return None
+        t = self._window(idx, level, *win)
+        if t is None:
+            return None
+        x0, y0, x1, y1 = win
+        t = ORI.transform_image(t, orient)
+        cx = [ORI.fwd(x, y, orient, W, H) for x in (x0, x1) for y in (y0, y1)]
+        dx0 = int(round(min(c[0] for c in cx))) - tx * T
+        dy0 = int(round(min(c[1] for c in cx))) - ty * T
+        pad = np.zeros((T, T), np.uint16)
+        sy0, sx0 = max(0, -dy0), max(0, -dx0)
+        dy, dx = max(0, dy0), max(0, dx0)
+        h = min(t.shape[0] - sy0, T - dy)
+        w = min(t.shape[1] - sx0, T - dx)
+        if h > 0 and w > 0:
+            pad[dy:dy + h, dx:dx + w] = t[sy0:sy0 + h, sx0:sx0 + w]
+        return pad
 
     # ---- composite tile ----------------------------------------------------
     def composite_tile(self, spec, level, tx, ty, orient=None):

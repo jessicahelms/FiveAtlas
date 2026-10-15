@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useSyncExternalStore } from 'react';
 import {
   DeckGL,
   OrthographicView,
@@ -18,6 +18,8 @@ import {
 } from '@deck.gl-community/editable-layers';
 import { PointEditMode, existingPointProps } from './pointEditMode';
 import { fetchTile } from './tileFetch';
+import { stainTileLayer } from './stainLayer';
+import { subscribeStainLive, getStainLive } from './stainLive';
 
 // Edit points uses PointEditMode: a plain click on a point never deletes it,
 // a right-click does (see handleContextMenu). The shared-border editor below
@@ -145,18 +147,26 @@ function pyramidTileLayer({ id, levels, tileSize, width, height, opacity, urlFor
     maxZoom: 0,
     extent: [0, 0, width, height],
     opacity,
+    // Each 1024 tile is a ~4 MB texture, and by default deck keeps as many as
+    // it likes. On a laptop's integrated GPU that memory is shared with the
+    // system, so cap it; tiles dropped here come back from the server cache.
+    maxCacheByteSize: TILE_CACHE_BYTES,
     getTileData: ({ index, signal }) => {
       const backendZ = maxLevel + index.z;
       if (backendZ < 0 || backendZ > maxLevel) return Promise.resolve(null);
       // retries a failed tile: deck would otherwise keep it blank for good
-      return fetchTile(urlFor(backendZ, index.x, index.y), { signal });
+      return fetchTile(urlFor(backendZ, index.x, index.y), { signal })
+        // deck sizes its tile cache from content.byteLength, which an
+        // ImageBitmap does not have -- without it the byte cap is NaN and
+        // never evicts anything. It lands on the GPU as RGBA.
+        .then((img) => (img ? { image: img, byteLength: img.width * img.height * 4 } : null));
     },
     renderSubLayers: (props) => {
       const bb = props.tile.boundingBox;
       if (!props.data) return null;
       return new BitmapLayer(props, {
         data: null,
-        image: props.data,
+        image: props.data.image,
         bounds: [bb[0][0], bb[1][1], bb[1][0], bb[0][1]], // flipY [left,bottom,right,top]
       });
     },
@@ -165,6 +175,16 @@ function pyramidTileLayer({ id, levels, tileSize, width, height, opacity, urlFor
 }
 
 const EMPTY_SET = new Set();
+const TILE_CACHE_BYTES = 256 * 1024 * 1024;   // per tile layer
+const STAIN_CACHE_BYTES = 192 * 1024 * 1024;  // all stain channels together
+
+// HiDPI laptop screens report a devicePixelRatio of 1.5-2, and drawing at full
+// device resolution is 2-4x the pixels for the GPU to fill. Capping at 1.5
+// keeps lines and text crisp while taking most of that cost off the table.
+const DEVICE_PIXELS = Math.min(window.devicePixelRatio || 1, 1.5);
+
+// One view for the life of the app: a new View every render makes deck diff it.
+const VIEWS = [new OrthographicView({ flipY: true, controller: true })];
 
 export default function Viewer({
   info, dsId, fc, mode, idProp = 'name', selectedIndexes, onEdit, onClickFeature,
@@ -211,7 +231,6 @@ export default function Viewer({
     return { target: [info.width / 2, info.height / 2, 0], zoom, minZoom: -8, maxZoom: 8 };
   }, [info.width, info.height]);
 
-  const selected = new Set(selectedIndexes);
   // changes whenever any stored colour changes, so deck knows to repaint
   const colourKey = useMemo(() => (fc.features || [])
     .map((f) => {
@@ -222,15 +241,19 @@ export default function Viewer({
   const showEditableRegions = L.showRegions || mode === 'modify' || mode === 'border'
     || mode === 'split' || mode === 'dissolve' || mode === 'draw' || mode === 'clean';
 
-  // base64 spec of the visible stain channels -> drives the stain tile URLs
-  const stainSpec = useMemo(() => {
-    if (!stainChannels) return '';
-    const vis = stainChannels.filter((c) => c.visible).map((c) => ({
-      index: c.index, color: c.color, min: c.min, max: c.max, visible: true,
-    }));
-    if (!vis.length) return '';
-    return encodeURIComponent(btoa(JSON.stringify(vis)));
-  }, [stainChannels]);
+  // Stains are blended on the GPU (stainLayer.js). Only WHICH channels are
+  // visible decides what gets downloaded; colour and contrast are uniforms --
+  // including the live values a slider is mid-drag on, which never touch App.
+  const stainLive = useSyncExternalStore(subscribeStainLive, getStainLive);
+  const stainFetch = useMemo(() => (stainChannels || [])
+    .filter((c) => c.visible).map((c) => c.index), [stainChannels]);
+  const stainSettings = useMemo(() => {
+    const out = {};
+    (stainChannels || []).forEach((c) => {
+      out[c.index] = { color: c.color, min: c.min, max: c.max, visible: c.visible, ...stainLive[c.index] };
+    });
+    return out;
+  }, [stainChannels, stainLive]);
 
   // Rotating changes what a tile CONTAINS but not its (z, x, y), so nothing else
   // would tell either cache to let go: the browser holds tiles for an hour under
@@ -252,15 +275,17 @@ export default function Viewer({
     urlFor: (z, x, y) => `/api/datasets/${dsId}/tiles/${z}/${x}/${y}.png?o=${oKey}`,
   });
 
-  const stains = (stainInfo && stainSpec)
-    ? pyramidTileLayer({
-        id: `stain-tiles-${oKey}`, refetchKey: `${stainSpec}|${oKey}`,
+  const stains = (stainInfo && stainFetch.length)
+    ? stainTileLayer({
+        id: `stain-tiles-${oKey}`, dsId, oKey,
         levels: stainInfo.levels, tileSize: stainInfo.tileSize,
         // the displayed extent, which a quarter turn swaps -- info is the one the
         // backend re-reports on rotation, so both layers agree
         width: info.width, height: info.height, opacity: L.stainOpacity,
-        urlFor: (z, x, y) =>
-          `/api/datasets/${dsId}/stains/tiles/${z}/${x}/${y}.png?s=${stainSpec}&o=${oKey}`,
+        fetchIndexes: stainFetch, settings: stainSettings,
+        // one channel tile is 2 MB; on integrated graphics GPU memory is system
+        // RAM, so the stains get a tighter budget than the morphology
+        cacheBytes: STAIN_CACHE_BYTES,
       })
     : null;
 
@@ -300,21 +325,24 @@ export default function Viewer({
       const [r, g, b] = regionRgb(f, idProp);
       return [r, g, b, 70];
     },
-    getLineColor: (f) => {
+    // The editable layer passes isSelected as the second argument -- it checks
+    // its own short list of selected features, where fc.features.indexOf(f)
+    // scanned every region for every region on each repaint.
+    getLineColor: (f, isSelected) => {
       const nm = regionName(f, idProp);
       if (nm && off.has(nm)) return [0, 0, 0, 0];
       const pi = nm ? picks.indexOf(nm) : -1;
       if (pi >= 0) { const [r, g, b] = PICK_COLORS[Math.min(pi, 2)]; return [r, g, b, 255]; }
-      if (selected.has(fc.features.indexOf(f))) return [255, 80, 80, 255];
+      if (isSelected === true) return [255, 80, 80, 255];
       if (nm && bOff.has(nm)) return [0, 0, 0, 0];
       const [r, g, b] = regionRgb(f, idProp);
       return [r, g, b, 230];      // outline matches the fill, so a colour reads
     },
     lineWidthUnits: 'pixels',
-    getLineWidth: (f) => {
+    getLineWidth: (f, isSelected) => {
       const nm = regionName(f, idProp);
       if (nm && picks.indexOf(nm) >= 0) return 3;
-      return selected.has(fc.features.indexOf(f)) ? 3 : 1;
+      return isSelected === true ? 3 : 1;
     },
     updateTriggers: {
       // colourKey so a colour change repaints -- deck caches these accessors
@@ -648,7 +676,8 @@ export default function Viewer({
       onPointerDown={handleHostPointerDown} onClick={handleHostClick}>
       <DeckGL
       ref={deckRef}
-      views={[new OrthographicView({ flipY: true, controller: true })]}
+      views={VIEWS}
+      useDevicePixels={DEVICE_PIXELS}
       initialViewState={initialViewState}
       layers={stack}
       getCursor={() => (mode === 'modify' || mode === 'border' || mode === 'split'

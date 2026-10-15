@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
+import { setStainLive, clearStainLive } from './stainLive';
 
 const toHex = (rgb) =>
   '#' + rgb.map((v) => Math.max(0, Math.min(255, v | 0)).toString(16).padStart(2, '0')).join('');
 const fromHex = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
 
-function ChannelRow({ c, i, keyName, onChange, onRemove }) {
+function ChannelRow({ c, i, keyName, onChange, onRemove, live }) {
   const dataMax = Math.max(1, Number(c.dataMax) || 1);
   const step = Math.max(1, Math.round(dataMax / 500));
   const minCeil = Math.max(0, dataMax - step);
@@ -15,7 +16,14 @@ function ChannelRow({ c, i, keyName, onChange, onRemove }) {
   const [pend, setPend] = useState(null);          // {min,max} while dragging
   const timer = useRef(null);
   useEffect(() => () => clearTimeout(timer.current), []);
-  useEffect(() => { setPend(null); }, [c.min, c.max]);   // outside update wins
+  useEffect(() => {                                      // outside update wins
+    // ...unless the hand is still moving: a commit from an earlier pause would
+    // otherwise snap the slider (and the live stain preview) back mid-drag
+    if (timer.current) return;
+    setPend(null);
+    if (live) clearStainLive(c.index);
+  }, [c.min, c.max]);
+  useEffect(() => () => { if (live) clearStainLive(c.index); }, []);
 
   const shownMin = Math.min(Math.max(0, Number(pend ? pend.min : c.min) || 0), minCeil);
   const shownMax = Math.min(Math.max(shownMin + step,
@@ -26,8 +34,10 @@ function ChannelRow({ c, i, keyName, onChange, onRemove }) {
     next.min = Math.min(Math.max(0, next.min), minCeil);
     next.max = Math.min(Math.max(next.max, next.min + step), dataMax);
     setPend(next);
+    // stains repaint on the GPU right away; the commit below still waits
+    if (live) setStainLive(c.index, next);
     clearTimeout(timer.current);
-    timer.current = setTimeout(() => onChange(i, next), 250);
+    timer.current = setTimeout(() => { timer.current = null; onChange(i, next); }, 250);
   };
 
   return (
@@ -122,7 +132,7 @@ export default function ChannelPanel({
         <div className="section">
           <div className="section-title">Stains — morphology_focus ({stainChannels.length})</div>
           {stainChannels.map((c, i) => (
-            <ChannelRow key={c.index} c={c} i={i} keyName="name" onChange={onStainChange} />
+            <ChannelRow key={c.index} c={c} i={i} keyName="name" onChange={onStainChange} live />
           ))}
         </div>
       )}
