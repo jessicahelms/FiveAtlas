@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { parseName, nextNumber, formatName } from './damage';
+import { displayVersion } from './version';
 
 function displayName(feature, idProp) {
   const props = (feature && feature.properties) || {};
@@ -97,7 +98,7 @@ export default function Sidebar({
         <div className="hint">
           FiveAtlas {updateInfo.latest} is out
           {updateInfo.headline ? <> — <b>{updateInfo.headline}</b></> : null}
-          {' '}(you have {updateInfo.current}).{' '}
+          {' '}(you have {displayVersion(updateInfo.current)}).{' '}
           {selfUpdate && selfUpdate.state === 'downloading' ? (
             <span>
               Downloading it in the background

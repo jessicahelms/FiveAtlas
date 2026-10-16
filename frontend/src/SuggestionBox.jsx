@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { WEB3FORMS_KEY, SUGGESTION_EMAIL } from './config';
 
-// "Suggestion box for Jess... SugJESStions." A button in the top bar that opens
+// "Sug-Jess-tions": the suggestion box for Jess. A button in the top bar that opens
 // a small form. With WEB3FORMS_KEY set the suggestion is sent from the page and
 // arrives as an email; without it (or if sending fails) the person's own email
 // app opens with the message already written, and there is a Copy button for
@@ -19,7 +19,7 @@ export default function SuggestionBox({ version }) {
     if (/Windows/.test(ua)) return 'Windows';
     return navigator.platform || 'unknown';
   })();
-  const subject = `SugJESStion from FiveAtlas${name.trim() ? ` (${name.trim()})` : ''}`;
+  const subject = `Sug-Jess-tion from FiveAtlas${name.trim() ? ` (${name.trim()})` : ''}`;
   const body = `${text.trim()}\n\n--\nFrom: ${name.trim() || '(no name given)'}\n`
     + `FiveAtlas ${version || '?'} on ${platform}`;
 
@@ -63,12 +63,12 @@ export default function SuggestionBox({ version }) {
     <>
       <button className="btn sm" onClick={() => setOpen((o) => !o)}
         title="Suggestion box for Jess: ideas, bugs, anything">
-        💡 SugJESStions
+        💡 Sug-Jess-tions
       </button>
       {open && (
         <div className="savetoast suggestbox" role="dialog" aria-label="Suggestion box">
           <div className="savetoast-head">
-            <span><b>Suggestion box for Jess…</b> SugJESStions.</span>
+            <span><b>Sug-Jess-tions</b></span>
             <button className="savetoast-x" onClick={close} title="close">×</button>
           </div>
           {state === 'sent' ? (
@@ -76,7 +76,7 @@ export default function SuggestionBox({ version }) {
           ) : (
             <>
               <textarea className="suggestbox-text" rows={5} autoFocus
-                placeholder="An idea, something that bugged you, a feature you wish it had…"
+                placeholder={'Hi Jess!\n\nI have an issue with...'}
                 value={text} onChange={(e) => { setText(e.target.value); if (state && state !== 'sending') setState(null); }} />
               <input className="suggestbox-name" placeholder="Your name (optional)"
                 value={name} onChange={(e) => setName(e.target.value)} />

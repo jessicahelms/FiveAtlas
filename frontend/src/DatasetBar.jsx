@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import SuggestionBox from './SuggestionBox';
+import { displayVersion } from './version';
 
 export default function DatasetBar({
   datasets, activeId, onSelect, onOpenFolder, onOpenPath, busy,
@@ -17,8 +18,8 @@ export default function DatasetBar({
       {/* Which FiveAtlas this is, always in view: after an update, the first
           question is "am I on the new one?" and there was nowhere to look. */}
       {version && (
-        <span className="dsbar-version" title="the FiveAtlas version you are running">
-          FiveAtlas {version}
+        <span className="dsbar-version" title={`the FiveAtlas version you are running (${version})`}>
+          FiveAtlas {displayVersion(version)}
         </span>
       )}
       <span className="dsbar-title">Dataset</span>
@@ -153,14 +154,14 @@ export default function DatasetBar({
       <div className="update-strip" role="status">
         {restartState === 'restarting' ? (
           <span>
-            Restarting — FiveAtlas {installedVersion} opens in a new tab in a few
+            Restarting — FiveAtlas {displayVersion(installedVersion)} opens in a new tab in a few
             seconds. You can close this tab.
           </span>
         ) : (
           <>
             <span>
-              <b>FiveAtlas {installedVersion} has been installed</b>
-              {version ? ` (this tab is still ${version})` : ''}.{' '}
+              <b>FiveAtlas {displayVersion(installedVersion)} has been installed</b>
+              {version ? ` (this tab is still ${displayVersion(version)})` : ''}.{' '}
               {canRestart
                 ? 'Save your work, then restart to switch to it.'
                 : 'Save your work, then close FiveAtlas and open it again to switch.'}
