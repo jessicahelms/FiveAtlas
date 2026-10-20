@@ -683,10 +683,13 @@ export default function Viewer({
       getCursor={() => (mode === 'modify' || mode === 'border' || mode === 'split'
         || mode === 'dissolve' || mode === 'draw' || mode === 'clean' ? 'crosshair' : 'grab')}
       onDragStart={(info) => {
-        if (info && info.object && info.object.geometry
-            && info.object.geometry.type === 'Point' && onGrabVertex) {
-          onGrabVertex(info.layer && info.layer.id, pickedFeatureIndex(info));
-        }
+        // EVERY drag start is reported, not only one whose pick landed on a
+        // vertex handle, so the proportional base is always invalidated -- a
+        // missed pick used to leave the previous gesture's base in place.
+        if (!onGrabVertex) return;
+        const onVertex = !!(info && info.object && info.object.geometry
+          && info.object.geometry.type === 'Point');
+        onGrabVertex(info.layer && info.layer.id, pickedFeatureIndex(info), onVertex);
       }}
       onDragEnd={() => { if (onReleaseDrag) onReleaseDrag(); }}
       onClick={(pickInfo, event) => {

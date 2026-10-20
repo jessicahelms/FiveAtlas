@@ -9,7 +9,7 @@ function displayName(feature, idProp) {
 }
 
 export default function Sidebar({
-  info, fc, sources, selected, onSelectName, onRegionMenu, onDeleteSelected, pointMsg,
+  info, fc, selected, onSelectName, onRegionMenu, onDeleteSelected, pointMsg,
   regionResample, onRegionResampleTol, onApplyRegionResample, onCancelRegionResample,
   loadAsk, onAnswerLoad, onLoadDamage,
   overlapAsk, onAnswerOverlap, onToggleTranslate,
@@ -23,7 +23,7 @@ export default function Sidebar({
   moved, canSnap, onSnap, onSave, onReset,
   onUndo, onRedo, canUndo, canRedo,
   propEdit, propRadius, onPropEditChange,
-  geomReport, onValidate, onRepair, onDismissReport, onForceExport,
+  geomReport, onRepair, onDismissReport, onForceExport,
   onRestoreOriginal, orientation, onOrientation,
   onAnswerReportDamage,
   regionsOff, onToggleRegionOff, outlinePreview, onOutline, onDismissOutline,
@@ -121,48 +121,76 @@ export default function Sidebar({
       )}
 
       <div className="row histrow">
-        <button className={`btn${showSettings ? ' on' : ''}`}
-          title="settings: text size, and which tools the sidebar shows"
-          onClick={() => setShowSettings((v) => !v)}>⚙ Settings</button>
+        <button className="btn" onClick={onLoadFile} disabled={busy}>📂 Load regions file…</button>
       </div>
 
-      {showSettings && (
-        <div className="section">
-          <div className="section-title">Settings</div>
-          <label className="field">
-            <span>Text and button size</span>
-            <select value={String(ui.zoom)}
-              onChange={(e) => onUiSettings
-                && onUiSettings({ ...ui, zoom: parseFloat(e.target.value) })}>
-              <option value="0.85">Compact</option>
-              <option value="1">Normal</option>
-              <option value="1.15">Large</option>
-              <option value="1.3">Extra large</option>
-            </select>
-          </label>
-          <div className="hint dim">
-            Sections fold with the little arrows beside their titles — collapse
-            what you are not using and the sidebar stays short.
-          </div>
-          <button className="btn sm" onClick={() => setShowSettings(false)}>Done</button>
-        </div>
-      )}
-
-      {sources && sources.sources && (
-        <div className="section">
-          <SecTitle k="detected">What loaded</SecTitle>
-          {isOpen('detected') && (
-          <ul className="detected">
-            {sources.sources.morphology && <li>✓ morphology (DAPI pyramid)</li>}
-            {sources.sources.morphology_focus && (
-              <li>✓ focus stains — {sources.sources.morphology_focus.channels.length} ch</li>
-            )}
-            {sources.sources.regions && <li>✓ regions — {sources.sources.regions.length} file(s)</li>}
-            {sources.sources.transcripts && <li>✓ transcripts.zarr (the gene layer)</li>}
-            {sources.sources.notes && <li>✓ {sources.sources.notes.name}</li>}
-            {sources.sources.metadata && <li>✓ {sources.sources.metadata.name}</li>}
-          </ul>
+      {/* Picking a file changes nothing: add or replace is chosen here. */}
+      {loadAsk && (
+        <div className="pts">
+          {loadAsk.error && (
+            <>
+              <div className="hint">{loadAsk.error}</div>
+              <button className="btn sm" onClick={() => onAnswerLoad && onAnswerLoad(null)}>Close</button>
+            </>
           )}
+          {loadAsk.done && (
+            <>
+              <div className="hint">{loadAsk.done}</div>
+              <button className="btn sm" onClick={() => onAnswerLoad && onAnswerLoad(null)}>OK</button>
+            </>
+          )}
+          {loadAsk.fc && (() => {
+            const dmg = loadAsk.hasHemi
+              && (loadAsk.damageInFile > 0 || loadAsk.damageBeside.length > 0);
+            const mustAnswer = dmg && loadAsk.withDamage == null;
+            const parts = [];
+            if (loadAsk.damageInFile > 0) parts.push(`${loadAsk.damageInFile} in this file`);
+            if (loadAsk.damageBeside.length > 0) {
+              parts.push(`${loadAsk.damageBeside.length} in ${loadAsk.besideFiles.length} file`
+                + `${loadAsk.besideFiles.length === 1 ? '' : 's'} beside it`);
+            }
+            return (
+              <>
+                <div className="pts-head">
+                  {loadAsk.name} — {loadAsk.count} region{loadAsk.count === 1 ? '' : 's'}
+                </div>
+                {dmg && (
+                  <>
+                    <div className="hint">This file has <b>hemi</b>. Load the damage with it?</div>
+                    <div className="hint dim" title={loadAsk.besideFiles.join(', ')}>
+                      Damage found: {parts.join(', ')}.
+                    </div>
+                    <div className="row">
+                      <button className={loadAsk.withDamage === true ? 'btn sm on' : 'btn sm'}
+                        onClick={() => onLoadDamage && onLoadDamage(true)}>Yes</button>
+                      <button className={loadAsk.withDamage === false ? 'btn sm on' : 'btn sm'}
+                        onClick={() => onLoadDamage && onLoadDamage(false)}>No</button>
+                    </div>
+                  </>
+                )}
+                <div className="row">
+                  <button className="btn sm primary" disabled={busy || mustAnswer}
+                    title="put these regions on the map alongside what is already there"
+                    onClick={() => onAnswerLoad && onAnswerLoad('add')}>
+                    Add to the map
+                  </button>
+                  <button className="btn sm" disabled={busy || mustAnswer}
+                    title="swap everything on the map for this file"
+                    onClick={() => onAnswerLoad && onAnswerLoad('replace')}>
+                    Replace the map
+                  </button>
+                  <button className="btn sm" onClick={() => onAnswerLoad && onAnswerLoad(null)}>Cancel</button>
+                </div>
+                <div className="hint dim">
+                  {mustAnswer ? 'Choose Yes or No for the damage first. ' : ''}
+                  Add keeps what is on the map and puts these beside it — a name already
+                  in use is changed so it isn't shared. Replace swaps the whole map for
+                  this file. Either way Ctrl+Z undoes it, and nothing is written until
+                  you Save.
+                </div>
+              </>
+            );
+          })()}
         </div>
       )}
 
@@ -188,7 +216,7 @@ export default function Sidebar({
         {off.size > 0 && (
           <div className="hint dim">
             {[...off].join(', ')} switched off — still in the file and exported,
-            but ignored by gap-finding and Check geometry, and hidden on the map.
+            but ignored by gap-finding and snapping, and hidden on the map.
           </div>
         )}
         {selected.length > 0 && (
@@ -273,7 +301,7 @@ export default function Sidebar({
                     className="eye" disabled={busy}
                     title={off.has(nm)
                       ? 'switched off — click to use it again'
-                      : 'switch off: hide it and leave it out of gap-finding and Check geometry'}
+                      : 'switch off: hide it and leave it out of gap-finding and snapping'}
                     onClick={(e) => {
                       e.stopPropagation();
                       onToggleRegionOff && onToggleRegionOff(nm);
@@ -852,79 +880,6 @@ export default function Sidebar({
       <div className="section">
         <SecTitle k="data">Files &amp; export</SecTitle>
         {isOpen('data') && (<>
-        <button className="btn" onClick={onLoadFile} disabled={busy}>📂 Load regions file…</button>
-
-        {/* Picking a file changes nothing: add or replace is chosen here. */}
-        {loadAsk && (
-          <div className="pts">
-            {loadAsk.error && (
-              <>
-                <div className="hint">{loadAsk.error}</div>
-                <button className="btn sm" onClick={() => onAnswerLoad && onAnswerLoad(null)}>Close</button>
-              </>
-            )}
-            {loadAsk.done && (
-              <>
-                <div className="hint">{loadAsk.done}</div>
-                <button className="btn sm" onClick={() => onAnswerLoad && onAnswerLoad(null)}>OK</button>
-              </>
-            )}
-            {loadAsk.fc && (() => {
-              const dmg = loadAsk.hasHemi
-                && (loadAsk.damageInFile > 0 || loadAsk.damageBeside.length > 0);
-              const mustAnswer = dmg && loadAsk.withDamage == null;
-              const parts = [];
-              if (loadAsk.damageInFile > 0) parts.push(`${loadAsk.damageInFile} in this file`);
-              if (loadAsk.damageBeside.length > 0) {
-                parts.push(`${loadAsk.damageBeside.length} in ${loadAsk.besideFiles.length} file`
-                  + `${loadAsk.besideFiles.length === 1 ? '' : 's'} beside it`);
-              }
-              return (
-                <>
-                  <div className="pts-head">
-                    {loadAsk.name} — {loadAsk.count} region{loadAsk.count === 1 ? '' : 's'}
-                  </div>
-                  {dmg && (
-                    <>
-                      <div className="hint">This file has <b>hemi</b>. Load the damage with it?</div>
-                      <div className="hint dim" title={loadAsk.besideFiles.join(', ')}>
-                        Damage found: {parts.join(', ')}.
-                      </div>
-                      <div className="row">
-                        <button className={loadAsk.withDamage === true ? 'btn sm on' : 'btn sm'}
-                          onClick={() => onLoadDamage && onLoadDamage(true)}>Yes</button>
-                        <button className={loadAsk.withDamage === false ? 'btn sm on' : 'btn sm'}
-                          onClick={() => onLoadDamage && onLoadDamage(false)}>No</button>
-                      </div>
-                    </>
-                  )}
-                  <div className="row">
-                    <button className="btn sm primary" disabled={busy || mustAnswer}
-                      title="put these regions on the map alongside what is already there"
-                      onClick={() => onAnswerLoad && onAnswerLoad('add')}>
-                      Add to the map
-                    </button>
-                    <button className="btn sm" disabled={busy || mustAnswer}
-                      title="swap everything on the map for this file"
-                      onClick={() => onAnswerLoad && onAnswerLoad('replace')}>
-                      Replace the map
-                    </button>
-                    <button className="btn sm" onClick={() => onAnswerLoad && onAnswerLoad(null)}>Cancel</button>
-                  </div>
-                  <div className="hint dim">
-                    {mustAnswer ? 'Choose Yes or No for the damage first. ' : ''}
-                    Add keeps what is on the map and puts these beside it — a name already
-                    in use is changed so it isn't shared. Replace swaps the whole map for
-                    this file. Either way Ctrl+Z undoes it, and nothing is written until
-                    you Save.
-                  </div>
-                </>
-              );
-            })()}
-          </div>
-        )}
-        <button className="btn" onClick={onValidate} disabled={busy}>✓ Check geometry</button>
-
         {!confirmRestore ? (
           <button className="btn" onClick={() => setConfirmRestore(true)} disabled={busy}>
             ↺ Restore original GeoJSON
@@ -947,169 +902,11 @@ export default function Sidebar({
             </div>
           </div>
         )}
-        {/* The sheet's Damage column is a MULTI-SELECT dropdown — one cell holds
-            several chips — so what is worth copying is a cell per region, not a
-            row. `Done` rides in the same cell; it is the annotator's tick, not a
-            designation, so it never reaches the YAML. */}
-        <div className="slabel fold" onClick={() => toggleSec('cells')}>
-          <span className="arr">{isOpen('cells') ? '▾' : '▸'}</span> SmartSheet damage
-        </div>
-        {isOpen('cells') && (<>
-        <button className="btn" onClick={onLoadCells} disabled={busy}>
-          ⎘ Damage cells, region by region…
-        </button>
-
-        {cellsReport && (
-          <div className="geomrep">
-            <div className="hint dim">
-              One box per region — copy it, click that region's Damage cell in
-              SmartSheet, paste. The names match the dropdown's own options.
-            </div>
-            <div className="row">
-              {(cellsReport.separators || []).map((s) => (
-                <button key={s} disabled={busy}
-                  className={`btn sm${cellSep === s ? ' on' : ''}`}
-                  title={s === 'cell' ? 'quoted, so a grid keeps it in ONE cell'
-                    : s === 'lines' ? 'one value per line, unquoted'
-                      : 'comma separated'}
-                  onClick={() => onCellSep && onCellSep(s)}>
-                  {s === 'cell' ? 'One cell' : s === 'lines' ? 'Lines' : 'Commas'}
-                </button>
-              ))}
-            </div>
-            <div className="hint dim">
-              If a paste lands as separate <b>rows</b> instead of chips in one
-              cell, switch format and paste again — SmartSheet is picky and which
-              one it wants is quicker to try than to look up.
-            </div>
-            <label className="chk">
-              <input type="checkbox" checked={!!cellsAll} disabled={busy}
-                onChange={(e) => onCellsAll && onCellsAll(e.target.checked)} />
-              <span>Show every region, not only those with damage</span>
-            </label>
-
-            {/* Shapes still waiting on an answer. Promised when one was drawn
-                and left alone — this is where it comes back. */}
-            {(cellsReport.needsChoice || []).map((s) => (
-              <div className="pts" key={`ask-${s.name}`}>
-                <div className="pts-head">Which region is <b>{s.name}</b> in?</div>
-                <div className="hint dim">
-                  {(s.overlaps || []).filter((o) => s.candidates.includes(o.region))
-                    .map((o) => `${o.region} ${(o.frac * 100).toFixed(0)}%`).join(' · ')}
-                  {' — '}unanswered, so it is counted in <b>{s.dominant}</b>.
-                </div>
-                <div className="row">
-                  {(s.candidates || []).map((nm) => (
-                    <button key={nm} disabled={busy}
-                      className={nm === s.dominant ? 'btn sm primary' : 'btn sm'}
-                      onClick={() => onAnswerReportDamage && onAnswerReportDamage([nm], s.name)}>
-                      {nm}
-                    </button>
-                  ))}
-                  <button className="btn sm" disabled={busy}
-                    onClick={() => onAnswerReportDamage
-                      && onAnswerReportDamage([...(s.candidates || [])], s.name)}>
-                    {(s.candidates || []).length > 2 ? `All ${s.candidates.length}` : 'Both'}
-                  </button>
-                </div>
-              </div>
-            ))}
-            {(cellsReport.unassigned || []).length > 0 && (
-              <div className="hint lvl-warn">
-                {cellsReport.unassigned.length} shape(s) overlap no region, so they
-                reach no cell: {cellsReport.unassigned.map((s) => s.name).join(', ')}
-              </div>
-            )}
-
-            {(cellsReport.cells || []).length === 0 && (
-              <div className="hint dim">
-                No region has damage yet — draw some, or tick a type below after
-                turning on “show every region”.
-              </div>
-            )}
-
-            {(cellsReport.cells || []).map((c) => {
-              const spare = (cellsReport.designations || [])
-                .filter((d) => !c.tags.includes(d.tag));
-              return (
-                <div className="pts" key={c.region}>
-                  <div className="pts-head">{c.region}</div>
-                  <label className="chk">
-                    <input type="checkbox" checked={!!c.done} disabled={busy}
-                      onChange={(e) => onRegionDamage
-                        && onRegionDamage(c.region, { done: e.target.checked })} />
-                    <span>{cellsReport.doneLabel || 'Done'}</span>
-                  </label>
-                  <div className="picks">
-                    {c.tags.map((t) => {
-                      const drawn = c.drawn.includes(t);
-                      const lab = (cellsReport.designations
-                        .find((d) => d.tag === t) || {}).label || t;
-                      return (
-                        <span key={t} className="chip" title={drawn
-                          ? 'from a shape you drew — delete the shape to remove it'
-                          : 'ticked by hand'}>
-                          {lab}
-                          {drawn ? <span className="dim"> ◆</span> : (
-                            <button className="x" disabled={busy}
-                              title="remove"
-                              onClick={() => onRegionDamage && onRegionDamage(
-                                c.region, { removeExtra: t })}>
-                              ×
-                            </button>
-                          )}
-                        </span>
-                      );
-                    })}
-                    {c.tags.length === 0 && <span className="hint dim">no damage yet</span>}
-                  </div>
-                  {spare.length > 0 && (
-                    <select value="" disabled={busy}
-                      onChange={(e) => {
-                        if (!e.target.value) return;
-                        onRegionDamage && onRegionDamage(c.region,
-                          { addExtra: e.target.value });
-                      }}>
-                      <option value="">+ add a damage type…</option>
-                      {spare.map((d) => (
-                        <option key={d.tag} value={d.tag}>
-                          {d.label}{d.drawn === false ? ' (never drawn)' : ''}
-                        </option>
-                      ))}
-                    </select>
-                  )}
-                  <textarea className="pathin" readOnly rows={Math.min(6, Math.max(2, c.values.length + 1))}
-                    value={c.text}
-                    style={{ width: '100%', fontFamily: 'monospace', fontSize: '11px' }}
-                    onFocus={(e) => e.target.select()} />
-                  <button className="btn sm primary" disabled={busy}
-                    onClick={() => {
-                      // clipboard writes need the gesture itself, not a later
-                      // continuation, so this happens in the handler
-                      navigator.clipboard.writeText(c.text)
-                        .then(() => setCopiedCell(c.region))
-                        .catch(() => setCopiedCell(null));
-                    }}>
-                    {copiedCell === c.region ? 'Copied ✓' : `Copy ${c.region}`}
-                  </button>
-                  {c.voids.length > 0 && (
-                    <div className="hint dim">shapes: {c.voids.join(', ')}</div>
-                  )}
-                </div>
-              );
-            })}
-            <div className="row">
-              <button className="btn sm" onClick={onDismissCells} disabled={busy}>Close</button>
-            </div>
-          </div>
-        )}
-
 
         {/* The two YAMLs. They live in the dataset folder — which everything
             else here only reads — and they are shared, so the panel always says
             the exact path, previews as a diff, and never creates a file by
             itself. */}
-        </>)}
         <div className="slabel fold" onClick={() => toggleSec('notes')}>
           <span className="arr">{isOpen('notes') ? '▾' : '▸'}</span> Annotation notes
         </div>
@@ -1348,6 +1145,164 @@ export default function Sidebar({
         </>)}
       </div>
 
+      <div className="section">
+        {/* The sheet's Damage column is a MULTI-SELECT dropdown — one cell holds
+            several chips — so what is worth copying is a cell per region, not a
+            row. `Done` rides in the same cell; it is the annotator's tick, not a
+            designation, so it never reaches the YAML. */}
+        <SecTitle k="cells">SmartSheet damage</SecTitle>
+        {isOpen('cells') && (<>
+        <button className="btn" onClick={onLoadCells} disabled={busy}>
+          ⎘ Damage cells, region by region…
+        </button>
+
+        {cellsReport && (
+          <div className="geomrep">
+            <div className="hint dim">
+              One box per region — copy it, click that region's Damage cell in
+              SmartSheet, paste. The names match the dropdown's own options.
+            </div>
+            <div className="row">
+              {(cellsReport.separators || []).map((s) => (
+                <button key={s} disabled={busy}
+                  className={`btn sm${cellSep === s ? ' on' : ''}`}
+                  title={s === 'cell' ? 'quoted, so a grid keeps it in ONE cell'
+                    : s === 'lines' ? 'one value per line, unquoted'
+                      : 'comma separated'}
+                  onClick={() => onCellSep && onCellSep(s)}>
+                  {s === 'cell' ? 'One cell' : s === 'lines' ? 'Lines' : 'Commas'}
+                </button>
+              ))}
+            </div>
+            <div className="hint dim">
+              If a paste lands as separate <b>rows</b> instead of chips in one
+              cell, switch format and paste again — SmartSheet is picky and which
+              one it wants is quicker to try than to look up.
+            </div>
+            <label className="chk">
+              <input type="checkbox" checked={!!cellsAll} disabled={busy}
+                onChange={(e) => onCellsAll && onCellsAll(e.target.checked)} />
+              <span>Show every region, not only those with damage</span>
+            </label>
+
+            {/* Shapes still waiting on an answer. Promised when one was drawn
+                and left alone — this is where it comes back. */}
+            {(cellsReport.needsChoice || []).map((s) => (
+              <div className="pts" key={`ask-${s.name}`}>
+                <div className="pts-head">Which region is <b>{s.name}</b> in?</div>
+                <div className="hint dim">
+                  {(s.overlaps || []).filter((o) => s.candidates.includes(o.region))
+                    .map((o) => `${o.region} ${(o.frac * 100).toFixed(0)}%`).join(' · ')}
+                  {' — '}unanswered, so it is counted in <b>{s.dominant}</b>.
+                </div>
+                <div className="row">
+                  {(s.candidates || []).map((nm) => (
+                    <button key={nm} disabled={busy}
+                      className={nm === s.dominant ? 'btn sm primary' : 'btn sm'}
+                      onClick={() => onAnswerReportDamage && onAnswerReportDamage([nm], s.name)}>
+                      {nm}
+                    </button>
+                  ))}
+                  <button className="btn sm" disabled={busy}
+                    onClick={() => onAnswerReportDamage
+                      && onAnswerReportDamage([...(s.candidates || [])], s.name)}>
+                    {(s.candidates || []).length > 2 ? `All ${s.candidates.length}` : 'Both'}
+                  </button>
+                </div>
+              </div>
+            ))}
+            {(cellsReport.unassigned || []).length > 0 && (
+              <div className="hint lvl-warn">
+                {cellsReport.unassigned.length} shape(s) overlap no region, so they
+                reach no cell: {cellsReport.unassigned.map((s) => s.name).join(', ')}
+              </div>
+            )}
+
+            {(cellsReport.cells || []).length === 0 && (
+              <div className="hint dim">
+                No region has damage yet — draw some, or tick a type below after
+                turning on “show every region”.
+              </div>
+            )}
+
+            {(cellsReport.cells || []).map((c) => {
+              const spare = (cellsReport.designations || [])
+                .filter((d) => !c.tags.includes(d.tag));
+              return (
+                <div className="pts" key={c.region}>
+                  <div className="pts-head">{c.region}</div>
+                  <label className="chk">
+                    <input type="checkbox" checked={!!c.done} disabled={busy}
+                      onChange={(e) => onRegionDamage
+                        && onRegionDamage(c.region, { done: e.target.checked })} />
+                    <span>{cellsReport.doneLabel || 'Done'}</span>
+                  </label>
+                  <div className="picks">
+                    {c.tags.map((t) => {
+                      const drawn = c.drawn.includes(t);
+                      const lab = (cellsReport.designations
+                        .find((d) => d.tag === t) || {}).label || t;
+                      return (
+                        <span key={t} className="chip" title={drawn
+                          ? 'from a shape you drew — delete the shape to remove it'
+                          : 'ticked by hand'}>
+                          {lab}
+                          {drawn ? <span className="dim"> ◆</span> : (
+                            <button className="x" disabled={busy}
+                              title="remove"
+                              onClick={() => onRegionDamage && onRegionDamage(
+                                c.region, { removeExtra: t })}>
+                              ×
+                            </button>
+                          )}
+                        </span>
+                      );
+                    })}
+                    {c.tags.length === 0 && <span className="hint dim">no damage yet</span>}
+                  </div>
+                  {spare.length > 0 && (
+                    <select value="" disabled={busy}
+                      onChange={(e) => {
+                        if (!e.target.value) return;
+                        onRegionDamage && onRegionDamage(c.region,
+                          { addExtra: e.target.value });
+                      }}>
+                      <option value="">+ add a damage type…</option>
+                      {spare.map((d) => (
+                        <option key={d.tag} value={d.tag}>
+                          {d.label}{d.drawn === false ? ' (never drawn)' : ''}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                  <textarea className="pathin" readOnly rows={Math.min(6, Math.max(2, c.values.length + 1))}
+                    value={c.text}
+                    style={{ width: '100%', fontFamily: 'monospace', fontSize: '11px' }}
+                    onFocus={(e) => e.target.select()} />
+                  <button className="btn sm primary" disabled={busy}
+                    onClick={() => {
+                      // clipboard writes need the gesture itself, not a later
+                      // continuation, so this happens in the handler
+                      navigator.clipboard.writeText(c.text)
+                        .then(() => setCopiedCell(c.region))
+                        .catch(() => setCopiedCell(null));
+                    }}>
+                    {copiedCell === c.region ? 'Copied ✓' : `Copy ${c.region}`}
+                  </button>
+                  {c.voids.length > 0 && (
+                    <div className="hint dim">shapes: {c.voids.join(', ')}</div>
+                  )}
+                </div>
+              );
+            })}
+            <div className="row">
+              <button className="btn sm" onClick={onDismissCells} disabled={busy}>Close</button>
+            </div>
+          </div>
+        )}
+        </>)}
+      </div>
+
       {snapInfo && (
         <div className="section">
           <div className="section-title">Last operation</div>
@@ -1360,6 +1315,34 @@ export default function Sidebar({
             </ul>
           )}
           {snapInfo.saved && <div className="mono ok">{snapInfo.saved}</div>}
+        </div>
+      )}
+
+      <div className="row histrow">
+        <button className={`btn${showSettings ? ' on' : ''}`}
+          title="settings: text size, and which tools the sidebar shows"
+          onClick={() => setShowSettings((v) => !v)}>⚙ Settings</button>
+      </div>
+
+      {showSettings && (
+        <div className="section">
+          <div className="section-title">Settings</div>
+          <label className="field">
+            <span>Text and button size</span>
+            <select value={String(ui.zoom)}
+              onChange={(e) => onUiSettings
+                && onUiSettings({ ...ui, zoom: parseFloat(e.target.value) })}>
+              <option value="0.85">Compact</option>
+              <option value="1">Normal</option>
+              <option value="1.15">Large</option>
+              <option value="1.3">Extra large</option>
+            </select>
+          </label>
+          <div className="hint dim">
+            Sections fold with the little arrows beside their titles — collapse
+            what you are not using and the sidebar stays short.
+          </div>
+          <button className="btn sm" onClick={() => setShowSettings(false)}>Done</button>
         </div>
       )}
 

@@ -404,7 +404,7 @@ export default function App() {
   const [gapMsg, setGapMsg] = useState(null);
   // Regions switched off. `hemi` is the whole-hemisphere outline and covers every
   // other region, so with it in play nothing is ever outside a region and NO GAP
-  // can be found — and Check geometry reports 22 overlaps that are all correct.
+  // can be found — and the geometry check reports 22 overlaps that are all correct.
   // Switching a region off leaves it in the file, untouched; it is only ignored
   // by the operations that assume a clean partition, and hidden on the map.
   // UI settings: sidebar scale and which tools are shown. Hiding is DISPLAY
@@ -440,7 +440,7 @@ export default function App() {
   const [regionsOff, setRegionsOff] = useState(() => new Set());
   // Display-only per-region toggles. Unlike the eye (regionsOff), these change
   // NOTHING about operations -- a region with its face hidden still counts for
-  // gap-finding, snapping and Check geometry. They exist so you can work over
+  // gap-finding, snapping and the geometry check. They exist so you can work over
   // a clean view: faces off to see the imagery and every border while filling
   // gaps; borders off to see a fill without its outline.
   const [bordersOff, setBordersOff] = useState(() => new Set());
@@ -1056,21 +1056,28 @@ export default function App() {
   // Arm on GRAB (mouse-down on a vertex handle) so the wheel resizes the radius
   // immediately, rather than only after the first move. Base geometry is frozen on
   // the first actual move; before that, the wheel just resizes the ring.
-  const onGrabVertex = useCallback((layerId, featureIndex = 0) => {
+  const onGrabVertex = useCallback((layerId, featureIndex = 0, onVertex = true) => {
     const isBorder = layerId && String(layerId).includes('border-edit');
     // Capture the current visible segment for this one drag, so move-border only
     // swaps the sliver swept by this gesture.
-    if (isBorder) {
+    if (isBorder && onVertex) {
       const safeIndex = Math.max(0, featureIndex || 0);
       setBorderSegmentIndex(safeIndex);
       dragStartArcRef.current = stableBorderArcCoords(safeIndex);
     }
     if (!propEdit) return;
     const ped = pedRef.current;
+    // A drag is starting, so whatever base is frozen is stale. Dropping it here
+    // -- even when the pick missed the handle -- is what stops a dropped
+    // finishMovePosition from leaving `active` set and the OLD base in use for
+    // the next drag of the same vertex. That is what looked like proportional
+    // editing dying until the checkbox was toggled off and on: toggling off is
+    // the only other thing that clears `active`.
+    ped.key = null; ped.bkey = null;
+    if (!onVertex) { ped.active = false; return; }
     ped.active = true;
     ped.kind = isBorder ? 'border' : 'region';
     ped.seg = isBorder ? Math.max(0, featureIndex || 0) : 0;
-    ped.key = null; ped.bkey = null;    // force the base to re-freeze on the first move
   }, [propEdit, stableBorderArcCoords]);
   const onReleaseDrag = useCallback(() => {
     pedRef.current.active = false;
@@ -1119,9 +1126,22 @@ export default function App() {
   }, [clearBorder, clearSplit, clearGap, clearDraw, clearClean]);
 
   const onToggleBorder = useCallback(() => {
-    setMode((m) => (m === 'border' ? 'view' : 'border'));
-    setSelected([]); clearBorder(); clearSplit(); clearGap(); clearDraw(); clearClean();
-  }, [clearBorder, clearSplit, clearGap, clearDraw, clearClean]);
+    const entering = mode !== 'border';
+    setMode(entering ? 'border' : 'view');
+    clearBorder(); clearSplit(); clearGap(); clearDraw(); clearClean();
+    // The selection is KEPT, and a single selected region becomes the first
+    // pick: it is nearly always one half of the pair. Clearing it meant clicking
+    // that region again here -- and again in Edit points when coming here was a
+    // misclick.
+    if (entering && selected.length === 1) {
+      const f = fcRef.current && fcRef.current.features[selected[0]];
+      const nm = f && featureName(f, idProp);
+      if (nm) {
+        setBorderPicks([nm]);
+        setBorderMsg('Click another region to share a border \u2014 or keep picking to tile several.');
+      }
+    }
+  }, [mode, selected, idProp, clearBorder, clearSplit, clearGap, clearDraw, clearClean]);
 
   const onToggleSplit = useCallback(() => {
     setMode((m) => (m === 'split' ? 'view' : 'split'));
@@ -2530,19 +2550,6 @@ export default function App() {
     } finally { setBusy(false); }
   }, [dsId, fc]);
 
-  const doValidate = useCallback(async () => {
-    setBusy(true); setError(null);
-    try {
-      const res = await api.validateRegions(dsId, fcRef.current || fc, offList());
-      setGeomReport({
-        problems: res.problems, counts: res.counts, mode: null,
-        title: res.ok
-          ? (res.problems.length ? 'No errors — some things to look at' : 'Geometry is clean ✓')
-          : 'Geometry errors found',
-      });
-    } catch (e) { setError(String(e)); } finally { setBusy(false); }
-  }, [dsId, fc]);
-
   const doRepair = useCallback(async () => {
     setBusy(true); setError(null);
     try {
@@ -2696,7 +2703,7 @@ export default function App() {
             <aside className="sidebar"
               style={{ flexBasis: paneW, width: paneW, zoom: uiSettings.zoom }}>
               <Sidebar
-                info={info} fc={fc} sources={sources} selected={selected}
+                info={info} fc={fc} selected={selected}
                 onRegionMenu={openRegionMenu}
                 onSelectName={(nm, mods = {}, listIdx) => {
                   if (mods.clear) { setSelected([]); selAnchorRef.current = null; return; }
@@ -2739,7 +2746,7 @@ export default function App() {
                 onUndo={undo} onRedo={redo} canUndo={canUndo} canRedo={canRedo}
                 propEdit={propEdit} propRadius={propRadius}
                 onPropEditChange={setProportionalEditing}
-                geomReport={geomReport} onValidate={doValidate} onRepair={doRepair}
+                geomReport={geomReport} onRepair={doRepair}
                 onDismissReport={() => setGeomReport(null)}
                 onForceExport={(m, frame) => doExport(m, { force: true, frame })}
                 onRestoreOriginal={doRestoreOriginal}
