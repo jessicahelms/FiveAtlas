@@ -2905,6 +2905,10 @@ def overlap_report(features, id_prop, points, min_area=25.0):
     if g.is_empty or g.area < min_area:
         raise ValueError("that outline is too small to be a region")
 
+    # Bounding boxes first: _safe_intersection below is the expensive part, and
+    # most of a file's regions are nowhere near the outline. Envelopes that only
+    # touch still go through -- `inter <= min_area` is what actually filters.
+    g_env = g.envelope
     hits = []
     for f in features:
         if (f.get("geometry") or {}).get("type") not in ("Polygon", "MultiPolygon"):
@@ -2915,7 +2919,7 @@ def overlap_report(features, id_prop, points, min_area=25.0):
             continue
         if not other.is_valid:
             other = other.buffer(0)
-        if other.is_empty or other.area <= 0 or not other.intersects(other.envelope):
+        if other.is_empty or other.area <= 0 or not g_env.intersects(other.envelope):
             continue
         inter = _safe_intersection(other, g).area
         if inter <= min_area:
