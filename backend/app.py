@@ -1744,13 +1744,19 @@ async def regions_clean_lines(ds_id: str, request: Request):
         raise HTTPException(500, f"clean-lines failed: {e}")
     res["features"] = _put_back(res["features"], held)
     touched = sorted({r["region"] for r in res["removed"]}
+                     | {r["region"] for r in res["despiked"]}
                      | set(res["filled"]) | set(res["deleted"]))
+    spikes = sum(r["vertices"] for r in res["despiked"])
     detail = (f"{res['area']:,.0f} px² of stray lines"
+              + (f", {spikes} needle point(s) off "
+                 f"{', '.join(r['region'] for r in res['despiked'])}"
+                 if res["despiked"] else "")
               + (f", {len(res['deleted'])} sliver region(s) deleted" if res["deleted"] else "")
               + (f" -> {' + '.join(res['filled'])}" if res["filled"] else ""))
     return {**provenance.stamped(res["features"], fc, "clean-lines",
                                  detail, touched),
-            "removed": res["removed"], "deleted": res["deleted"],
+            "removed": res["removed"], "despiked": res["despiked"],
+            "deleted": res["deleted"],
             "filled": res["filled"], "covered": res["covered"],
             "freed": res["freed"], "area": res["area"]}
 

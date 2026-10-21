@@ -740,6 +740,18 @@ export default function Sidebar({
                 <div className="pts-head">
                   {Math.round(cleanFound.area).toLocaleString()} px² of stray lines
                 </div>
+                {/* A needle encloses no area, so it never shows up in the px²
+                    above -- say it separately or the panel reads as "0". */}
+                {(cleanFound.despiked || []).length > 0 && (
+                  <div className="hint dim">
+                    {cleanFound.despiked.map((r) => (
+                      <div key={`spike-${r.region}`}>
+                        {r.region}: {r.vertices} point{r.vertices > 1 ? 's' : ''} off a
+                        {' '}line poking into it
+                      </div>
+                    ))}
+                  </div>
+                )}
                 {cleanFound.removed.length > 0 && (
                   <div className="hint dim">
                     {cleanFound.removed.map((r) => (

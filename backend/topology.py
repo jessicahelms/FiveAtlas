@@ -293,19 +293,18 @@ def clean_geom(geom, spike=2.0, smooth=True):
     return g
 
 
-def _despike_ring(coords, eps=0.05):
-    """One ring with its needles and duplicate points removed, or None if nothing
-    of it survives.
+def _despike_open_ring(pts, eps=0.05):
+    """An open ring's vertices with every needle and duplicate taken out.
 
     A needle tip is a vertex whose two edges leave in nearly the SAME direction
     and span no area: the outline goes out to it and comes back down the same
     line. A plain collinear vertex has its edges leaving in OPPOSITE directions,
     and is left alone. Removing a tip shortens the needle by one vertex, so this
     repeats until the ring stops changing.
+
+    The answer is always a SUBSEQUENCE of the input, which is what lets the
+    caller see which vertices went and group them back into needles.
     """
-    pts = [(float(x), float(y)) for x, y in coords]
-    if len(pts) > 1 and pts[0] == pts[-1]:
-        pts = pts[:-1]
 
     def dedupe(seq):
         out = []
@@ -347,18 +346,93 @@ def _despike_ring(coords, eps=0.05):
             changed = True
         if changed:
             pts = dedupe([p for p, k in zip(pts, keep) if k])
-    if len(pts) < 3:
+    return pts
+
+
+def _needle_runs(pts, kept):
+    """The dropped vertices of `pts`, grouped into the needles they came from.
+
+    `kept` is a subsequence of `pts`, so the dropped ones fall into consecutive
+    runs and one run is one needle. Returns (runs, keep_flags); each run is
+    (indices, path), where `path` carries the kept vertex on either side too --
+    the needle's way out and back, which is what a traced loop has to touch.
+    Returns None if `kept` is not a clean subsequence, so the caller can decline
+    to guess.
+    """
+    n = len(pts)
+    flag = [False] * n
+    j = 0
+    for i, p in enumerate(pts):
+        if j < len(kept) and p == kept[j]:
+            flag[i] = True
+            j += 1
+    if j != len(kept) or not any(flag):
         return None
-    return pts + [pts[0]]
+    # start the walk on a KEPT vertex so no run wraps past the end, and close
+    # the cycle by visiting it again
+    start = flag.index(True)
+    order = list(range(start, n)) + list(range(start)) + [start]
+    runs, run, prev = [], [], None
+    for i in order:
+        if flag[i]:
+            if run:
+                runs.append((list(run),
+                             [pts[prev]] + [pts[r] for r in run] + [pts[i]]))
+                run = []
+            prev = i
+        else:
+            run.append(i)
+    return runs, flag
 
 
-def despike(geom, eps=0.05):
+def _despike_ring(coords, eps=0.05, within=None):
+    """One ring with its needles removed, or None if nothing of it survives.
+
+    `within`: a polygon -- usually a loop the annotator traced. A needle goes if
+    the loop meets it ANYWHERE, so circling a stretch of a long line is enough
+    (the same rule clean_lines applies to the sliver parts it removes); a needle
+    the loop never reaches is put back, so cleaning one spot leaves the rest of
+    the outline exactly as it was.
+    """
+    pts = [(float(x), float(y)) for x, y in coords]
+    if len(pts) > 1 and pts[0] == pts[-1]:
+        pts = pts[:-1]
+    kept = _despike_open_ring(pts, eps)
+    if within is not None and not within.is_empty and len(kept) != len(pts):
+        grouped = _needle_runs(pts, kept)
+        if grouped is None:
+            kept = pts                      # cannot tell what went: change nothing
+        else:
+            runs, flag = grouped
+            wx0, wy0, wx1, wy1 = within.bounds
+            for idxs, path in runs:
+                xs = [p[0] for p in path]
+                ys = [p[1] for p in path]
+                # bounding boxes first -- a real outline carries thousands
+                touches = not (max(xs) < wx0 or min(xs) > wx1
+                               or max(ys) < wy0 or min(ys) > wy1)
+                if touches:
+                    touches = LineString(path).intersects(within)
+                if not touches:
+                    for i in idxs:
+                        flag[i] = True      # out of scope: put this needle back
+            kept = [p for p, k in zip(pts, flag) if k]
+    if len(kept) < 3:
+        return None
+    return kept + [kept[0]]
+
+
+def despike(geom, eps=0.05, within=None):
     """Remove zero-width needles from a polygon WITHOUT reshaping it.
 
     Unlike clean_geom's morphological open this cannot erode a genuinely thin
     region, because it only deletes vertices that enclose no area. A needle has
     no area, so the area must come out unchanged; if it does not, the input is
     returned untouched rather than quietly reshaping somebody's anatomy.
+
+    `within`: a polygon -- usually a loop the annotator traced -- limiting this
+    to needles whose path crosses it, so cleaning one spot leaves the rest of
+    the outline exactly as it was.
     """
     if geom is None or geom.is_empty:
         return geom
@@ -367,12 +441,12 @@ def despike(geom, eps=0.05):
         return geom
     out = []
     for p in parts:
-        ext = _despike_ring(p.exterior.coords, eps)
+        ext = _despike_ring(p.exterior.coords, eps, within)
         if ext is None:
             continue
         holes = []
         for r in p.interiors:
-            h = _despike_ring(r.coords, eps)
+            h = _despike_ring(r.coords, eps, within)
             if h is not None:
                 holes.append(h)
         try:
@@ -2120,6 +2194,37 @@ def clean_lines(features, id_prop, points, width=12.0):
                                    "area": float(sum(p.area for p in take)),
                                    "parts": len(take)})
 
+    # -- needles on a FAT part -------------------------------------------------
+    # A line poking INTO a region belongs to that region's own ring, not to a
+    # detached piece, so the erosion test above can never see it: the part it
+    # belongs to is the whole healthy region. The void branch below cannot be
+    # relied on either -- a loop traced around such a line sits almost entirely
+    # inside its own region, which makes that region a `blanket`, holds it out of
+    # the void union, and leaves nothing to find. Between them that is why
+    # circling one of these lines usually did nothing at all: it only worked if
+    # the loop happened to be dragged out across the region's edge.
+    #
+    # Deleting the needle outright is what was being done by hand anyway, and it
+    # encloses no area, so this cannot shave a healthy region. The blanket rule
+    # is left alone -- it is there to stop hemi hiding every void.
+    despiked, despiked_report = {}, []
+    for k, g in geoms.items():
+        if k in dmg_keys or k in removed_by:
+            continue
+        if not g.intersects(lasso):
+            continue
+        d = despike(g, within=lasso)
+        if d.is_empty:
+            continue
+        gone = _vertex_count(g) - _vertex_count(d)
+        if gone <= 0:
+            continue
+        despiked[k] = d
+        despiked_report.append({"region": names[k], "vertices": int(gone)})
+    # the voids below are judged on the cleaned outlines
+    for k, d in despiked.items():
+        geoms[k] = d
+
     # -- sliver voids ----------------------------------------------------------
     # The union deliberately leaves out damage shapes and anything that blankets
     # the loop (the outline, or the region being worked inside). The blanket set
@@ -2148,13 +2253,15 @@ def clean_lines(features, id_prop, points, width=12.0):
     pieces = list(voids)
     for g in removed_by.values():
         pieces.extend(_polys(g))
-    if not pieces:
+    if not pieces and not despiked:
         raise ValueError("nothing sliver-thin inside that loop -- it only takes "
                          "lines a few pixels wide, never healthy regions")
-    freed = unary_union(pieces).buffer(0)
+    freed = unary_union(pieces).buffer(0) if pieces else Polygon()
 
     # -- take the slivers out of their donors ---------------------------------
     out = json.loads(json.dumps(features))
+    for k, d in despiked.items():        # needles, which free no ground
+        out[int(k)]["geometry"] = mapping(d)
     deleted, drop = [], set()
     for k, cut in removed_by.items():
         g = clean_geom(_safe_difference(geoms[k], cut), smooth=False)
@@ -2213,6 +2320,7 @@ def clean_lines(features, id_prop, points, width=12.0):
     out = [f for i, f in enumerate(out) if i not in drop]
     return {"features": out,
             "removed": sorted(removed_report, key=lambda r: -r["area"]),
+            "despiked": sorted(despiked_report, key=lambda r: -r["vertices"]),
             "deleted": sorted(deleted),
             "filled": filled_names,
             "covered": sorted(covered),
