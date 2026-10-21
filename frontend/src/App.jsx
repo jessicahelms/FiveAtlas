@@ -2559,7 +2559,7 @@ export default function App() {
     } catch (e) { setError(apiDetail(e)); } finally { setBusy(false); }
   }, [dsId, fc]);
 
-  const doExport = useCallback(async (exportMode, { force = false, frame = 'displayed' } = {}) => {
+  const doExport = useCallback(async (exportMode, { force = false, frame = 'original' } = {}) => {
     setBusy(true); setError(null);
     try {
       const name = await api.exportRegions(dsId, exportMode, fcRef.current || fc,
@@ -2577,6 +2577,19 @@ export default function App() {
       }
     } finally { setBusy(false); }
   }, [dsId, fc]);
+
+  // Which coordinates? Asked at the MOMENT of export rather than set in advance:
+  // a frame chosen on a panel days earlier is a setting nobody looks at, and
+  // files handed on in the wrong frame is the whole problem. Only asked when the
+  // view is actually turned -- otherwise both answers write the same file and the
+  // export just runs.
+  const [exportAsk, setExportAsk] = useState(null);          // {mode}
+  const viewRotated = !!(info && info.orientation
+    && (info.orientation.rot || info.orientation.flipH || info.orientation.flipV));
+  const requestExport = useCallback((exportMode) => {
+    if (viewRotated) setExportAsk({ mode: exportMode });
+    else doExport(exportMode, { frame: 'original' });
+  }, [viewRotated, doExport]);
 
   const doRepair = useCallback(async () => {
     setBusy(true); setError(null);
@@ -2813,7 +2826,7 @@ export default function App() {
                 identity={identity} onIdentity={doSetIdentity}
                 uiSettings={uiSettings} onUiSettings={applyUiSettings}
                 updateInfo={updateInfo} selfUpdate={selfUpdate}
-                onLoadFile={loadRegionsFromFile} onExport={doExport}
+                onLoadFile={loadRegionsFromFile} onExport={requestExport}
                 onExportAnnData={sources && sources.sources
                   && sources.sources.transcripts ? doExportAnnData : null}
                 snapInfo={snapInfo} busy={busy} error={error}
@@ -2886,6 +2899,44 @@ export default function App() {
           </>
         )}
       </div>
+
+      {exportAsk && (() => {
+        const o = (info && info.orientation) || { rot: 0, flipH: false, flipV: false };
+        const turned = `${o.rot}°${o.flipH ? ' ⇄' : ''}${o.flipV ? ' ⇅' : ''}`;
+        const go = (frame) => { setExportAsk(null); doExport(exportAsk.mode, { frame }); };
+        return (
+          <div className="scrim" onClick={() => setExportAsk(null)}>
+            {/* stop a click inside from dismissing it */}
+            <div className="ask" onClick={(e) => e.stopPropagation()}>
+              <h4>How do you want to export the coordinates?</h4>
+              <div className="hint dim">
+                This view is turned {turned}, so these are two different files.
+              </div>
+              <div className="row">
+                <button className="btn primary" disabled={busy}
+                  onClick={() => go('original')}>
+                  As imaged (0°)
+                </button>
+                <button className="btn" disabled={busy}
+                  onClick={() => go('displayed')}>
+                  After rotation ({turned})
+                </button>
+              </div>
+              <div className="hint dim">
+                <b>As imaged</b> turns every edit back, so the file lines up with the
+                original image and with the cells these polygons get mapped onto —
+                which is what a finished polygon has to be.{' '}
+                <b>After rotation</b> writes exactly what is on screen, and lines up
+                only for someone who turns the slide the same way <i>before</i>
+                {' '}loading it. The filename says which.
+              </div>
+              <div className="row">
+                <button className="btn sm" onClick={() => setExportAsk(null)}>Cancel</button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {regionMenu && (
         <div className="ctxmenu" style={{ left: regionMenu.x, top: regionMenu.y }}>

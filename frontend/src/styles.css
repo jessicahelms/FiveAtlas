@@ -191,6 +191,20 @@ body {
 .diff .hunk { color: #6b7482; }
 .diff .dim { color: #6b7482; }
 
+/* a question that has to be answered before something is written */
+.scrim {
+  position: fixed; inset: 0; z-index: 60; display: flex;
+  align-items: center; justify-content: center;
+  background: rgba(8, 11, 16, .62);
+}
+.ask {
+  min-width: 320px; max-width: 460px; margin: 24px; padding: 16px 18px;
+  background: #161c26; border: 1px solid #2f3a4c; border-radius: 8px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .55);
+}
+.ask h4 { margin: 0 0 8px; font-size: 14px; }
+.ask .row { margin-top: 12px; }
+
 /* right-click a region -> rename */
 .ctxmenu {
   position: fixed; z-index: 50; min-width: 150px; padding: 4px;

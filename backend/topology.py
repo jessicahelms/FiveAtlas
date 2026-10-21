@@ -1650,6 +1650,53 @@ def _rename_props(feature, id_prop, name):
     return feature
 
 
+def concat_region_files(groups, id_prop):
+    """Several region files' features in one collection, with their regions kept
+    SEPARATE.
+
+    `groups` is [(label, features), ...] in the order they were picked, where
+    `label` is the file's name without its extension.
+
+    Two regions carrying one name are ONE region in this app -- every edit acts
+    on all of its parts -- so concatenating two files that both hold `ISO` fused
+    them, listed them as one two-part region and edited both files' copies at
+    once. A name already used is therefore never reused: damage takes the next
+    free number, anatomy gets the file it came from added. That is the same rule
+    the add-a-file path follows, so the two ways of loading a second file agree.
+
+    The first file keeps every name it has, so the common case -- one file -- is
+    untouched, and loading a second alongside never renames what is already
+    there.
+
+    Returns {features, renames}, `renames` being [(was, now)] in order.
+    """
+    feats, renames = [], []
+    taken = set()
+    for label, features in groups:
+        stem = str(label or "file")
+        for f in (features or []):
+            f = json.loads(json.dumps(f))
+            nm = str((f.get("properties") or {}).get(id_prop) or "").strip()
+            if nm and nm in taken:
+                tag = _damage.parse_name(nm)[0]
+                if tag:
+                    fresh = _damage.format_name(
+                        tag, _damage.next_number(sorted(taken), tag))
+                else:
+                    fresh = f"{nm} ({stem})"
+                    i = 2
+                    while fresh in taken:
+                        fresh = f"{nm} ({stem} {i})"
+                        i += 1
+                _rename_props(f, id_prop, fresh)
+                renames.append((nm, fresh))
+                nm = fresh
+            if nm:
+                taken.add(nm)
+            feats.append(f)
+    return {"features": feats, "renames": renames}
+
+
 def merge_regions(features, id_prop, names, new_name=None, seam_tol=40.0):
     """Combine the named regions into ONE region -- the shared border DISSOLVES.
 

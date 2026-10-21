@@ -55,13 +55,8 @@ export default function Sidebar({
     </div>
   );
   const [copiedCell, setCopiedCell] = useState(null);
-  // Which coordinates to write when the view is rotated/flipped. Default is what
-  // is on screen -- that is what has been edited against.
-  // 0 degrees, unflipped, by DEFAULT. The cells these polygons get mapped onto
-  // live in the as-imaged frame, so every final polygon has to be in it; writing
-  // the rotated view instead only ever produced files that silently did not line
-  // up for whoever opened them without rotating first.
-  const [exportFrame, setExportFrame] = useState('original');
+  // Which coordinates an export writes is asked in a popup at the moment of
+  // export (App's exportAsk), not kept as a setting here.
   const rotated = !!(orientation && (orientation.rot || orientation.flipH || orientation.flipV));
   const idProp = (info && info.idProp) || 'name';
   const names = fc.features.map((f) => displayName(f, idProp) || '(unnamed)');
@@ -1075,36 +1070,16 @@ export default function Sidebar({
         </>)}
         <div className="slabel">Export</div>
         {rotated && (
-          <>
-            <div className="hint dim">Write the coordinates…</div>
-            <div className="row">
-              <button className={`btn sm${exportFrame === 'original' ? ' on' : ''}`}
-                disabled={busy} title="rotate and flip every edit back to the as-imaged frame -- the default, and what downstream work needs"
-                onClick={() => setExportFrame('original')}>
-                As imaged (0°)
-              </button>
-              <button className={`btn sm${exportFrame === 'displayed' ? ' on' : ''}`}
-                disabled={busy} title="the rotated / flipped coordinates you have been editing"
-                onClick={() => setExportFrame('displayed')}>
-                As you see it ({orientation.rot}°{orientation.flipH ? ' ⇄' : ''}{orientation.flipV ? ' ⇅' : ''})
-              </button>
-            </div>
-            <div className="hint dim">
-              {exportFrame === 'original'
-                ? 'Your edits are rotated and flipped back, so the file lines up with the'
-                  + ' original image and with the cells these polygons get mapped onto.'
-                  + ' Written without an orientation marker.'
-                : 'Written exactly as displayed, marked with the orientation. These line up'
-                  + ' ONLY for someone who rotates the same way before loading them —'
-                  + ' otherwise pick As imaged.'}
-              {' '}The filename says which.
-            </div>
-          </>
+          <div className="hint dim">
+            This view is turned {orientation.rot}°{orientation.flipH ? ' ⇄' : ''}
+            {orientation.flipV ? ' ⇅' : ''}, so exporting will ask which
+            coordinates to write.
+          </div>
         )}
         <div className="row">
-          <button className="btn" onClick={() => onExport('merged', { frame: exportFrame })}
+          <button className="btn" onClick={() => onExport('merged')}
             disabled={busy}>Merged .geojson</button>
-          <button className="btn" onClick={() => onExport('separate', { frame: exportFrame })}
+          <button className="btn" onClick={() => onExport('separate')}
             disabled={busy}>Separate .zip</button>
         </div>
         <div className="hint dim">Merged = one file, all regions. Separate = one file per region, zipped.</div>
@@ -1146,7 +1121,7 @@ export default function Sidebar({
               {geomReport.mode && (
                 <button className="btn sm" disabled={busy}
                   onClick={() => onForceExport(geomReport.mode,
-                                               geomReport.frame || 'displayed')}>
+                                               geomReport.frame || 'original')}>
                   Export anyway
                 </button>
               )}

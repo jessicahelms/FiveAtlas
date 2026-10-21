@@ -1837,26 +1837,36 @@ async def regions_read_file(ds_id: str, request: Request):
 async def regions_load_multi(ds_id: str, request: Request):
     """Load ONE OR SEVERAL region files as the working copy -- the pre-load
     checklist's region rows. Each file goes through the same reader as a
-    single load (space transform, healing); their features are concatenated
-    in the order picked. Body: {paths:[...]}."""
+    single load (space transform, healing).
+
+    Files picked together keep their regions SEPARATE: a name a previous file
+    already used is renamed rather than reused, because two regions sharing a
+    name are one multi-part region here and would be edited together. Body:
+    {paths:[...]}."""
     try:
-        ds.get_dataset(ds_id)
+        d = ds.get_dataset(ds_id)
     except KeyError:
         raise HTTPException(404, "unknown dataset")
     body = await request.json()
     paths = (body or {}).get("paths") or []
     if not paths:
         raise HTTPException(400, "need 'paths': at least one region file")
-    feats, names = [], []
+    groups, names = [], []
     for path in paths:
         try:
             fc = geo.load_regions_file(ds_id, str(path))
         except Exception as e:
             raise HTTPException(400, f"load failed for {Path(str(path)).name}: {e}")
-        feats.extend(fc.get("features") or [])
+        groups.append((Path(str(path)).stem, fc.get("features") or []))
         names.append(Path(str(path)).name)
-    out = {"type": "FeatureCollection", "features": feats}
-    provenance.stamp(out, "load-regions", " + ".join(names))
+    res = topology.concat_region_files(groups, d["id_prop"])
+    out = {"type": "FeatureCollection", "features": res["features"]}
+    detail = " + ".join(names)
+    if res["renames"]:
+        detail += (f" ({len(res['renames'])} renamed so no name is used twice: "
+                   + ", ".join(f"{a} -> {b}" for a, b in res["renames"][:6])
+                   + ("…" if len(res["renames"]) > 6 else "") + ")")
+    provenance.stamp(out, "load-regions", detail)
     geo.save_edited(ds_id, out)
     return JSONResponse(out)
 
