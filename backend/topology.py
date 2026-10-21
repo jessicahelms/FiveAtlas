@@ -487,6 +487,16 @@ def clean_features(features, id_prop, spike=2.0):
 #: the value the default reach of 40 already produced, so that case is untouched.
 MAX_THIN = 20.0
 
+#: Douglas-Peucker tolerance for collinear fluff on a region's FREE edge.
+#: The Voronoi sampling leaves all-but-collinear vertices in their thousands --
+#: `opt` came back from a 36-vertex region with 3,227, `ISO` with 2,369 from 80,
+#: and one click grew the 23-region file from 74,350 to 207,270 bytes (x2.79),
+#: which is what Xenium Explorer then has to read. A hundredth of a pixel cannot
+#: move an outline anywhere a person could see, and removes 3,178 of those 3,227
+#: while keeping 100.000000% of the area. It is NOT used on the shared seam,
+#: which is thinned at the reach instead.
+FREE_EDGE_FLUFF = 0.01
+
 
 def _partition_spike(tol):
     """Small, bounded spike width for share-border partition cleanup."""
@@ -1299,8 +1309,19 @@ def _voronoi_partition(area, geoms_by_name, spacing):
     inset = spacing * 0.5
     pts, labels = [], []
     for n, g in geoms_by_name.items():
-        src = _generator_inset(g, inset)
-        if src is None or src.is_empty or not src.is_valid:
+        # Inset toward the interior so generators never coincide where two
+        # regions already touch. A region smaller than the inset used to fall
+        # straight back to its RAW boundary, which is the degenerate case this
+        # is here to avoid -- so try smaller insets first.
+        src = None
+        for ins in (inset, inset * 0.5, inset * 0.25, 1.0):
+            if ins <= 0:
+                continue
+            cand = _generator_inset(g, ins)
+            if cand is not None and not cand.is_empty and cand.is_valid:
+                src = cand
+                break
+        if src is None:
             src = g
         # Keep enough generators that a long thin region is represented along its
         # WHOLE length: if this region is small relative to `spacing` it would
@@ -1417,7 +1438,11 @@ def _simplify_shared(newg, tol, precision, keep_out=None):
             pass
         parts.extend(seg.simplify(tol) for seg in _lines(inside))
     if not outside.is_empty:
-        parts.extend(_lines(outside))
+        # The free edge keeps its shape to a hundredth of a pixel; only
+        # collinear fluff goes. Splitting against the seam zone first means
+        # Douglas-Peucker keeps the junction endpoints, so the network stays
+        # connected exactly as the seam pieces above do.
+        parts.extend(seg.simplify(FREE_EDGE_FLUFF) for seg in _lines(outside))
     if not parts:
         return newg
     net = unary_union(parts)
@@ -1668,6 +1693,25 @@ def partition_regions(features, id_prop, names, tol=40.0, precision=1.0,
     T = U.buffer(tol, join_style=2).buffer(-tol, join_style=2).buffer(0)
     if T.is_empty:
         T = U
+    # A hole a region ALREADY had is deliberate -- a ventricle, a tear -- and the
+    # close must not swallow it. A close of radius tol fills anything narrower
+    # than 2*tol, so OLF's 220-px-wide hole disappeared at every reach from 150
+    # up (and OLF gained 257,073 px at 150, 526,110 at 600), and HY's 120-px one
+    # went the same way. Taking them out of the territory keeps them out of
+    # everything downstream, because every region is clipped to T.
+    _pre_holes = [h for n in sel for h in _holes(geoms[n])]
+    _pre_holes = unary_union(_pre_holes).buffer(0) if _pre_holes else Polygon()
+    # A hole that ANOTHER PICKED REGION fills is not empty space -- it is that
+    # region's ground, and the pair is a nested one. Protecting it took the inner
+    # region's own territory away from it: a donut plus the core that fits it
+    # exactly lost 26.9% of the pair's area, nearly all of the core, instead of
+    # the 2.5% it lost before. Only a hole nobody claims is a deliberate void.
+    if not _pre_holes.is_empty:
+        _pre_holes = _safe_difference(_pre_holes, U)
+    if not _pre_holes.is_empty:
+        Th = _safe_difference(T, _pre_holes)
+        if not Th.is_empty:
+            T = Th
     # Ground belonging to regions that are NOT being shared, so the bridged fill
     # cannot eat a third region.
     #
@@ -1723,6 +1767,13 @@ def partition_regions(features, id_prop, names, tol=40.0, precision=1.0,
     # but never coarser than ~1/24 of the smallest region's perimeter, so small
     # regions still get enough samples to tile precisely (no slivers of overlap).
     min_perim = min((g.length for g in geoms.values() if not g.is_empty), default=tol)
+    # The SMALLEST region in the pair sets the sampling density, which is why a
+    # 42-px-perimeter speck makes its 9,024-px-perimeter neighbour come back with
+    # thousands of vertices. Driving this from `tol` alone instead is NOT the fix:
+    # tried, and `opt` then grew 1039% against sAMY.3 (it was 55%), because a
+    # coarse midline next to a tiny region hands it a huge Voronoi cell. The
+    # clamp is load-bearing. The vertex count is dealt with where it is safe to
+    # deal with it -- see FREE_EDGE_FLUFF in _simplify_shared.
     spacing = max(min(tol, min_perim / 24.0), 4.0)
     if snap_keep is not None:
         keep = snap_keep
@@ -1790,8 +1841,16 @@ def partition_regions(features, id_prop, names, tol=40.0, precision=1.0,
     #     hollow rather than across it, and that void isn't in T at all.
     # Holes that belong to somebody -- another region's ground, or a hole the
     # region already had -- are left exactly as they are.
-    _pre_holes = [h for n in sel for h in _holes(geoms[n])]
-    _pre_holes = unary_union(_pre_holes) if _pre_holes else Polygon()
+    # (_pre_holes is computed with the territory above, because the close itself
+    # would otherwise have filled these before anything got here.)
+
+    def _spannable(p):
+        """Whether a close at this reach could bridge across `p` -- i.e. it is
+        narrower than 2*tol somewhere. Erosion by tol empties exactly those."""
+        try:
+            return p.buffer(-float(tol)).is_empty
+        except Exception:
+            return True                   # unmeasurable: behave as before
 
     def _close_voids(rounds, holes_only=False, skip=None):
         """Hand every leftover empty piece to its nearest region.
@@ -1807,7 +1866,21 @@ def partition_regions(features, id_prop, names, tol=40.0, precision=1.0,
             claimed_all = unary_union([g for g in newg.values() if not g.is_empty]).buffer(0)
             void = [] if holes_only else [
                 p for p in _polys(_safe_difference(T, claimed_all)) if p.area > 1.0]
-            void += [h for h in _holes(claimed_all) if h.area > 1.0]
+            # An ENCLOSED void only gets absorbed if the reach could actually
+            # span it. An open void lies inside T, which the close already built
+            # at this reach; a hole has no such limit on it, and that is what
+            # made this hand over any amount of ground that happened to be ringed
+            # in. A comb of 40-px teeth with 160-px slots grew 327% at the
+            # default reach of 40 -- reach 80, slots 160 -- taking 99% of every
+            # slot, while the territory itself grew only 20,000 px. Two
+            # 350-degree annulus sectors 10 px apart ended up 100% OVERLAPPING,
+            # one buried inside the other, because one had absorbed the whole
+            # interior; which one depended on click order.
+            #
+            # Eroding by tol empties anything narrower than 2*tol, which is
+            # exactly the reach the slider promises.
+            void += [h for h in _holes(claimed_all)
+                     if h.area > 1.0 and _spannable(h)]
             if not void:
                 return
             orphan = unary_union(void).buffer(0)
@@ -1955,6 +2028,41 @@ def partition_regions(features, id_prop, names, tol=40.0, precision=1.0,
             nb = _safe_difference(b, a)      # plain cede -- cleaning it here would
             if not nb.is_empty:              # break the shared edge again
                 newg[sel[j]] = nb
+            else:
+                # b has no ground of its own: it ended up wholly inside a.
+                # Skipping the write -- which is what used to happen, because
+                # `b - a` is empty -- left the two regions 100% overlapping, one
+                # buried inside the other, and which one it was came down to
+                # click order. a is the container here by definition, so a gives
+                # the ground up instead and b keeps its shape.
+                na = _safe_difference(a, b)
+                if not na.is_empty:
+                    newg[sel[i]] = na
+                    a = na
+
+    # Needles: rings that double back to within a hair of themselves, enclosing
+    # no area. 20 of 86 region-results carried one at the default reach, the
+    # longest a 534-px pair of edges 0.004883 px apart, and six pairs produced
+    # them at a measured 0.000000 px. They are what Xenium Explorer rejects, and
+    # the manual clean-up tool could not always reach them. despike() only
+    # deletes vertices that enclose no area and returns its input untouched if
+    # the area moves, so this cannot reshape anatomy -- but the pair is checked
+    # as a SET afterwards all the same, because a seam has to stay coincident.
+    try:
+        spiked = {n: despike(newg[n]) for n in sel}
+        before = unary_union([newg[n] for n in sel if not newg[n].is_empty]).buffer(0)
+        after = unary_union([g for g in spiked.values() if not g.is_empty]).buffer(0)
+        worst = 0.0
+        for i, a in enumerate(sel):
+            for b in sel[i + 1:]:
+                worst = max(worst, _safe_intersection(spiked[a], spiked[b]).area)
+        if (not after.is_empty
+                and abs(after.area - before.area) <= max(before.area * 1e-9, 1e-6)
+                and worst <= 1e-6
+                and all(not spiked[n].is_empty or newg[n].is_empty for n in sel)):
+            newg = spiked
+    except Exception:
+        pass                                  # keep the un-despiked result
 
     out = json.loads(json.dumps(features))
     for n in sel:
