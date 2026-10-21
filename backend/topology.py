@@ -479,6 +479,15 @@ def clean_features(features, id_prop, spike=2.0):
     return out
 
 
+#: Thinning the shared-boundary network is about vertex density, not about how
+#: far a gap may be bridged, so it must NOT scale with the snap reach. It used
+#: to (`tol / 2`), which meant a long reach ran Douglas-Peucker at hundreds of
+#: pixels and shredded the outlines: on the real TH, reach 5000 cost 24,232,344
+#: px of a 95,303,653 px region and took it from 85 vertices to 26. The cap is
+#: the value the default reach of 40 already produced, so that case is untouched.
+MAX_THIN = 20.0
+
+
 def _partition_spike(tol):
     """Small, bounded spike width for share-border partition cleanup."""
     try:
@@ -1643,7 +1652,7 @@ def partition_regions(features, id_prop, names, tol=40.0, precision=1.0,
     # share EXACT edges, so we do NOT snap per-region afterwards -- that would break
     # the coincidence and leave sub-pixel slivers of overlap.
     if simplify != 0:
-        s = max(tol * 0.5, 3.0) if simplify is None else float(simplify)
+        s = min(max(tol * 0.5, 3.0), MAX_THIN) if simplify is None else float(simplify)
         Ts = T.simplify(s)
         if not Ts.is_empty and Ts.is_valid and Ts.area >= 0.98 * T.area:
             T = _protect(Ts.buffer(0))
@@ -1810,7 +1819,7 @@ def partition_regions(features, id_prop, names, tol=40.0, precision=1.0,
     keep_out = Polygon()
     if not protected.is_empty or not _pre_holes.is_empty:
         keep_out = unary_union([g for g in (protected, _pre_holes) if not g.is_empty]).buffer(0)
-    thin = max(tol * 0.5, 3.0) if simplify is None else float(simplify)
+    thin = min(max(tol * 0.5, 3.0), MAX_THIN) if simplify is None else float(simplify)
     # Not when a seam is snapped. There is no dense midline to thin -- the seam is
     # the kept region's own outline, and the other's new edge is a copy of it --
     # and thinning the network would move the one outline that has to stay put.

@@ -2,6 +2,28 @@ import { Fragment, useState } from 'react';
 import { parseName, nextNumber, formatName } from './damage';
 import { displayVersion } from './version';
 
+// Snap reach runs on a LOG scale. Linear, a range wide enough to bridge a torn
+// section would give the 5-50 px end -- where most borders actually are -- about
+// one percent of the track. This way the first half covers 5-200 and the rest
+// stretches to thousands.
+const REACH_MIN = 5;
+const REACH_MAX = 5000;
+const REACH_STEPS = 1000;
+
+function reachToSlider(px) {
+  const v = Math.min(Math.max(Number(px) || REACH_MIN, REACH_MIN), REACH_MAX);
+  return Math.round(REACH_STEPS * Math.log(v / REACH_MIN)
+    / Math.log(REACH_MAX / REACH_MIN));
+}
+
+function sliderToReach(pos) {
+  const v = REACH_MIN * ((REACH_MAX / REACH_MIN) ** (Number(pos) / REACH_STEPS));
+  // round to something a person would type, finer where the values are small
+  if (v < 100) return Math.max(REACH_MIN, Math.round(v / 5) * 5);
+  if (v < 1000) return Math.round(v / 25) * 25;
+  return Math.min(REACH_MAX, Math.round(v / 100) * 100);
+}
+
 function displayName(feature, idProp) {
   const props = (feature && feature.properties) || {};
   const value = props[idProp] ?? props.name;
@@ -472,9 +494,10 @@ export default function Sidebar({
                 <div className="rng">
                   <span>near</span>
                   <input
-                    type="range" min="5" max="300" step="5"
-                    value={snapTol}
-                    onChange={(e) => onSnapTol && onSnapTol(Number(e.target.value))}
+                    type="range" min="0" max={REACH_STEPS} step="1"
+                    value={reachToSlider(snapTol)}
+                    onChange={(e) => onSnapTol
+                      && onSnapTol(sliderToReach(e.target.value))}
                     disabled={busy}
                   />
                   <span>far</span>

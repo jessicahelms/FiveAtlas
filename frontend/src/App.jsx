@@ -1392,7 +1392,7 @@ export default function App() {
   // as the widest gap the slider will close: what fits inside it closes, what
   // does not is left alone. Put at the narrowest point between the two picked
   // regions, because that is where the question is being asked.
-  const reachRing = useMemo(() => {
+  const reachCentre = useMemo(() => {
     if (mode !== 'border' || borderShared || borderPicks.length < 2) return null;
     const ptsOf = (nm) => {
       const out = [];
@@ -1426,8 +1426,16 @@ export default function App() {
         }
       }
     }
-    return centre ? { center: centre, radius: snapTol } : null;
-  }, [mode, borderShared, borderPicks, fc, idProp, snapTol]);
+    return centre;
+    // NB: the reach is deliberately NOT a dependency. Where the gap is does not
+    // move when the slider does, and re-running this nearest-pair search on
+    // every move is what made the slider stutter.
+  }, [mode, borderShared, borderPicks, fc, idProp]);
+
+  const reachRing = useMemo(
+    () => (reachCentre ? { center: reachCentre, radius: snapTol } : null),
+    [reachCentre, snapTol],
+  );
 
   const doShareBorders = useCallback(async (snapTo = null) => {
     if (borderPicks.length < 2) return;
