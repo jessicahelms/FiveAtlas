@@ -1372,32 +1372,52 @@ def _simplify_shared(newg, tol, precision, keep_out=None):
     # is; simplifying the whole network moved 94,240 px of TH's, nowhere near
     # HPF, and cost it 53 of its 133 vertices.
     eps = max(float(tol) * 0.25, 0.5)
+    bnd = {n: newg[n].boundary for n in names}
+    grown = {}                            # one buffer per region, not per pair
+    for n in names:
+        try:
+            grown[n] = bnd[n].buffer(eps)
+        except Exception:
+            grown[n] = Polygon()
     seams = []
     for i, a in enumerate(names):
         for b in names[i + 1:]:
+            if grown[a].is_empty or grown[b].is_empty:
+                continue
             try:
-                s = _safe_intersection(newg[a].boundary.buffer(eps),
-                                       newg[b].boundary.buffer(eps))
+                s = _safe_intersection(grown[a], grown[b])
             except Exception:
                 continue
             if not s.is_empty:
                 seams.append(s)
-    seam_zone = unary_union(seams).buffer(0) if seams else Polygon()
-    raw = unary_union([newg[n].boundary for n in names])
-    if seam_zone.is_empty:
+    if not seams:
         return newg                       # nothing is shared: nothing to thin
+    seam_zone = unary_union(seams).buffer(0)
+    if seam_zone.is_empty:
+        return newg
+    raw = unary_union(list(bnd.values()))
+    # PLAIN line operations. _safe_intersection / _safe_difference open with
+    # `a.buffer(0)`, and LineString.buffer(0) is POLYGON EMPTY -- using them here
+    # silently returned nothing for every line and made this whole function a
+    # no-op. They are for polygons.
+    try:
+        inside = raw.intersection(seam_zone)
+        outside = raw.difference(seam_zone)
+    except Exception:
+        return newg
     parts = []
-    for ln in _lines(raw):
+    if not inside.is_empty:
+        # unary_union noded the coincident linework at every shared vertex, so
+        # the seam arrives as a crowd of 2-point segments -- and Douglas-Peucker
+        # keeps both endpoints of what it is handed, so a 2-point segment cannot
+        # be shortened. Merge them back into continuous arcs first.
         try:
-            inside = _safe_intersection(ln, seam_zone)
-            outside = _safe_difference(ln, seam_zone)
+            inside = linemerge(inside)
         except Exception:
-            parts.append(ln)
-            continue
-        if not inside.is_empty:
-            parts.extend(seg.simplify(tol) for seg in _lines(inside))
-        if not outside.is_empty:
-            parts.extend(_lines(outside))
+            pass
+        parts.extend(seg.simplify(tol) for seg in _lines(inside))
+    if not outside.is_empty:
+        parts.extend(_lines(outside))
     if not parts:
         return newg
     net = unary_union(parts)
@@ -1441,8 +1461,13 @@ def _simplify_shared(newg, tol, precision, keep_out=None):
     out = dict(newg)
     for n in names:
         g = unary_union(result[n]) if result[n] else newg[n]
-        if precision and not g.is_empty:
-            g = set_precision(g, float(precision))
+        # NO precision snap. It ran over the WHOLE region, so the default 1 px
+        # grid moved every vertex of a hand-traced outline by up to half a pixel
+        # -- on the real TH, 9,402 px of free edge in 67 sub-pixel slivers the
+        # entire way round, thousands of pixels from the border being shared.
+        # The seam does not need it: polygonize hands both faces the SAME edge,
+        # so the two rings are coincident by construction, sub-pixel coordinates
+        # and all. `precision` is kept in the signature for the caller.
         g = g.buffer(0)
         if newg[n].area > 0 and g.area < 0.5 * newg[n].area:
             return newg                       # simplification lost the region -> bail
