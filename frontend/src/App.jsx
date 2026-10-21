@@ -1387,6 +1387,48 @@ export default function App() {
     }
   }, [propEdit, propRadius, applyMoveBorder, currentBorderArcCoords, replaceVisibleBorderArc, stableBorderArcCoords, borderSegmentIndex]);
 
+  // The Snap reach, as a circle where the gap actually is. A close of radius r
+  // bridges a gap up to 2r ACROSS, so a circle of that radius is exactly as wide
+  // as the widest gap the slider will close: what fits inside it closes, what
+  // does not is left alone. Put at the narrowest point between the two picked
+  // regions, because that is where the question is being asked.
+  const reachRing = useMemo(() => {
+    if (mode !== 'border' || borderShared || borderPicks.length < 2) return null;
+    const ptsOf = (nm) => {
+      const out = [];
+      for (const f of (fc && fc.features) || []) {
+        if (featureName(f, idProp) !== nm) continue;
+        const g = f.geometry || {};
+        const polys = g.type === 'Polygon' ? [g.coordinates]
+          : g.type === 'MultiPolygon' ? g.coordinates : [];
+        for (const poly of polys) for (const ring of poly) for (const c of ring) out.push(c);
+      }
+      return out;
+    };
+    const A = ptsOf(borderPicks[0]);
+    const B = ptsOf(borderPicks[1]);
+    if (!A.length || !B.length) return null;
+    // These outlines carry hundreds of points and this re-runs on every drag of
+    // the slider, so walk them at a stride rather than every pair.
+    const stride = (arr) => Math.max(1, Math.floor(arr.length / 300));
+    const sa = stride(A);
+    const sb = stride(B);
+    let best = Infinity;
+    let centre = null;
+    for (let i = 0; i < A.length; i += sa) {
+      for (let j = 0; j < B.length; j += sb) {
+        const dx = A[i][0] - B[j][0];
+        const dy = A[i][1] - B[j][1];
+        const d = dx * dx + dy * dy;
+        if (d < best) {
+          best = d;
+          centre = [(A[i][0] + B[j][0]) / 2, (A[i][1] + B[j][1]) / 2];
+        }
+      }
+    }
+    return centre ? { center: centre, radius: snapTol } : null;
+  }, [mode, borderShared, borderPicks, fc, idProp, snapTol]);
+
   const doShareBorders = useCallback(async (snapTo = null) => {
     if (borderPicks.length < 2) return;
     // Guard against this being wired straight to an onClick, where the argument
@@ -2893,7 +2935,7 @@ export default function App() {
                 cleanPoly={cleanPoly} onCleanEdit={onCleanEdit}
                 cleanPreview={cleanFound && cleanFound.res.freed}
                 gapPreview={gapFind && gapFind.gap} onPickGap={onPickGap}
-                propRing={propRing} onRegionMenu={openRegionMenu}
+                propRing={propRing} reachRing={reachRing} onRegionMenu={openRegionMenu}
                 onDeletePoint={(region, point) => deletePointFrom(region, point, false)}
                 onDeleteBorderPoint={(point) => borderPicks.length === 2
                   && deletePointFrom(borderPicks[0], point, true)}

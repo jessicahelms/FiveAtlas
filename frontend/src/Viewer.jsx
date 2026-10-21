@@ -200,7 +200,7 @@ export default function Viewer({
   drawPoly, onDrawEdit,
   cleanPoly, onCleanEdit, cleanPreview,
   gapPreview, onPickGap,
-  propRing, onRegionMenu, onDeletePoint, onDeleteBorderPoint,
+  propRing, reachRing, onRegionMenu, onDeletePoint, onDeleteBorderPoint,
   onGrabVertex, onReleaseDrag,
   geneBitmap, geneBounds, geneMode, stainInfo, stainChannels, layers, regionsOff,
   bordersOff, fillsOff,
@@ -522,6 +522,34 @@ export default function Viewer({
       })
     : null;
 
+  // Snap reach: the circle is as WIDE as the widest gap that reach will bridge
+  // (a close of radius r closes a gap up to 2r across), sitting at the narrowest
+  // point between the two picked regions.
+  const reachLayer = (reachRing && reachRing.center && reachRing.radius > 0)
+    ? new GeoJsonLayer({
+        id: 'reach-ring',
+        data: {
+          type: 'Feature',
+          properties: {},
+          geometry: {
+            type: 'LineString',
+            coordinates: Array.from({ length: 97 }, (_, i) => {
+              const a = (i / 96) * Math.PI * 2;
+              return [reachRing.center[0] + Math.cos(a) * reachRing.radius,
+                      reachRing.center[1] + Math.sin(a) * reachRing.radius];
+            }),
+          },
+        },
+        coordinateSystem: COORDINATE_SYSTEM.CARTESIAN,
+        pickable: false,
+        filled: false,
+        getLineColor: [255, 196, 64, 220],
+        lineWidthUnits: 'pixels',
+        getLineWidth: 2,
+        lineWidthMinPixels: 2,
+      })
+    : null;
+
   const stack = [];
   if (L.showDapi) stack.push(morph);
   if (stains) stack.push(stains);
@@ -533,6 +561,7 @@ export default function Viewer({
   if (cleanLayer) stack.push(cleanLayer);
   if (cleanFoundLayer) stack.push(cleanFoundLayer);
   if (gapLayer) stack.push(gapLayer);
+  if (reachLayer) stack.push(reachLayer);
   if (ringLayer) stack.push(ringLayer);
 
   // Dissolve mode: a gap has no polygon under it, so there is no picked feature to

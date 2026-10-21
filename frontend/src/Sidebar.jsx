@@ -481,7 +481,15 @@ export default function Sidebar({
                 </div>
                 <div className="prop-readout">
                   <span>bridges gaps up to</span>
-                  <span className="v">{snapTol} px</span>
+                  <span className="v">{snapTol * 2} px across</span>
+                </div>
+                {/* It said `{snapTol} px` before, which is half the truth: a
+                    close of radius r bridges a gap up to 2r wide. At reach 40 a
+                    79 px gap closes and an 81 px one does not. */}
+                <div className="hint dim">
+                  The circle on the map is that wide, at the narrowest point
+                  between your picks — a gap that fits inside it closes, a wider
+                  one is left alone.
                 </div>
               </div>
             )}
