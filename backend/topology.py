@@ -1539,15 +1539,18 @@ def partition_regions(features, id_prop, names, tol=40.0, precision=1.0,
                         out[n] = gl
                 return out
 
-            # A snapped region has to come back exactly as it went in, so it sits
-            # this round out and the others take the leftovers. A leftover none of
-            # THEM is near is simply left: handing it to the snapped region moves
-            # the one outline that has to stay put (~2,000 px and 18 vertices on
-            # the real TH), and handing it to the nearest other region drops a
-            # DETACHED 1,900 px shard on a region it has nothing to do with --
-            # both were tried. It was a gap before this ran, and it stays one;
-            # the seam, which is what was asked for, is exact either way.
+            # The snapped region sits this round out so the others take the
+            # leftovers and its edge stays put. But if NOTHING else is near a
+            # leftover it takes it after all: leaving it unclaimed puts a black
+            # void on the map between two regions that are supposed to tile, and
+            # handing it to a distant region drops a detached shard on one it has
+            # nothing to do with. Both were tried; a void is the worst of the
+            # three. What snapping promises is the SEAM -- the border between the
+            # picked regions lands on this one's edge -- not that no vertex
+            # anywhere on it can change.
             local = _near_regions(skip=snap_keep)
+            if not local and snap_keep is not None:
+                local = _near_regions()
             if not local:
                 return
             if len(local) == 1:
