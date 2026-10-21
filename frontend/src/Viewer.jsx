@@ -40,6 +40,12 @@ function isRightButton(event) {
 // shape instead. (Enter and double-click still work; this only adds a way out.)
 function finishableMode(Base, minPoints) {
   return class extends Base {
+    // No "Distance: N pixels" label. DrawLineStringMode hangs it on the LAST
+    // placed point, which is the one spot you are looking at while placing the
+    // next one, and it covers the image underneath. DrawPolygonMode never had
+    // one, so in practice this only changes the split tool.
+    getTooltips() { return []; }
+
     handleClick(event, props) {
       this._props = props;
       // a right-click ends the shape and must never leave a stray vertex behind

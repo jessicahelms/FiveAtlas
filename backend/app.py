@@ -775,9 +775,14 @@ def info(ds_id: str, noimg: int = 0):
         # no imagery (offline drive / stub dataset): size the canvas to the regions
         fc, _ = geo.load_regions(ds_id)
         w, h = _regions_extent(fc)
+        # `orientation` belongs in THIS answer too. Without it the UI cannot tell
+        # the view is turned, so the Export frame picker never appears and the
+        # frame is chosen silently -- the worst version of the rotated-coordinates
+        # mix-up, and it reaches anyone who simply unticked the imagery.
         return {"id": ds_id, "label": d["label"], "idProp": d["id_prop"],
                 "pixelSizeUm": d.get("pixel_size_um"), "width": w, "height": h,
-                "levels": 1, "tileSize": 512, "nZ": 1, "offline": True}
+                "levels": 1, "tileSize": 512, "nZ": 1, "orientation": o,
+                "offline": True}
 
 
 def _okey(o) -> tuple:

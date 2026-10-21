@@ -293,6 +293,106 @@ def clean_geom(geom, spike=2.0, smooth=True):
     return g
 
 
+def _despike_ring(coords, eps=0.05):
+    """One ring with its needles and duplicate points removed, or None if nothing
+    of it survives.
+
+    A needle tip is a vertex whose two edges leave in nearly the SAME direction
+    and span no area: the outline goes out to it and comes back down the same
+    line. A plain collinear vertex has its edges leaving in OPPOSITE directions,
+    and is left alone. Removing a tip shortens the needle by one vertex, so this
+    repeats until the ring stops changing.
+    """
+    pts = [(float(x), float(y)) for x, y in coords]
+    if len(pts) > 1 and pts[0] == pts[-1]:
+        pts = pts[:-1]
+
+    def dedupe(seq):
+        out = []
+        for p in seq:
+            if not out or abs(p[0] - out[-1][0]) > eps or abs(p[1] - out[-1][1]) > eps:
+                out.append(p)
+        while len(out) > 1 and abs(out[0][0] - out[-1][0]) <= eps \
+                and abs(out[0][1] - out[-1][1]) <= eps:
+            out.pop()
+        return out
+
+    pts = dedupe(pts)
+    changed = True
+    while changed and len(pts) > 3:
+        changed = False
+        n = len(pts)
+        keep = [True] * n
+        for i in range(n):
+            # never take both tips of the same needle in one pass -- walk it down
+            if not (keep[(i - 1) % n] and keep[(i + 1) % n]):
+                continue
+            a, b, c = pts[(i - 1) % n], pts[i], pts[(i + 1) % n]
+            v1 = (a[0] - b[0], a[1] - b[1])
+            v2 = (c[0] - b[0], c[1] - b[1])
+            n1 = (v1[0] * v1[0] + v1[1] * v1[1]) ** 0.5
+            n2 = (v2[0] * v2[0] + v2[1] * v2[1]) ** 0.5
+            if n1 <= eps or n2 <= eps:
+                keep[i] = False
+                changed = True
+                continue
+            # |cross| is twice the triangle's area; divided by the longer edge it
+            # is how wide the needle is at its base
+            cross = abs(v1[0] * v2[1] - v1[1] * v2[0])
+            if cross > eps * max(n1, n2):
+                continue                      # encloses real area
+            if v1[0] * v2[0] + v1[1] * v2[1] <= 0:
+                continue                      # collinear pass-through, not a tip
+            keep[i] = False
+            changed = True
+        if changed:
+            pts = dedupe([p for p, k in zip(pts, keep) if k])
+    if len(pts) < 3:
+        return None
+    return pts + [pts[0]]
+
+
+def despike(geom, eps=0.05):
+    """Remove zero-width needles from a polygon WITHOUT reshaping it.
+
+    Unlike clean_geom's morphological open this cannot erode a genuinely thin
+    region, because it only deletes vertices that enclose no area. A needle has
+    no area, so the area must come out unchanged; if it does not, the input is
+    returned untouched rather than quietly reshaping somebody's anatomy.
+    """
+    if geom is None or geom.is_empty:
+        return geom
+    parts = _polys(geom)
+    if not parts:
+        return geom
+    out = []
+    for p in parts:
+        ext = _despike_ring(p.exterior.coords, eps)
+        if ext is None:
+            continue
+        holes = []
+        for r in p.interiors:
+            h = _despike_ring(r.coords, eps)
+            if h is not None:
+                holes.append(h)
+        try:
+            q = Polygon(ext, holes)
+            if not q.is_valid:
+                q = q.buffer(0)
+        except Exception:
+            q = p
+        if not q.is_empty:
+            out.append(q)
+    if not out:
+        return geom
+    g = out[0].buffer(0) if len(out) == 1 else unary_union(out).buffer(0)
+    if g.is_empty or not g.is_valid:
+        return geom
+    if abs(g.area - geom.area) > max(1.0, geom.area * 1e-4):
+        return geom
+    return g
+
+
 def clean_features(features, id_prop, spike=2.0):
     """Return a copy of the feature list with every polygon cleaned."""
     out = json.loads(json.dumps(features))
@@ -1520,6 +1620,14 @@ def merge_regions(features, id_prop, names, new_name=None, seam_tol=40.0):
             merged = _snap_polys(merged, 0.01)     # fuse the hairline join
             merged = clean_geom(merged, smooth=False)
             sealed = float(sum(c.area for c in fill))
+
+    # EVERY merge, not just the sealed ones: a union of outlines that nearly
+    # coincide leaves zero-width needles -- the "line going into the region" that
+    # had to be dragged out and deleted by hand, and what makes the file valid
+    # here but unloadable in Xenium Explorer. The branch above is skipped
+    # whenever the union already came back as one piece, which is when they are
+    # commonest, so the pass belongs here.
+    merged = despike(merged)
 
     name = str(new_name).strip() if new_name else _common_base_name(sel)
     keep = idx[sel[0]][0]

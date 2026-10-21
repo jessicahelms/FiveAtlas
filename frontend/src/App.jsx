@@ -646,16 +646,27 @@ export default function App() {
     })();
   }, []);
 
-  // A newer release on GitHub? Checked once per app load, shown as a quiet
-  // line in the sidebar. Never downloads anything by itself.
+  // A newer release on GitHub? Shown as a quiet line in the sidebar, and this
+  // call is also what asks the backend to start fetching it in the background.
+  //
+  // Asked again every half hour rather than once per load. FiveAtlas gets left
+  // open for days, so a release that appeared after startup was never noticed
+  // and never downloaded; and a check that failed at startup -- offline, DNS, a
+  // rate limit -- meant that session could never show an update at all. The
+  // backend caches the result for hours, so GitHub still sees a handful of
+  // calls a day however long the app stays open.
   const [updateInfo, setUpdateInfo] = useState(null);
   useEffect(() => {
-    (async () => {
+    let alive = true;
+    const ask = async () => {
       try {
         const u = await api.updateCheck();
-        if (u && u.newer) setUpdateInfo(u);
+        if (alive && u && u.newer) setUpdateInfo(u);
       } catch (e) { /* offline is fine */ }
-    })();
+    };
+    ask();
+    const t = setInterval(ask, 30 * 60 * 1000);
+    return () => { alive = false; clearInterval(t); };
   }, []);
 
   // Which FiveAtlas this is -- shown at the top, so "which version am I on?"
@@ -683,9 +694,12 @@ export default function App() {
   // "Restart to update" strip across the top.
   const [selfUpdate, setSelfUpdate] = useState(null);
   const [updateApplyState, setUpdateApplyState] = useState(null); // null | 'restarting' | message
-  const updateWanted = !!(updateInfo && updateInfo.newer);
+  // Asked unconditionally. This used to wait for the GitHub check above to come
+  // back saying "newer", which made the Restart offer depend on one network call
+  // landing -- even though this route is pure local state and already knows an
+  // update was downloaded in an EARLIER session. It is a local read, so polling
+  // it costs nothing; 'unsupported' and 'idle' simply show nothing.
   useEffect(() => {
-    if (!updateWanted) return undefined;
     let alive = true;
     let timer = null;
     const ask = async () => {
@@ -697,7 +711,7 @@ export default function App() {
     };
     ask();
     return () => { alive = false; clearTimeout(timer); };
-  }, [updateWanted]);
+  }, []);
 
   const applySelfUpdate = useCallback(async () => {
     if (dirty && !window.confirm('You have edits that are not saved yet. '
@@ -884,33 +898,47 @@ export default function App() {
         const saved = JSON.parse(localStorage.getItem('fiveatlas.regionSel.' + id) || 'null');
         sel = saved && saved.length ? new Set(saved.filter((p) => files.some((f) => f.path === p))) : null;
       } catch (e) { sel = null; }
-      if (!sel || !sel.size) {
-        sel = new Set(s && s.primaryRegions ? [s.primaryRegions] : (files[0] ? [files[0].path] : []));
-      }
+      // NOTHING is pre-picked any more. This used to fall back to primaryRegions,
+      // and failing that to whatever file came first in the folder -- then
+      // pressing Load without touching the rows loaded it. A guess that LOOKS
+      // chosen is indistinguishable from an instruction: shared region files got
+      // edited by people who had never picked them, and exported back over work
+      // somebody else had already done. Regions now arrive only from a tick
+      // here, from the choice this dataset remembered, or from Load regions
+      // file. Your own unfinished working copy is not a guess, so it stays
+      // ticked by default -- but it says so, in its own row.
+      const edited = !!(s && s.hasEdited);
+      if (!sel) sel = new Set();
       setPendingDs({ id, sources: src, off: readSrcOff(id),
                      regionSel: sel, regionTouched: false,
-                     hasEdited: !!(s && s.hasEdited) });
+                     hasEdited: edited, useEdited: edited });
     } catch (e) {
       setPendingDs({ id, sources: {}, off: readSrcOff(id),
-                     regionSel: new Set(), regionTouched: false, hasEdited: false });
+                     regionSel: new Set(), regionTouched: false,
+                     hasEdited: false, useEdited: false });
     } finally { setDsBusy(false); }
   }, []);
 
   const confirmPending = useCallback(() => {
     if (!pendingDs) return;
-    const { id, off, regionSel, regionTouched } = pendingDs;
+    const { id, off, regionSel } = pendingDs;
     const off2 = new Set(off);
-    // no region file checked = regions off for this load
+    const wantEdited = !!(pendingDs.useEdited && pendingDs.hasEdited);
+    // Nothing ticked = no regions. There is deliberately no fallback: an empty
+    // map is recoverable in one click, loading the wrong file over someone's
+    // work is not.
     if ((pendingDs.sources.regions || []).length) {
-      if (regionSel.size === 0) off2.add('regions'); else off2.delete('regions');
+      if (!wantEdited && regionSel.size === 0) off2.add('regions');
+      else off2.delete('regions');
     }
     try {
       localStorage.setItem('fiveatlas.srcOff.' + id, JSON.stringify([...off2]));
       localStorage.setItem('fiveatlas.regionSel.' + id, JSON.stringify([...regionSel]));
     } catch (e) { /* private mode */ }
-    // Only an ACTIVE change of the region rows replaces the working copy --
-    // otherwise your edited regions keep loading exactly as before.
-    pendingRegionsRef.current = (regionTouched && regionSel.size)
+    // A ticked file is now honoured whether or not the rows were touched this
+    // time: it is this dataset's remembered choice, which somebody made once.
+    // The working copy, while its row is ticked, takes precedence over it.
+    pendingRegionsRef.current = (!wantEdited && regionSel.size)
       ? { id, paths: [...regionSel] } : null;
     setPendingDs(null);
     if (id === dsId) {          // same dataset re-staged: force the load effect
@@ -2662,26 +2690,40 @@ export default function App() {
                         onChange={() => setPendingDs((p) => {
                           const sel = new Set(p.regionSel);
                           if (sel.has(f.path)) sel.delete(f.path); else sel.add(f.path);
-                          return { ...p, regionSel: sel, regionTouched: true };
+                          // picking a file means loading fresh from it, which is
+                          // the opposite of carrying on from the working copy
+                          return { ...p, regionSel: sel, regionTouched: true,
+                                   useEdited: sel.size ? false : p.useEdited };
                         })} />
                       {' '}{f.name}
                       <span className="dim">{Number.isFinite(f.features) ? ` — ${f.features} regions` : ''}</span>
                     </label>
                   ))}
-                  {pendingDs.hasEdited && !pendingDs.regionTouched && (
-                    <div className="hint dim" style={{ paddingLeft: 14 }}>
-                      Your edited working copy loads as usual. Change the checkboxes to
-                      load fresh from the checked file(s) instead (your current copy is
-                      versioned first).
-                    </div>
+                  {pendingDs.hasEdited && (
+                    <label style={{ display: 'block', padding: '3px 0 3px 14px',
+                                    cursor: 'pointer' }}>
+                      <input type="checkbox" checked={!!pendingDs.useEdited}
+                        onChange={() => setPendingDs((p) => ({
+                          ...p, useEdited: !p.useEdited, regionTouched: true }))} />
+                      {' '}<b>Your edited working copy</b>
+                      <span className="dim"> — carry on where you left off</span>
+                    </label>
                   )}
-                  {pendingDs.regionTouched && (
-                    <div className="hint dim" style={{ paddingLeft: 14 }}>
-                      {pendingDs.regionSel.size
-                        ? `Will load fresh from ${pendingDs.regionSel.size} file(s), replacing the working copy.`
-                        : 'No region file checked — regions will not load.'}
-                    </div>
-                  )}
+                  {/* Always says what Load will actually do. The old version said
+                      nothing until a row was touched, so the commonest case --
+                      press Load, take what appears -- was the unexplained one. */}
+                  <div className="hint dim" style={{ paddingLeft: 14 }}>
+                    {pendingDs.useEdited && pendingDs.hasEdited
+                      ? 'Your working copy will load. Any file checked above is ignored'
+                        + ' while this is ticked.'
+                      : pendingDs.regionSel.size
+                        ? `Will load fresh from ${pendingDs.regionSel.size} file(s)`
+                          + `${pendingDs.hasEdited
+                              ? ', replacing your working copy (versioned first)' : ''}.`
+                        : 'Nothing checked, so no regions will load — and there is no'
+                          + ' default on purpose. Check the file you were asked to work'
+                          + ' on, or use Load regions file at the top later.'}
+                  </div>
                 </div>
               )}
               <div className="row" style={{ marginTop: 14 }}>

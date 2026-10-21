@@ -57,7 +57,11 @@ export default function Sidebar({
   const [copiedCell, setCopiedCell] = useState(null);
   // Which coordinates to write when the view is rotated/flipped. Default is what
   // is on screen -- that is what has been edited against.
-  const [exportFrame, setExportFrame] = useState('displayed');
+  // 0 degrees, unflipped, by DEFAULT. The cells these polygons get mapped onto
+  // live in the as-imaged frame, so every final polygon has to be in it; writing
+  // the rotated view instead only ever produced files that silently did not line
+  // up for whoever opened them without rotating first.
+  const [exportFrame, setExportFrame] = useState('original');
   const rotated = !!(orientation && (orientation.rot || orientation.flipH || orientation.flipV));
   const idProp = (info && info.idProp) || 'name';
   const names = fc.features.map((f) => displayName(f, idProp) || '(unnamed)');
@@ -1062,23 +1066,25 @@ export default function Sidebar({
           <>
             <div className="hint dim">Write the coordinates…</div>
             <div className="row">
+              <button className={`btn sm${exportFrame === 'original' ? ' on' : ''}`}
+                disabled={busy} title="rotate and flip every edit back to the as-imaged frame -- the default, and what downstream work needs"
+                onClick={() => setExportFrame('original')}>
+                As imaged (0°)
+              </button>
               <button className={`btn sm${exportFrame === 'displayed' ? ' on' : ''}`}
                 disabled={busy} title="the rotated / flipped coordinates you have been editing"
                 onClick={() => setExportFrame('displayed')}>
                 As you see it ({orientation.rot}°{orientation.flipH ? ' ⇄' : ''}{orientation.flipV ? ' ⇅' : ''})
               </button>
-              <button className={`btn sm${exportFrame === 'original' ? ' on' : ''}`}
-                disabled={busy} title="rotate and flip every edit back to the as-imaged frame"
-                onClick={() => setExportFrame('original')}>
-                As imaged (0°)
-              </button>
             </div>
             <div className="hint dim">
               {exportFrame === 'original'
                 ? 'Your edits are rotated and flipped back, so the file lines up with the'
-                  + ' original image. The file is written without an orientation marker.'
-                : 'Written exactly as displayed, marked with the orientation so it can be'
-                  + ' turned back later.'}
+                  + ' original image and with the cells these polygons get mapped onto.'
+                  + ' Written without an orientation marker.'
+                : 'Written exactly as displayed, marked with the orientation. These line up'
+                  + ' ONLY for someone who rotates the same way before loading them —'
+                  + ' otherwise pick As imaged.'}
               {' '}The filename says which.
             </div>
           </>
