@@ -435,12 +435,32 @@ export default function Sidebar({
             </div>
             <div className="row">
               {picks.length > 0 && <button className="btn sm" onClick={onClearBorder}>{borderShared ? 'Done / pick again' : 'Clear'}</button>}
-              {picks.length >= 2 && !borderShared && (
-                <button className="btn sm primary" onClick={onShareBorders} disabled={busy}>
-                  Share borders ({picks.length})
-                </button>
-              )}
             </div>
+            {picks.length >= 2 && !borderShared && (
+              <div className="prop">
+                <div className="pts-head">Share borders — where should the seam go?</div>
+                <div className="row">
+                  <button className="btn sm primary" disabled={busy}
+                    title="split the gap (or the overlap) down the middle, as it always did"
+                    onClick={() => onShareBorders(null)}>
+                    Middle
+                  </button>
+                  {picks.map((nm) => (
+                    <button key={`snap-${nm}`} className="btn sm" disabled={busy}
+                      title={`put the border on ${nm}'s edge: ${nm} is left exactly as `
+                        + `it is and the other${picks.length > 2 ? 's are' : ' is'} brought up to it`}
+                      onClick={() => onShareBorders(nm)}>
+                      Snap to {nm}
+                    </button>
+                  ))}
+                </div>
+                <div className="hint dim">
+                  Middle moves both outlines to meet halfway. Snapping leaves the
+                  region you pick exactly as it is and brings the other onto its
+                  edge — for when one of the two outlines is the one you trust.
+                </div>
+              </div>
+            )}
             {picks.length >= 2 && !borderShared && (
               <button className="btn sm" onClick={onMerge} disabled={busy}>
                 ⨝ Merge into one ({picks.length})

@@ -66,11 +66,13 @@ export async function sharedBorder(ds, regionA, regionB, fc, { bridge = false, t
 
 // Make a set of regions tile cleanly (fill small gaps, remove small overlaps,
 // give every pair one shared border). Returns updated FC + shared borders.
-export async function partitionRegions(ds, regions, fc, tol = 40) {
+// `snapTo` names the region whose edge the new border should land on, leaving
+// that region untouched. Null splits the contested ground down the middle.
+export async function partitionRegions(ds, regions, fc, tol = 40, snapTo = null) {
   const r = await fetch(`${API}/datasets/${ds}/regions/partition`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ regions, fc, tol }),
+    body: JSON.stringify({ regions, fc, tol, snapTo }),
   });
   if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
   return r.json(); // { type, features, borders }

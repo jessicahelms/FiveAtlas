@@ -1524,6 +1524,14 @@ async def regions_partition(ds_id: str, request: Request):
         raise HTTPException(400, "need 'regions': at least two region names")
     fc = body.get("fc") or geo.load_regions(ds_id)[0]
     tol = float(body.get("tol", 40.0))
+    # Where the seam goes: None splits the contested ground down the middle, a
+    # name puts it on that region's own edge and leaves that region untouched.
+    snap_to = (body or {}).get("snapTo")
+    if snap_to is not None:
+        snap_to = str(snap_to)
+        if snap_to not in [str(n) for n in names]:
+            raise HTTPException(
+                400, f"snapTo must be one of the picked regions, not {snap_to!r}")
     # A nested PAIR gets the nested meaning of "share borders": the hairline
     # band between the inner's edge and the container's outline joins the
     # inner, so they genuinely share the outline along their neighbouring
@@ -1551,14 +1559,18 @@ async def regions_partition(ds_id: str, request: Request):
     if contained:
         raise HTTPException(422, topology.containment_message(contained))
     try:
-        res = topology.partition_regions(fc["features"], d["id_prop"], names, tol=tol)
+        res = topology.partition_regions(fc["features"], d["id_prop"], names,
+                                         tol=tol, snap_to=snap_to)
     except ValueError as e:
         raise HTTPException(422, str(e))
     except Exception as e:
         raise HTTPException(500, f"partition failed: {e}")
+    detail = (" + ".join(str(n) for n in names)
+              + (f" (seam on {snap_to}'s edge)" if snap_to
+                 else " (seam down the middle)"))
     return {**provenance.stamped(res["features"], fc, "share-borders",
-                                 " + ".join(str(n) for n in names), names),
-            "borders": res["borders"]}
+                                 detail, names),
+            "borders": res["borders"], "snappedTo": snap_to}
 
 
 @app.post("/api/datasets/{ds_id}/regions/resample")

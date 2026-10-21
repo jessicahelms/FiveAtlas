@@ -1342,11 +1342,19 @@ def _guard_duplicate_names(features, id_prop, names, what):
         )
 
 
-def partition_regions(features, id_prop, names, tol=40.0, precision=1.0, simplify=None):
+def partition_regions(features, id_prop, names, tol=40.0, precision=1.0,
+                      simplify=None, snap_to=None):
     """Make the named regions tile cleanly: fill small gaps between them, remove
     small overlaps, and give every pair a single shared border. Each point of the
     shared territory goes to its NEAREST region, so borders land on the midline of
     whatever gap/overlap existed.
+
+    `snap_to` puts the seam on ONE region's own edge instead of down the middle:
+    that region comes back exactly as it went in, and the rest of the territory
+    goes to the others, which makes their new boundary along the join its
+    boundary. It is for when one of the two outlines is the one you trust -- the
+    midline moves both. With more than two picks the others still split what is
+    left between them by midline.
 
     tol bridges gaps up to ~2*tol; regions farther apart than that stay separate.
     Only the named regions change. A name carried by several features is ONE
@@ -1358,12 +1366,24 @@ def partition_regions(features, id_prop, names, tol=40.0, precision=1.0, simplif
     if len(sel) < 2:
         raise ValueError("pick at least two regions to share borders")
 
-    geoms = {}
+    geoms, raw_bodies = {}, {}
     for n in sel:
         # Shave import/boolean hairlines before they can become Voronoi
         # generators. This targets the long skinny spikes that show up as stray
         # edit lines after "Share borders".
-        geoms[n] = _clean_for_partition(_body(features, idx[n]), tol)
+        raw_bodies[n] = _body(features, idx[n])
+        geoms[n] = _clean_for_partition(raw_bodies[n], tol)
+    # ...except the region a seam is snapped to, which has to come back exactly
+    # as it arrived. Cleaning moved the real CP by 0.13%, which is not "left
+    # alone". Its RAW outline is what the others are fitted to as well, so the
+    # shared edge still coincides exactly.
+    snap_keep = str(snap_to) if (snap_to is not None and str(snap_to) in geoms) else None
+    if snap_keep is not None:
+        kept_raw = raw_bodies[snap_keep]
+        if not kept_raw.is_empty and not kept_raw.is_valid:
+            kept_raw = kept_raw.buffer(0)
+        if not kept_raw.is_empty:
+            geoms[snap_keep] = kept_raw
 
     # Territory to tile: morphological close bridges gaps <= ~2*tol and swallows
     # small overlaps, without expanding the outer boundary.
@@ -1411,10 +1431,52 @@ def partition_regions(features, id_prop, names, tol=40.0, precision=1.0, simplif
     # regions still get enough samples to tile precisely (no slivers of overlap).
     min_perim = min((g.length for g in geoms.values() if not g.is_empty), default=tol)
     spacing = max(min(tol, min_perim / 24.0), 4.0)
-    claimed = _nearest_partition(T, geoms, spacing)
+    if snap_keep is not None:
+        keep = snap_keep
+        rest = {n: g for n, g in geoms.items() if n != keep}
+        # Everything in the territory that is not the kept region. Its edge along
+        # the join is therefore exactly the kept region's edge -- and an overlap
+        # that used to be shared goes back to the kept region whole.
+        avail = _safe_difference(T, geoms[keep])
+        if avail.is_empty:
+            raise ValueError(f"snapping to {keep} leaves the other region(s) "
+                             f"nothing -- {keep} already covers them")
+        if len(rest) == 1:
+            claimed = {keep: geoms[keep], next(iter(rest)): avail}
+        else:
+            # Stretch by stretch. The territory beside a kept region comes apart
+            # into separate pieces, and Voronoi-ing the lot of them together is
+            # both unnecessary and lossy: a piece touching exactly one of the
+            # others is that one's, whole. Only a piece between two of them needs
+            # a midline, and only between those two.
+            parts = {n: [] for n in rest}
+            for piece in _polys(avail):
+                collar = piece.buffer(max(float(tol) * 0.5, 2.0))
+                near = {n: g for n, g in rest.items() if g.intersects(collar)}
+                if len(near) == 1:
+                    parts[next(iter(near))].append(piece)
+                elif not near:
+                    # reachable from none of them: nearest one takes it rather
+                    # than it being left as a gap
+                    parts[min(rest, key=lambda k: rest[k].distance(piece))].append(piece)
+                else:
+                    for n, got in _nearest_partition(piece, near, spacing).items():
+                        got = _safe_intersection(got, piece)
+                        if not got.is_empty:
+                            parts[n].append(got)
+            claimed = {keep: geoms[keep]}
+            for n, got in parts.items():
+                claimed[n] = unary_union(got).buffer(0) if got else Polygon()
+    else:
+        claimed = _nearest_partition(T, geoms, spacing)
 
     newg = {}
     for n in sel:
+        if n == snap_keep:
+            # handed straight back: no clip, no hole-filling, nothing. That is
+            # what snapping the seam to this region means.
+            newg[n] = claimed[n]
+            continue
         # keep the change local: a region only grows/shrinks by ~tol from its outline
         g = claimed[n].intersection(geoms[n].buffer(tol, join_style=2)).buffer(0)
         if not protected.is_empty:
@@ -1466,11 +1528,26 @@ def partition_regions(features, id_prop, names, tol=40.0, precision=1.0, simplif
             # Partition against each region's LOCAL outline: same midline answer as
             # the full geometry, without re-sampling megapixel boundaries each round.
             win = orphan.buffer(max(float(tol) * 2.0, 25.0))
-            local = {}
-            for n in sel:
-                gl = _safe_intersection(newg[n], win)
-                if not gl.is_empty:
-                    local[n] = gl
+
+            def _near_regions(skip=None):
+                out = {}
+                for n in sel:
+                    if skip is not None and n == skip:
+                        continue
+                    gl = _safe_intersection(newg[n], win)
+                    if not gl.is_empty:
+                        out[n] = gl
+                return out
+
+            # A snapped region has to come back exactly as it went in, so it sits
+            # this round out and the others take the leftovers. A leftover none of
+            # THEM is near is simply left: handing it to the snapped region moves
+            # the one outline that has to stay put (~2,000 px and 18 vertices on
+            # the real TH), and handing it to the nearest other region drops a
+            # DETACHED 1,900 px shard on a region it has nothing to do with --
+            # both were tried. It was a gap before this ran, and it stays one;
+            # the seam, which is what was asked for, is exact either way.
+            local = _near_regions(skip=snap_keep)
             if not local:
                 return
             if len(local) == 1:
@@ -1503,7 +1580,10 @@ def partition_regions(features, id_prop, names, tol=40.0, precision=1.0, simplif
     if not protected.is_empty or not _pre_holes.is_empty:
         keep_out = unary_union([g for g in (protected, _pre_holes) if not g.is_empty]).buffer(0)
     thin = max(tol * 0.5, 3.0) if simplify is None else float(simplify)
-    if thin > 0:
+    # Not when a seam is snapped. There is no dense midline to thin -- the seam is
+    # the kept region's own outline, and the other's new edge is a copy of it --
+    # and thinning the network would move the one outline that has to stay put.
+    if thin > 0 and snap_keep is None:
         newg = _simplify_shared(newg, thin, precision, keep_out=keep_out)
         _close_voids(1, holes_only=True)   # the thinned network can strand a sliver
 
@@ -1528,6 +1608,17 @@ def partition_regions(features, id_prop, names, tol=40.0, precision=1.0, simplif
             except Exception:
                 ov = Polygon()
             if ov.is_empty or ov.area <= 0:
+                continue
+            if snap_keep in (sel[i], sel[j]):
+                # Which region cedes is otherwise just which was clicked first.
+                # A snapped region cedes nothing and changes nothing, so the
+                # other one gives the overlap up however they were ordered.
+                other = sel[j] if snap_keep == sel[i] else sel[i]
+                trimmed = _safe_difference(newg[other], newg[snap_keep])
+                if not trimmed.is_empty:
+                    newg[other] = trimmed
+                    if other == sel[i]:
+                        a = newg[other]
                 continue
             if ov.area > 0.05 * min(a.area, b.area):
                 # Not an artifact. Give each side the part of the contested ground

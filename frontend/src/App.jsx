@@ -1387,20 +1387,28 @@ export default function App() {
     }
   }, [propEdit, propRadius, applyMoveBorder, currentBorderArcCoords, replaceVisibleBorderArc, stableBorderArcCoords, borderSegmentIndex]);
 
-  const doShareBorders = useCallback(async () => {
+  const doShareBorders = useCallback(async (snapTo = null) => {
     if (borderPicks.length < 2) return;
+    // Guard against this being wired straight to an onClick, where the argument
+    // would be the event rather than a region name.
+    const snap = (typeof snapTo === 'string' && borderPicks.includes(snapTo))
+      ? snapTo : null;
     setBusy(true); setError(null);
     try {
-      const res = await api.partitionRegions(dsId, borderPicks, fc, snapTol);
+      const res = await api.partitionRegions(dsId, borderPicks, fc, snapTol, snap);
       let newFc = asFc(res, fc);
 
       // Sharing leaves a Voronoi-dense, unevenly spaced border, so even it out
       // straight away rather than making the user reach for the slider. The
       // slider is still there to go coarser or finer afterwards.
       // (Not for a nested pair: their shared stretch lies ON the container's
-      // outline, and resampling it would move the outline itself.)
+      // outline, and resampling it would move the outline itself. Not after a
+      // SNAP either, for exactly the same reason: the seam is the snapped
+      // region's own edge, there is no dense midline to even out, and
+      // re-pointing it would move the one outline the snap promised to leave
+      // alone.)
       let repointed = null;
-      if (!res.nested) {
+      if (!res.nested && !snap) {
         try {
           const rs = await api.resampleRegions(dsId, borderPicks, newFc, resampleTol);
           if (rs && rs.features && rs.handles) {
