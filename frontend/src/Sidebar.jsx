@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { Fragment, useState } from 'react';
 import { parseName, nextNumber, formatName } from './damage';
 import { displayVersion } from './version';
 
@@ -64,6 +64,21 @@ export default function Sidebar({
   // on the whole body — so the list has to say which rows belong together instead
   // of showing two identical entries that behave as one.
   const partCount = names.reduce((m, nm) => ({ ...m, [nm]: (m[nm] || 0) + 1 }), {});
+  // Which file each region was loaded from, when several were picked together.
+  // A heading goes in wherever the file CHANGES, rather than gathering the rows
+  // by file: this order is the draw order, so re-sorting it would misreport
+  // what covers what. With one file (the usual case) nothing is shown at all.
+  const srcOf = fc.features.map((f) => ((f.properties || {})._srcFile) || null);
+  const showSources = new Set(srcOf.filter(Boolean)).size > 1;
+  // A name in two of those files is still ONE region -- every edit acts on all
+  // its parts -- so the row says so instead of letting the headings imply a
+  // separation that is not there.
+  const srcsByName = {};
+  names.forEach((nm, i) => {
+    if (!srcOf[i]) return;
+    if (!srcsByName[nm]) srcsByName[nm] = new Set();
+    srcsByName[nm].add(srcOf[i]);
+  });
   const picks = borderPicks || [];
   const pickTag = (i) => (i === 0 ? 'A' : i === 1 ? 'B' : String(i + 1));
 
@@ -247,9 +262,13 @@ export default function Sidebar({
               off.has(nm) ? 'off' : '',
               pi === 0 ? 'pickA' : pi === 1 ? 'pickB' : pi > 1 ? 'pickX' : '',
             ].filter(Boolean).join(' ');
+            const head = showSources && srcOf[i] !== (i ? srcOf[i - 1] : undefined)
+              ? (srcOf[i] || 'added here') : null;
+            const fileCount = (srcsByName[nm] || { size: 1 }).size;
             return (
+              <Fragment key={i}>
+              {head && <li className="srchead">{head}</li>}
               <li
-                key={i}
                 className={cls}
                 onMouseDown={(e) => { if (e.shiftKey) e.preventDefault(); }}
                 onClick={(e) => onSelectName(nm,
@@ -259,13 +278,20 @@ export default function Sidebar({
                   e.preventDefault();
                   onRegionMenu({ index: i, name: nm, x: e.clientX, y: e.clientY });
                 }}
-                title={parts > 1
-                  ? `one region in ${parts} parts — edits act on all of them; right-click to rename or delete`
-                  : 'right-click to rename or delete'}
+                title={fileCount > 1
+                  ? `this name is in ${fileCount} of the files you loaded, which makes it ONE `
+                    + `region in ${parts} parts — an edit acts on all of them. Rename one `
+                    + `(right-click) to work on them separately.`
+                  : parts > 1
+                    ? `one region in ${parts} parts — edits act on all of them; right-click to rename or delete`
+                    : 'right-click to rename or delete'}
               >
                 <span>
                   {nm}
                   {parts > 1 ? <span className="dim"> · part {part}/{parts}</span> : null}
+                  {fileCount > 1
+                    ? <span className="dim"> · in {fileCount} files, one region</span>
+                    : null}
                   {damageOf(nm) ? <span className="dim"> · {labelOf[damageOf(nm)]}</span> : null}
                 </span>
                 <span className="rowend">
@@ -308,6 +334,7 @@ export default function Sidebar({
                   >{off.has(nm) ? '◍' : '◉'}</button>
                 </span>
               </li>
+              </Fragment>
             );
           })}
         </ul>

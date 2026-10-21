@@ -1862,10 +1862,14 @@ async def regions_load_multi(ds_id: str, request: Request):
     res = topology.concat_region_files(groups, d["id_prop"])
     out = {"type": "FeatureCollection", "features": res["features"]}
     detail = " + ".join(names)
-    if res["renames"]:
-        detail += (f" ({len(res['renames'])} renamed so no name is used twice: "
-                   + ", ".join(f"{a} -> {b}" for a, b in res["renames"][:6])
-                   + ("…" if len(res["renames"]) > 6 else "") + ")")
+    if res["shared"]:
+        # Said out loud because it cannot be fixed by listing them apart: one
+        # name over two files is one multi-part region, and an edit acts on all
+        # of it.
+        detail += (f" ({len(res['shared'])} name(s) in more than one file, so "
+                   "each is ONE region in several parts: "
+                   + ", ".join(res["shared"][:6])
+                   + ("…" if len(res["shared"]) > 6 else "") + ")")
     provenance.stamp(out, "load-regions", detail)
     geo.save_edited(ds_id, out)
     return JSONResponse(out)
@@ -2236,6 +2240,11 @@ async def regions_export(ds_id: str, request: Request):
     # files with the same name -- the second would land as "(1)" and there would be
     # nothing to say which was which.
     tag = _frame_tag(frame, o)
+
+    # FiveAtlas's own per-feature bookkeeping (which file a region was loaded
+    # from) never leaves the app.
+    fc = geo.strip_internal_props(fc)
+    feats = fc["features"]
 
     if mode == "separate":
         buf = io.BytesIO()

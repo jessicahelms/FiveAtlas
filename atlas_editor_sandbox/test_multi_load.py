@@ -1,21 +1,39 @@
-"""Several region files picked together keep their regions SEPARATE.
+"""Region files picked together are tagged with the file they came from, so the
+sidebar can list them under a heading each instead of running them together.
 
-/regions/load-multi used to concatenate the files' features, and two regions
-carrying one name are ONE region in this app -- every edit acts on all of its
-parts. So ticking merged.regions AND merged.regions_edited, which hold the same
-23 names, gave 23 two-part regions instead of 46 separate ones: they listed as
-pairs and every edit hit both files' copies at once.
+Names are left exactly as the files have them. The tag is FiveAtlas's own
+bookkeeping, so it must never reach a file the app hands out -- that is checked
+here too, because a `_srcFile` turning up in an exported GeoJSON would be in
+somebody's data for good.
 
-Offline: concat_region_files is pure, so none of this needs a server.
+One thing a heading cannot separate, and the last section pins it rather than
+pretending otherwise: a name used by two of the files is still ONE region here,
+because every edit acts on all the parts of a name. `shared` reports those so
+the UI can say so.
+
+Offline: concat_region_files and strip_internal_props are both pure.
 """
 import os
 import sys
+import tempfile
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "backend"))
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(HERE, "..", "backend"))
 
-from shapely.geometry import box, mapping   # noqa: E402
+# config fixes WORKDIR the moment it loads and geo pulls it in, so this has to be
+# set BEFORE the first backend import or the real working folder is the one used.
+_SCRATCH = tempfile.mkdtemp(prefix="multiload_")
+os.environ["ATLAS_WORKDIR"] = _SCRATCH
 
-import topology as T                        # noqa: E402
+import config                                   # noqa: E402
+
+if str(config.WORKDIR) != _SCRATCH:
+    raise SystemExit(f"refusing to run: WORKDIR is {config.WORKDIR}, not the scratch dir")
+
+import geo                                      # noqa: E402
+import topology as T                            # noqa: E402
+
+from shapely.geometry import box, mapping       # noqa: E402
 
 fails = []
 
@@ -36,85 +54,84 @@ def names_of(res):
     return [f["properties"]["name"] for f in res["features"]]
 
 
-# two takes on the same section, the way the checklist offers them
+def srcs_of(res):
+    return [(f["properties"] or {}).get("_srcFile") for f in res["features"]]
+
+
 FILE_A = [feat("ISO", box(0, 0, 100, 100)), feat("TH", box(100, 0, 200, 100))]
 FILE_B = [feat("ISO", box(0, 0, 100, 100)), feat("TH", box(100, 0, 200, 100))]
+FILE_C = [feat("CP", box(0, 200, 50, 250))]        # a name neither other file has
 
-print("\none file alone is untouched")
+print("\none file")
 res = T.concat_region_files([("merged.regions", FILE_A)], "name")
-check("every name is kept as it was", names_of(res) == ["ISO", "TH"], str(names_of(res)))
-check("nothing is reported as renamed", res["renames"] == [])
+check("names are untouched", names_of(res) == ["ISO", "TH"], str(names_of(res)))
+check("each feature says which file it came from",
+      srcs_of(res) == ["merged.regions"] * 2, str(srcs_of(res)))
+check("the file is listed once", res["sources"] == ["merged.regions"], str(res["sources"]))
+check("no name is shared", res["shared"] == [])
+
+print("\ntwo files whose regions do not overlap by name")
+res = T.concat_region_files([("a", FILE_A), ("c", FILE_C)], "name")
+check("nothing is renamed", names_of(res) == ["ISO", "TH", "CP"], str(names_of(res)))
+check("the tags separate them", srcs_of(res) == ["a", "a", "c"], str(srcs_of(res)))
+check("still no name is shared", res["shared"] == [], str(res["shared"]))
 
 print("\ntwo files that share every name")
 res = T.concat_region_files([("merged.regions", FILE_A),
                              ("merged.regions_edited", FILE_B)], "name")
-got = names_of(res)
-check("all four regions are there", len(got) == 4, str(got))
-check("every name is now distinct", len(set(got)) == 4, str(got))
-check("the FIRST file keeps its names untouched", got[:2] == ["ISO", "TH"], str(got[:2]))
-check("the second says which file it came from",
-      got[2:] == ["ISO (merged.regions_edited)", "TH (merged.regions_edited)"],
-      str(got[2:]))
-check("the renames are reported", len(res["renames"]) == 2, str(res["renames"]))
+check("names are left exactly as the files have them",
+      names_of(res) == ["ISO", "TH", "ISO", "TH"], str(names_of(res)))
+check("the tags are what tells them apart",
+      srcs_of(res) == ["merged.regions", "merged.regions",
+                       "merged.regions_edited", "merged.regions_edited"],
+      str(srcs_of(res)))
+check("both files are listed, in the order picked",
+      res["sources"] == ["merged.regions", "merged.regions_edited"], str(res["sources"]))
+check("the shared names are reported", res["shared"] == ["ISO", "TH"], str(res["shared"]))
 
-print("\n...so nothing is a multi-part region by accident")
-# This is the behaviour that was actually wrong: one name over two features is
-# one body, and every operation acts on the whole of it.
-parts = {}
-for n in got:
-    parts[n] = parts.get(n, 0) + 1
-check("no name is carried by two features", max(parts.values()) == 1, str(parts))
+print("\nfeature ORDER is preserved, because it is the draw order")
+res = T.concat_region_files([("a", FILE_A), ("c", FILE_C), ("b", FILE_B)], "name")
+check("the files stay in the order they were picked",
+      srcs_of(res) == ["a", "a", "c", "b", "b"], str(srcs_of(res)))
+
+print("\nwhat a heading cannot fix, and does not pretend to")
+# Pinned deliberately: a name over two features is ONE body here, so an edit to
+# ISO reaches both files' copies. The row in the sidebar says so.
+res = T.concat_region_files([("a", FILE_A), ("b", FILE_B)], "name")
 idx = T._index_all(res["features"], "name")
-check("...and the topology index agrees",
-      all(len(v) == 1 for v in idx.values()), str({k: len(v) for k, v in idx.items()}))
-body = T._body(res["features"], idx["ISO"])
-check("editing ISO reaches one 100x100 region, not both files' copies",
-      abs(body.area - 100 * 100) < 1e-6, f"{body.area:.1f}")
+check("a shared name is still one region in two parts",
+      len(idx["ISO"]) == 2, str({k: len(v) for k, v in idx.items()}))
+check("...and that is exactly what `shared` warned about",
+      set(res["shared"]) == {nm for nm, ks in idx.items() if len(ks) > 1},
+      str(res["shared"]))
 
-print("\ndamage keeps its numbering convention instead")
-# A damage shape is `<designation>.<n>`, so a collision takes the next free
-# number rather than gaining a filename.
-A = [feat("separation.1", box(0, 0, 10, 10))]
-B = [feat("separation.1", box(50, 50, 60, 60))]
-res = T.concat_region_files([("one", A), ("two", B)], "name")
-got = names_of(res)
-check("the second separation is renumbered, not suffixed",
-      got == ["separation.1", "separation.2"], str(got))
+print("\nthe caller's features are not mutated")
+mine = [feat("ISO", box(0, 0, 10, 10))]
+T.concat_region_files([("a", mine)], "name")
+check("no tag is left on the input", "_srcFile" not in mine[0]["properties"],
+      str(mine[0]["properties"]))
 
-print("\nthree files, and a name that collides twice")
-C = [feat("ISO", box(0, 0, 1, 1))]
-res = T.concat_region_files([("a", [feat("ISO", box(0, 0, 1, 1))]),
-                            ("b", [feat("ISO", box(0, 0, 1, 1))]),
-                            ("c", C)], "name")
-got = names_of(res)
-check("each gets its own name", len(set(got)) == 3, str(got))
-check("named after the file each came from",
-      got == ["ISO", "ISO (b)", "ISO (c)"], str(got))
+print("\nand the tag never reaches a file the app hands out")
+res = T.concat_region_files([("a", FILE_A), ("b", FILE_B)], "name")
+fc = {"type": "FeatureCollection", "features": res["features"],
+      "_orientation": {"rot": 90, "flipH": False, "flipV": False}}
+clean = geo.strip_internal_props(fc)
+check("_srcFile is gone from every feature",
+      all("_srcFile" not in (f["properties"] or {}) for f in clean["features"]),
+      str([list((f["properties"] or {}).keys()) for f in clean["features"][:1]]))
+check("the names are still there", names_of(clean) == ["ISO", "TH", "ISO", "TH"],
+      str(names_of(clean)))
+check("collection-level members are kept",
+      clean["_orientation"]["rot"] == 90 and clean["type"] == "FeatureCollection")
+check("the collection it was given is untouched",
+      all("_srcFile" in (f["properties"] or {}) for f in fc["features"]))
 
-# ...and two files with the SAME stem cannot collide either
-res = T.concat_region_files([("a", [feat("ISO", box(0, 0, 1, 1))]),
-                            ("dup", [feat("ISO", box(0, 0, 1, 1))]),
-                            ("dup", [feat("ISO", box(0, 0, 1, 1))])], "name")
-got = names_of(res)
-check("two files with one stem still end up distinct", len(set(got)) == 3, str(got))
-
-print("\nthe other properties survive the rename")
-A = [feat("ISO", box(0, 0, 10, 10), classification={"name": "ISO", "colorRGB": -16711936})]
-B = [feat("ISO", box(0, 0, 10, 10), classification={"name": "ISO", "colorRGB": -65536})]
-res = T.concat_region_files([("a", A), ("b", B)], "name")
-second = res["features"][1]["properties"]
-check("the colour is kept", second["classification"]["colorRGB"] == -65536,
-      str(second["classification"]))
-check("...and classification.name is renamed with it, so the two agree",
-      second["classification"]["name"] == second["name"] == "ISO (b)",
-      str(second["classification"]["name"]))
-
-print("\nthe inputs are not mutated")
-orig = [feat("ISO", box(0, 0, 10, 10))]
-before = orig[0]["properties"]["name"]
-T.concat_region_files([("a", [feat("X", box(0, 0, 1, 1))]), ("b", orig)], "name")
-check("the caller's features are left alone",
-      orig[0]["properties"]["name"] == before, orig[0]["properties"]["name"])
+# a file that never had the tag must come through byte-identical
+plain = {"type": "FeatureCollection",
+         "features": [feat("ISO", box(0, 0, 10, 10),
+                           classification={"name": "ISO", "colorRGB": -65536})]}
+out = geo.strip_internal_props(plain)
+check("an untagged collection is unchanged", out == plain, str(out))
 
 print("\n" + (f"{len(fails)} FAILED: " + "; ".join(fails) if fails else "all checks passed"))
 sys.exit(1 if fails else 0)

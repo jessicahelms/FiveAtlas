@@ -114,11 +114,36 @@ def clear_save_target(ds_id: str) -> dict:
     return rec
 
 
+#: per-feature keys FiveAtlas keeps for itself and never writes to a user file
+INTERNAL_FEATURE_PROPS = ("_srcFile",)
+
+
+def strip_internal_props(fc: dict) -> dict:
+    """A copy with FiveAtlas's own per-feature bookkeeping taken out.
+
+    `_srcFile` records which region file a feature came from, so the sidebar can
+    list several files' regions under a heading each instead of running them
+    together. It belongs to the editing session, not to anybody's data, so every
+    file this app hands out goes through here first: both Save paths (below) and
+    the export route. The working copy keeps it, which is how the grouping
+    survives reopening the dataset.
+    """
+    feats = []
+    for f in (fc.get("features") or []):
+        props = f.get("properties")
+        if isinstance(props, dict) and any(k in props for k in INTERNAL_FEATURE_PROPS):
+            f = {**f, "properties": {k: v for k, v in props.items()
+                                     if k not in INTERNAL_FEATURE_PROPS}}
+        feats.append(f)
+    return {**fc, "features": feats}
+
+
 def write_geojson_atomic(path, fc: dict) -> None:
     """Write via a temp file and a rename, so a network drive dropping out mid-
     write leaves the previous file intact rather than a half-written one. The
     temp name does not end in .geojson, so a scan never mistakes it for regions.
     """
+    fc = strip_internal_props(fc)
     p = Path(path)
     tmp = p.with_name(p.name + ".fiveatlas-tmp")
     with open(tmp, "w", encoding="utf-8") as f:
