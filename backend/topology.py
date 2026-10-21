@@ -1597,6 +1597,19 @@ def partition_regions(features, id_prop, names, tol=40.0, precision=1.0,
     T = U.buffer(tol, join_style=2).buffer(-tol, join_style=2).buffer(0)
     if T.is_empty:
         T = U
+    # Ground belonging to regions that are NOT being shared, so the bridged fill
+    # cannot eat a third region.
+    #
+    # Except a region that BLANKETS the pair's territory. `hemi` is the
+    # whole-hemisphere outline and wraps every other region in these files, so it
+    # covers every gap between every pair. Defending it meant no gap could ever be
+    # filled: the ground stayed unclaimed and showed as a black wedge between the
+    # two regions, and raising the snap reach bridged MORE of hemi's ground and
+    # made the wedge bigger. On the real TH + HPF that is 9,347 px at the default
+    # reach, 80% of it inside hemi, growing to 122,715 px at reach 300. A
+    # container is not a neighbour with ground to defend here -- the same rule
+    # clean_lines applies with its `blanket` set.
+    blanket_at = 0.98 * T.area if T.area > 0 else 0.0
     other_geoms = []
     for f in features:
         nm = (f.get("properties") or {}).get(id_prop)
@@ -1606,8 +1619,11 @@ def partition_regions(features, id_prop, names, tol=40.0, precision=1.0,
             g = shape(f["geometry"])
             if not g.is_valid:
                 g = g.buffer(0)
-            if not g.is_empty:
-                other_geoms.append(g)
+            if g.is_empty:
+                continue
+            if blanket_at > 0 and _safe_intersection(g, T).area >= blanket_at:
+                continue                       # wraps the pair: nothing to defend
+            other_geoms.append(g)
         except Exception:
             pass
     other_union = unary_union(other_geoms).buffer(0) if other_geoms else Polygon()
