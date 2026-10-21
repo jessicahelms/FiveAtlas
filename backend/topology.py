@@ -1068,12 +1068,218 @@ def _generator_inset(g, inset):
     return g
 
 
+def _exclusive_bodies(geoms_by_name):
+    """Each region's own ground, with anything another region also covers taken
+    out -- so a starting point is never ambiguous. Returns (exclusive, shared)."""
+    names = list(geoms_by_name)
+    exclusive, shared = {}, []
+    for n in names:
+        others = [geoms_by_name[m] for m in names if m != n]
+        g = geoms_by_name[n]
+        if not others:
+            exclusive[n] = g
+            continue
+        u = unary_union(others).buffer(0)
+        exclusive[n] = _safe_difference(g, u)
+        shared.append(_safe_intersection(g, u))
+    sh = unary_union([s for s in shared if not s.is_empty]).buffer(0) if shared else Polygon()
+    return exclusive, sh
+
+
+def _split_tie(piece, bodies, lo, hi, rounds=3):
+    """Where two regions reach the same ground in one step, find where they
+    really meet by bisecting the band rather than giving it to one of them.
+
+    `bodies` is {name: geometry} for exactly the regions that reached it, and
+    the answer is accurate to (hi - lo) / 2**rounds.
+    """
+    names = list(bodies)
+    if len(names) != 2 or piece.is_empty:
+        return None
+    a, b = names
+    for _ in range(max(1, rounds)):
+        mid = (lo + hi) / 2.0
+        try:
+            got_a = _safe_intersection(piece, bodies[a].buffer(mid))
+            got_b = _safe_intersection(piece, bodies[b].buffer(mid))
+        except Exception:
+            return None
+        both = _safe_intersection(got_a, got_b)
+        # Look for the SMALLEST reach at which they meet -- that is where the
+        # line between them runs. Both having arrived already means the answer is
+        # nearer in, not further out.
+        if both.is_empty:
+            lo = mid
+        else:
+            hi = mid
+    try:
+        ga = _safe_intersection(piece, bodies[a].buffer((lo + hi) / 2.0))
+        out_a = _safe_difference(ga, bodies[b].buffer((lo + hi) / 2.0))
+        out_b = _safe_difference(piece, out_a)
+        rest = _safe_difference(_safe_difference(piece, out_a), out_b)
+    except Exception:
+        return None
+    if not rest.is_empty and rest.area > 0:
+        out_b = _safe_difference(piece, out_a)
+    return {a: out_a, b: out_b}
+
+
+def _grown_partition(area, geoms_by_name, spacing):
+    """Split `area` by nearest region, built so it CANNOT overlap or leak.
+
+    Every region claims the ground it already covers, then they grow outwards in
+    steps; each piece a region takes is cut out of what remains. Disjointness and
+    full coverage are therefore properties of the construction, not of whatever
+    an overlay routine happened to return. Ground two regions reach in the same
+    step is bisected to find the line between them; anything still unclaimed at
+    the end goes to the nearest region, so nothing is ever left behind.
+    """
+    names = list(geoms_by_name)
+    out = {n: [] for n in names}
+    if area.is_empty:
+        return {n: Polygon() for n in names}
+
+    exclusive, _ = _exclusive_bodies(geoms_by_name)
+    rem = area if area.is_valid else area.buffer(0)
+
+    # 1. what each region already covers, uncontested
+    for n in names:
+        if rem.is_empty:
+            break
+        take = _safe_intersection(rem, exclusive[n])
+        if not take.is_empty and take.area > 0:
+            out[n].append(take)
+            rem = _safe_difference(rem, take)
+
+    # 2. grow into what is left. Only the parts of each region NEAR the leftover
+    #    matter, and they are far cheaper to buffer than whole outlines.
+    if not rem.is_empty and rem.area > 0:
+        x0, y0, x1, y1 = area.bounds
+        reach_max = max(x1 - x0, y1 - y0)
+        step = max(float(spacing) / 4.0, 0.5)
+        near = rem.buffer(reach_max * 0.5 + step)
+        local = {}
+        for n in names:
+            g = _safe_intersection(exclusive[n], near)
+            local[n] = g if not g.is_empty else exclusive[n]
+        d = step
+        guard = 0
+        while not rem.is_empty and rem.area > 0 and d <= reach_max and guard < 400:
+            guard += 1
+            got = {}
+            for n in names:
+                if local[n].is_empty:
+                    continue
+                try:
+                    g = _safe_intersection(local[n].buffer(d), rem)
+                except Exception:
+                    g = Polygon()
+                if not g.is_empty and g.area > 0:
+                    got[n] = g
+            if got:
+                taken = []
+                for n, g in got.items():
+                    others = [got[m] for m in got if m != n]
+                    solo = _safe_difference(g, unary_union(others).buffer(0)) \
+                        if others else g
+                    if not solo.is_empty and solo.area > 0:
+                        out[n].append(solo)
+                        taken.append(solo)
+                reached = unary_union(list(got.values())).buffer(0)
+                tie = _safe_difference(reached,
+                                       unary_union(taken).buffer(0)) if taken else reached
+                for piece in _polys(tie):
+                    if piece.area <= 0:
+                        continue
+                    here = {n: local[n] for n in got
+                            if not _safe_intersection(piece, got[n]).is_empty}
+                    split = _split_tie(piece, here, max(d - step, 0.0), d)
+                    if split:
+                        for n, part in split.items():
+                            if not part.is_empty and part.area > 0:
+                                out[n].append(part)
+                    else:
+                        rp = piece.representative_point()
+                        best = min(here or local,
+                                   key=lambda m: (local[m].distance(rp), m))
+                        out[best].append(piece)
+                rem = _safe_difference(rem, reached)
+            d += step
+
+        # 3. nothing is ever left behind
+        for piece in _polys(rem):
+            if piece.area <= 0:
+                continue
+            rp = piece.representative_point()
+            best = min(names, key=lambda m: (geoms_by_name[m].distance(rp), m))
+            out[best].append(piece)
+
+    res = {}
+    for n in names:
+        v = [p for p in out[n] if not p.is_empty]
+        if not v:
+            res[n] = Polygon()
+            continue
+        try:
+            res[n] = unary_union(v).buffer(0)
+        except Exception:
+            res[n] = unary_union([p.buffer(0) for p in v]).buffer(0)
+    return res
+
+
+def _partition_is_exact(area, claims, tol_area):
+    """Do these claims actually tile `area` -- disjoint, and covering it?"""
+    live = [g for g in claims.values() if not g.is_empty]
+    if not live:
+        return False
+    for i in range(len(live)):
+        for j in range(i + 1, len(live)):
+            try:
+                if live[i].intersects(live[j]) \
+                        and _safe_intersection(live[i], live[j]).area > tol_area:
+                    return False
+            except Exception:
+                return False                      # cannot even be compared
+    try:
+        covered = unary_union(live).buffer(0)
+        if _safe_difference(area, covered).area > tol_area:
+            return False
+        if _safe_difference(covered, area).area > tol_area:
+            return False
+    except Exception:
+        return False
+    return True
+
+
 def _nearest_partition(area, geoms_by_name, spacing):
-    """Split `area` among the named regions: every bit goes to its NEAREST region
-    (Voronoi of their densified boundaries). Returns {name: claimed Polygon}.
-    Hardened against GEOS overlay/precision failures on messy input."""
+    """Split `area` among the named regions: every bit goes to its NEAREST region.
+    Returns {name: claimed Polygon}, which ALWAYS tiles `area` -- disjoint, and
+    covering it.
+
+    The Voronoi of their densified boundaries is tried first and is usually both
+    right and quick. It is not trusted, though: on regularly-sampled outlines
+    GEOS hands back cells that are not a partition at all (measured on two boxes
+    with a 10 px gap: 48 cells for 48 sites, two of them containing 23 sites
+    each, pairs overlapping by up to 142,924 px, and "side location conflict"
+    when two are intersected). The claims then overlapped by 7,756 px of a
+    21,000 px territory, partition_regions settled that with the cede pass that
+    favours whichever region was listed first, and the seam ended up depending on
+    which region was clicked first -- with a void left over in 22 pairs out of 24.
+
+    So the result is CHECKED, and if it is not a tiling the growth method below
+    takes over, which cannot produce one that is not.
+    """
     if not area.is_valid:
         area = area.buffer(0)
+    _tol_area = max(area.area * 1e-6, 1e-6)
+    _voronoi = _voronoi_partition(area, geoms_by_name, spacing)
+    if _voronoi is not None and _partition_is_exact(area, _voronoi, _tol_area):
+        return _voronoi
+    return _grown_partition(area, geoms_by_name, spacing)
+
+
+def _voronoi_partition(area, geoms_by_name, spacing):
+    """The original Voronoi split, or None if it cannot be built at all."""
     # Sample each region's boundary INSET toward its interior. Where two regions
     # already touch, their raw boundary points coincide, which makes the Voronoi
     # degenerate (crashes / slivers). Insetting keeps every generator strictly
@@ -1100,7 +1306,7 @@ def _nearest_partition(area, geoms_by_name, spacing):
                 pts.append(Point(x, y))
                 labels.append(n)
     if len(pts) < 3:
-        return {n: Polygon() for n in geoms_by_name}
+        return None
     tree = STRtree(pts)
     try:
         vor = voronoi_diagram(MultiPoint(pts), envelope=area)
@@ -1108,7 +1314,7 @@ def _nearest_partition(area, geoms_by_name, spacing):
         try:                                   # nudge onto a fine grid and retry
             vor = voronoi_diagram(set_precision(MultiPoint(pts), 0.001), envelope=area)
         except Exception:
-            return {n: geoms_by_name[n] for n in geoms_by_name}   # give up: keep originals
+            return None                     # cannot build it: caller falls back
     claims = {n: [] for n in geoms_by_name}
     for cell in vor.geoms:
         c = None
@@ -1500,12 +1706,16 @@ def partition_regions(features, id_prop, names, tol=40.0, precision=1.0,
     _pre_holes = [h for n in sel for h in _holes(geoms[n])]
     _pre_holes = unary_union(_pre_holes) if _pre_holes else Polygon()
 
-    def _close_voids(rounds, holes_only=False):
+    def _close_voids(rounds, holes_only=False, skip=None):
         """Hand every leftover empty piece to its nearest region.
 
-        holes_only restricts it to ENCLOSED voids. Use that after simplification:
-        a thinned outline sits a hair inside T all the way round, and reclaiming
-        that ribbon would paste the dense pre-simplify edge straight back."""
+        holes_only restricts it to ENCLOSED voids. `skip` is ground to leave
+        unclaimed whatever happens -- after simplification that is the ribbon
+        along the territory's OUTER edge, because a thinned outline sits a hair
+        inside T all the way round and reclaiming that would paste the dense
+        pre-simplify edge straight back. An open void in the INTERIOR is a
+        different thing: it is a hole between two regions that are supposed to
+        tile, which is exactly what must not be left behind."""
         for _ in range(rounds):     # filling one void can expose another
             claimed_all = unary_union([g for g in newg.values() if not g.is_empty]).buffer(0)
             void = [] if holes_only else [
@@ -1521,6 +1731,8 @@ def partition_regions(features, id_prop, names, tol=40.0, precision=1.0,
                 orphan = _safe_difference(orphan, protected)
             if not _pre_holes.is_empty:
                 orphan = _safe_difference(orphan, _pre_holes)
+            if skip is not None and not skip.is_empty:
+                orphan = _safe_difference(orphan, skip)
             parts = [p for p in _polys(orphan) if p.area > 1.0]
             if not parts:
                 return
@@ -1588,7 +1800,17 @@ def partition_regions(features, id_prop, names, tol=40.0, precision=1.0,
     # and thinning the network would move the one outline that has to stay put.
     if thin > 0 and snap_keep is None:
         newg = _simplify_shared(newg, thin, precision, keep_out=keep_out)
-        _close_voids(1, holes_only=True)   # the thinned network can strand a sliver
+        # Thinning is what used to leave the black wedges: measured over 72
+        # configurations it opened an interior void in 10 of them, up to 607 px,
+        # while skipping it left 2 of 72 at 1.4 px. Douglas-Peucker moves a
+        # vertex by at most `thin`, so anything further than that from the
+        # territory's edge is a genuine hole between regions rather than the
+        # ribbon the old holes_only pass was protecting.
+        try:
+            _rim = T.boundary.buffer(max(thin * 1.5, 1.0))
+        except Exception:
+            _rim = None
+        _close_voids(2, skip=_rim)
 
     # Guarantee a clean tiling: remove any residual sliver overlaps deterministically
     # (later-listed region cedes the overlap to the earlier one, giving an exact

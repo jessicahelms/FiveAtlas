@@ -64,14 +64,22 @@ check("they tile -- no overlap left", T._safe_intersection(mid_a, mid_b).area < 
       f"{T._safe_intersection(mid_a, mid_b).area:.3f}")
 check("...and no gap left", near(T.unary_union([mid_a, mid_b]).area, 21000),
       f"{T.unary_union([mid_a, mid_b]).area:.0f}")
-# NOT asserted: that the seam lands halfway between them. It does not -- on this
-# pair it comes out around x=119, which is PAST B's own edge at 110, so B ends up
-# smaller than it started. That is how Middle has always behaved: the Voronoi
-# sampling is coarse by design, and tightening it would change the existing
-# operation rather than add a choice to it. It is also the clearest reason to
-# want a seam you can place exactly.
-check("the seam is not actually halfway, which is why snapping exists",
-      not near(mid_a.area, 10500, 0.02), f"A {mid_a.area:.0f} vs 10500 if halved")
+# This used to be the headline failure: Middle put the seam at x=140 -- 30 px PAST
+# B's own edge at 110, so B came out smaller than it started -- and swapping which
+# region was clicked first moved it to x=105. The Voronoi it partitioned with was
+# not a partition at all (cells containing 23 sites, pairs overlapping by 142,924
+# px), the overlapping claims were settled by the cede pass that favours whoever
+# was listed first, and the seam followed the click order. _nearest_partition now
+# checks its own answer and falls back to a construction that cannot overlap or
+# leak, so the midline is the midline.
+check("Middle lands on the true midline", near(mid_a.area, 10500, 0.001)
+      and near(mid_b.area, 10500, 0.001), f"A {mid_a.area:.1f}  B {mid_b.area:.1f}")
+check("...at x = 105 exactly", abs(mid_a.bounds[2] - 105.0) < 0.05,
+      f"x={mid_a.bounds[2]:.4f}")
+rev = share(GAP, ["B", "A"])
+check("...and it does not matter which region was clicked first",
+      abs(body_of(rev, "A").area - mid_a.area) < 1.0,
+      f"A first {mid_a.area:.1f}, B first {body_of(rev, 'A').area:.1f}")
 
 print("\nSnap to A -- A is left alone, B comes up to its edge")
 r = share(GAP, ["A", "B"], snap_to="A")
