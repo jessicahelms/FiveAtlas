@@ -10,9 +10,11 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from uuid import uuid4
 
 import datasets as ds
 import topology
@@ -45,6 +47,53 @@ def load_original(ds_id: str) -> dict:
         return json.load(f)
 
 
+def _write_atomic(path, text: str) -> None:
+    """Write through a temp file and a rename, so the target is never half-written.
+
+    The working copy used to be written with a plain open(path, "w"), which
+    truncates first: the live file drops to 0 bytes and grows back in place.
+    Measured, 54,923 size samples taken during one 36 MB save caught the
+    zero-byte state. A drive dropping out, a full disk or a kill in that window
+    leaves the file truncated -- and because load_regions() prefers the working
+    copy whenever it merely EXISTS, a 0-byte file wedges the dataset behind a
+    bare 500 on EVERY read (/regions, /info, history, validate, export,
+    notes/preview), with nothing naming the file or pointing at versions/.
+
+    The temp name is unique per call. One fixed name lets two concurrent writers
+    to the same target share the temp path, so one can rename the other's
+    half-written file into place. It does not end in .geojson, so a folder scan
+    never mistakes it for a region source.
+    """
+    p = Path(path)
+    tmp = p.with_name(f"{p.name}.{os.getpid()}.{uuid4().hex[:8]}.fiveatlas-tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+        last = None
+        for attempt in range(40):             # ~2 s in all
+            try:
+                os.replace(tmp, p)
+                return
+            except PermissionError as e:
+                # Windows refuses the rename while ANOTHER handle is open on the
+                # destination -- antivirus, a sync client (OneDrive, Dropbox,
+                # Box), Explorer's preview pane, a second FiveAtlas. Those
+                # handles are nearly always transient, and the new contents are
+                # already written in full, so waiting beats failing a save.
+                # Measured: a reader doing back-to-back reads of the working
+                # copy made a bare os.replace fail with WinError 5 within a
+                # handful of saves.
+                last = e
+                time.sleep(0.05)
+        raise last
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except Exception:
+            pass
+        raise
+
+
 def save_edited(ds_id: str, fc: dict) -> dict:
     """Save the working copy AND keep an immutable timestamped snapshot.
 
@@ -56,8 +105,7 @@ def save_edited(ds_id: str, fc: dict) -> dict:
     """
     payload = json.dumps(fc)
     ep = ds.edited_regions_path(ds_id)
-    with open(ep, "w", encoding="utf-8") as f:
-        f.write(payload)
+    _write_atomic(ep, payload)
 
     vdir = ds.workdir_for(ds_id) / "versions"
     vdir.mkdir(parents=True, exist_ok=True)
@@ -67,8 +115,7 @@ def save_edited(ds_id: str, fc: dict) -> dict:
     while vp.exists():                       # more than one save in the same second
         n += 1
         vp = vdir / f"regions_{stamp}_{n}.geojson"
-    with open(vp, "w", encoding="utf-8") as f:
-        f.write(payload)
+    _write_atomic(vp, payload)
 
     return {"saved": str(ep), "version": str(vp),
             "versions": len(list(vdir.glob("regions_*.geojson")))}
@@ -143,12 +190,10 @@ def write_geojson_atomic(path, fc: dict) -> None:
     write leaves the previous file intact rather than a half-written one. The
     temp name does not end in .geojson, so a scan never mistakes it for regions.
     """
-    fc = strip_internal_props(fc)
-    p = Path(path)
-    tmp = p.with_name(p.name + ".fiveatlas-tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(json.dumps(fc))
-    os.replace(tmp, p)
+    # NB: this one STRIPS the app's internal properties -- it is the file the
+    # annotator keeps. The working copy must not be written through here: it
+    # needs _srcFile to survive, or the sidebar stops grouping by file.
+    _write_atomic(path, json.dumps(strip_internal_props(fc)))
 
 
 def restore_original(ds_id: str) -> dict:

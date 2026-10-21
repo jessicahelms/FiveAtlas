@@ -379,18 +379,77 @@ def _why_not_written(path, e) -> str:
     return f"Could not write {path}: {why}."
 
 
-def _is_original(ds_id: str, path) -> bool:
-    """A region file the dataset itself was scanned from -- a shared original
-    that Save as must never overwrite -- unless the app wrote it itself."""
+def _original_region_paths(ds_id: str):
+    """Every region file this dataset was scanned FROM -- or None when that
+    cannot be established right now.
+
+    None is the case that matters. A dataset registered while its folder was
+    unreachable is a stub with `sources: {}` (datasets._stub), and the guard used
+    to ask `any(... for r in sources["regions"] or [])` -- over an EMPTY list,
+    which answers "not an original" for every path on earth. Save as then wrote
+    straight over a shared, hand-corrected prediction file and recorded it in the
+    `written` whitelist; that list is never pruned, so from then on every
+    ordinary Save rewrote that file too. Measured end to end: 36 MB of edits
+    replaced a fixture's merged.regions.geojson and came back as a normal
+    successful save with exportError: None.
+
+    So: a scan we have is used; no scan means try again now (the drive may be
+    back); still nothing means list the folder ourselves; and if even that fails
+    we return None and the caller refuses. An unreachable original cannot be
+    written anyway, so refusing costs nothing.
+    """
     try:
         d = ds.get_dataset(ds_id)
     except KeyError:
-        return False
+        return None
+    srcs = (d.get("sources") or {}).get("regions")
+    if srcs:
+        return [str(r["path"]) for r in srcs if r.get("path")]
+    if isinstance(srcs, list):
+        return []                       # scanned, and it really has no region file
+    root = d.get("root")
+    if not root:
+        return None
+    try:                                # the folder may be reachable again
+        fresh = scan.scan_folder(root)
+        got = ((fresh.get("sources") or {}).get("regions")) or []
+        return [str(r["path"]) for r in got if r.get("path")]
+    except Exception:
+        pass
+    try:                                # last resort: anything that looks like regions
+        return [str(p) for p in Path(root).glob("*.geojson")]
+    except Exception:
+        return None
+
+
+def _is_original(ds_id: str, path) -> bool:
+    """A region file a dataset was scanned from -- a shared original that Save as
+    must never overwrite -- unless THIS dataset wrote it itself."""
+    own = _original_region_paths(ds_id)
+    if own is None:
+        return True                     # cannot verify -> fail closed
     written = geo.get_save_target(ds_id)["written"]
-    if any(_same_file(path, w) for w in written):
-        return False
-    return any(_same_file(path, r.get("path"))
-               for r in (d.get("sources", {}).get("regions") or []) if r.get("path"))
+    if not any(_same_file(path, w) for w in written):
+        if any(_same_file(path, r) for r in own):
+            return True
+    # Another dataset's original is protected whatever this dataset's whitelist
+    # says. The whitelist exists so an annotator's own file, saved beside the
+    # originals and picked up by the next scan, is not then refused to them --
+    # that argument does not reach into somebody else's dataset. Without this,
+    # posting dataset B's original as dataset A's save-as target wrote it (3
+    # features -> 1) while the same path posted to B was correctly refused.
+    for row in ds.all_datasets():
+        oid = row.get("id")
+        if not oid or oid == ds_id:
+            continue
+        try:
+            other = ds.get_dataset(oid)
+        except KeyError:
+            continue
+        for r in ((other.get("sources") or {}).get("regions") or []):
+            if r.get("path") and _same_file(path, r["path"]):
+                return True
+    return False
 
 
 def _suggest_new_name(ds_id: str, path) -> str:
@@ -425,8 +484,7 @@ def _in_original_frame(ds_id: str, fc: dict) -> dict:
             p = pyramid(ds_id)
             W0, H0 = p.info()["width"], p.info()["height"]
         except Exception:
-            w, h = _regions_extent(fc)
-            W0, H0 = ORI.out_size(w, h, ORI.invert(o))
+            W0, H0 = _original_canvas(ds_id, fc, o)
         dw, dh = ORI.out_size(W0, H0, o)
         feats = ORI.transform_features(feats, ORI.invert(o), dw, dh)
     out = {**fc, "features": feats}
@@ -693,6 +751,50 @@ def _regions_extent(fc):
     return max(int(mx) + 100, 512), max(int(my) + 100, 512)
 
 
+def _original_canvas(ds_id: str, fc: dict, o) -> tuple:
+    """The dataset's ORIGINAL-frame canvas (W0, H0), for a dataset whose imagery
+    cannot be read -- an offline drive, a stub, or imagery simply unticked.
+
+    With an image this is just its width and height, fixed for ever. Without
+    one it used to be derived from the regions' own bounding box on every call:
+
+        w, h = _regions_extent(fc); W0, H0 = ORI.out_size(w, h, ORI.invert(o))
+
+    The bounding box MOVES when the regions move. So the forward transform and
+    the inverse transform were run against different canvases and stopped being
+    inverses of each other. Measured on a regions-only folder (regions spanning
+    x 3000-9000, y 5000-11000): rotating to 90 and back to 0 shifted every
+    vertex by 2,900 px -- 0.6 mm at 0.2125 um/px -- and 12 of the 16 rot/flip
+    combinations failed to round-trip, by 2,900-4,900 px. Only rot0,
+    rot90+flipV, rot180+flipH+flipV and rot270+flipH happened to survive. The
+    displacement was written straight to the working copy and rode out through
+    Save as, so it outlived the drive coming back.
+
+    The canvas is therefore established ONCE and reused: whatever the image's
+    width and height would have been, had it been readable. It is stored beside
+    the working copy, not in orientation.json, because ORI.normalise() keeps
+    only rot/flipH/flipV and would drop it.
+    """
+    rec_path = ds.workdir_for(ds_id) / "canvas.json"
+    try:
+        rec = json.load(open(rec_path, encoding="utf-8"))
+        W0, H0 = float(rec["w"]), float(rec["h"])
+        if W0 > 0 and H0 > 0:
+            return W0, H0
+    except Exception:
+        pass
+    w, h = _regions_extent(fc)
+    W0, H0 = ORI.out_size(w, h, ORI.invert(o))
+    try:
+        rec_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(rec_path, "w", encoding="utf-8") as f:
+            json.dump({"w": float(W0), "h": float(H0)}, f)
+    except Exception:
+        pass                              # unwritable workdir: still consistent
+                                          # within this call, as before
+    return W0, H0
+
+
 def _frame_tag(frame: str, o) -> str:
     """Filename suffix saying which frame an export is in.
 
@@ -774,7 +876,12 @@ def info(ds_id: str, noimg: int = 0):
     except Exception:
         # no imagery (offline drive / stub dataset): size the canvas to the regions
         fc, _ = geo.load_regions(ds_id)
-        w, h = _regions_extent(fc)
+        # The DISPLAYED canvas, from the same fixed original canvas every
+        # transform uses -- not the regions' current bounding box, which moves
+        # with them and made this answer disagree with the transforms by 60 px
+        # on a 600x500 fixture.
+        w, h = ORI.out_size(*_original_canvas(ds_id, fc, o), o)
+        w, h = int(w), int(h)
         # `orientation` belongs in THIS answer too. Without it the UI cannot tell
         # the view is turned, so the Export frame picker never appears and the
         # frame is chosen silently -- the worst version of the rotated-coordinates
@@ -889,18 +996,38 @@ async def put_orientation(ds_id: str, request: Request):
     except KeyError:
         raise HTTPException(404, "unknown dataset")
     body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(400, "expected an object with {rot, flipH, flipV, fc?}")
+    # ORI.normalise swallows a bad rot and reports 0, so a mistyped request read
+    # back as a successful one.
+    if "rot" in body:
+        try:
+            float(body["rot"])
+        except (TypeError, ValueError):
+            raise HTTPException(
+                400, f"rot must be a number of degrees, not {body['rot']!r}")
     want = ORI.normalise(body)
     have = ORI.get(ds_id)
 
-    fc = (body or {}).get("fc") or geo.load_regions(ds_id)[0]
+    # This route WRITES the working copy, so the body gets the same check a save
+    # gets. It used to take whatever was there: an fc with no features, an empty
+    # features list, and an fc with no 'features' key each returned 200 and left
+    # the working copy holding 0 features -- three shapes PUT /regions refuses
+    # with 400 for exactly this reason.
+    if (body.get("fc") or None) is not None:
+        fc, _ = _regions_from_body({"fc": body["fc"]})
+        if not fc.get("features"):
+            raise HTTPException(400, "that body has no regions in it; refusing "
+                                     "to overwrite the working copy")
+    else:
+        fc = geo.load_regions(ds_id)[0]
     have = ORI.normalise(fc.get("_orientation") or have)
 
     try:
         p = pyramid(ds_id)
         W0, H0 = p.info()["width"], p.info()["height"]
-    except Exception:                       # no imagery: size from the regions
-        w, h = _regions_extent(fc)
-        W0, H0 = ORI.out_size(w, h, ORI.invert(have))
+    except Exception:                       # no imagery: one fixed canvas
+        W0, H0 = _original_canvas(ds_id, fc, have)
 
     feats = fc.get("features", [])
     if not ORI.is_identity(have):           # back to the file's original frame
