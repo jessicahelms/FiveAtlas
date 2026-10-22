@@ -507,15 +507,38 @@ def _partition_spike(tol):
 
 
 def _clean_for_partition(geom, tol):
-    """Clean needle artifacts before/during tiling without erasing thin regions."""
+    """Remove needle artifacts before tiling, WITHOUT eroding the region.
+
+    This was a morphological open/close -- clean_geom(smooth=True) -- whose only
+    guard let it lose 35% of a region before falling back, so it quietly ate the
+    outline it was handed. It accounted for essentially ALL of the ground a pair
+    ended up losing; turning it off and measuring what the pair no longer
+    claimed:
+
+        CP + sAMY.1    3,938 px  ->  50 px
+        CP + CTXsp     3,538 px  ->  40 px
+        CP + lft       3,446 px  ->  56 px
+        TH + HPF       1,323 px  ->  43 px
+        HY + lft         822 px  ->  65 px
+
+    despike() does the job this is here for -- it deletes vertices that enclose
+    no area, which is exactly what a needle is -- and it returns its input
+    untouched if the area moves at all, so it cannot erode anything. Across ten
+    real pairs the needle counts came out no worse (dft+ISO's went 82.8 px to
+    68.4), with overlap and order dependence unchanged at 0.000.
+
+    An invalid outline is still repaired, because a self-intersecting polygon
+    cannot be partitioned at all -- that is buffer(0), which does not erode.
+    """
     if geom is None or geom.is_empty:
         return geom
     g = geom if geom.is_valid else geom.buffer(0)
-    area = g.area
-    cleaned = clean_geom(g, spike=_partition_spike(tol), smooth=True)
-    if area > 0 and (cleaned.is_empty or cleaned.area < area * 0.65):
-        cleaned = clean_geom(g, spike=2.0, smooth=True)
-    return cleaned
+    if g.is_empty:
+        return geom
+    d = despike(g, eps=max(_partition_spike(tol) * 0.25, 0.05))
+    if not d.is_empty and abs(d.area - g.area) <= max(1.0, g.area * 1e-6):
+        g = d
+    return g
 
 
 def _prep_regions(features, id_prop, grid):

@@ -51,7 +51,14 @@ def nv(g):
 
 
 def needle(g, minlen=20.0):
-    """Longest pair of real-length edges in one ring running within 0.01 px."""
+    """Longest pair of real-length edges in one ring running within 0.01 px.
+
+    Segments that SHARE a vertex are skipped. They are zero apart by
+    definition, and in a ring of fewer than ten points the first and last
+    segments are inside the comparison window -- so a plain square read as a
+    5,000 px needle. Every real region here has 36 vertices or more, so this
+    never affected the measurements on the dataset, only small fixtures.
+    """
     worst = 0.0
     for p in T._polys(g):
         cs = list(p.exterior.coords)
@@ -60,6 +67,8 @@ def needle(g, minlen=20.0):
             if la.length < minlen:
                 continue
             for m in range(k + 2, min(k + 8, len(cs) - 1)):
+                if set(cs[k:k + 2]) & set(cs[m:m + 2]):
+                    continue                   # share a vertex: not a needle
                 lb = LineString([cs[m], cs[m + 1]])
                 if lb.length >= minlen and la.distance(lb) < 0.01:
                     worst = max(worst, min(la.length, lb.length))
@@ -263,6 +272,70 @@ check("...nor does it balloon", got["tiny"].area <= tiny.area + 4000.0,
       f"{tiny.area:,.0f} -> {got['tiny'].area:,.0f} px")
 check("the pair is still disjoint",
       T._safe_intersection(got["big"], got["tiny"]).area <= 1.0)
+
+# ---------------------------------------------------------------------------
+section("the outline handed in is not eroded")
+
+# The input cleaning was a morphological open whose only guard let it lose 35%
+# of a region before falling back, so it quietly ate the outline it was given --
+# 3,938 px of CP against sAMY.1, 1,323 px of TH against HPF, and that erosion
+# was essentially ALL of the ground a pair ended up losing. A hairline that has
+# real area is anatomy, however thin; only a needle enclosing NO area is an
+# artifact, and that is what despike() removes.
+spiky = unary_union([
+    box(0, 0, 1000, 1000),
+    box(1000, 499.75, 1400, 500.25),          # 400 x 0.5 px hairline, 200 px
+])
+cleaned = T._clean_for_partition(spiky, 40.0)
+check("a 0.5 px hairline with real area is kept",
+      abs(cleaned.area - spiky.area) <= 1.0,
+      f"{spiky.area:,.1f} -> {cleaned.area:,.1f} px")
+
+# A needle is still removed. It has to be built with a hair of width or
+# buffer(0) collapses it before anything under test sees it -- the real ones
+# measure 0.004883 px across, so this is 0.004 over 600 px on a region the size
+# of CP, which is the case that mattered.
+needled = Polygon([(0, 0), (5000, 0), (5000, 5000), (2500.004, 5000),
+                   (2500.004, 4400), (2500, 4400), (2500, 5000), (0, 5000)])
+check("the needle fixture is valid and really has a needle",
+      needled.is_valid and needle(needled, minlen=100.0) > 0,
+      f"valid {needled.is_valid}, needle {needle(needled, minlen=100.0):.1f} px")
+nc = T._clean_for_partition(needled, 40.0)
+check("a needle is still removed", needle(nc, minlen=100.0) == 0.0,
+      f"{nv(needled)} -> {nv(nc)} verts, needle "
+      f"{needle(needled, minlen=100.0):.1f} -> {needle(nc, minlen=100.0):.1f} px")
+check("...without moving the region", abs(nc.area - needled.area) <= 5.0,
+      f"{needled.area:,.1f} -> {nc.area:,.1f} px")
+
+# End to end: the pair must not quietly lose its own ground.
+for label, geoms in (
+    ("two hairlined squares", {
+        "H1": unary_union([box(0, 0, 1000, 1000),
+                           box(1000, 199.8, 1300, 200.2)]),
+        "H2": unary_union([box(1060, 0, 2060, 1000),
+                           box(760, 799.8, 1060, 800.2)])}),
+    ("a ribbon and a slab", {"R": box(0, 0, 4000, 30),
+                             "S": box(0, 60, 4000, 900)}),
+    ("two offset boxes", {"A": box(0, 0, 1000, 1000),
+                          "B": box(800, 0, 1800, 1000)}),
+):
+    fs = [feat(n, g) for n, g in geoms.items()]
+    ns = list(geoms)
+    got = run(fs, ns, tol=40.0)
+    before = unary_union(list(geoms.values()))
+    after = unary_union([got[n] for n in ns])
+    lost = T._safe_difference(before, after).area
+    check(f"{label}: the pair keeps its own ground", lost <= 50.0,
+          f"lost {lost:,.1f} px")
+
+# A genuinely thin region survives whole -- the reason the old 35% guard was
+# there in the first place.
+fs = [feat("rib", box(0, 0, 4000, 6)), feat("nb", box(0, 20, 4000, 900))]
+got = run(fs, ["rib", "nb"], tol=40.0)
+check("a 6 px ribbon is not erased", got["rib"].area >= 24000.0,
+      f"24,000 -> {got['rib'].area:,.0f} px")
+check("...and stays in one piece", len(T._polys(got["rib"])) == 1,
+      f"{len(T._polys(got['rib']))} parts")
 
 # ---------------------------------------------------------------------------
 print()
