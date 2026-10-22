@@ -8,7 +8,9 @@ so the webapp's edits are identical to their batch pipeline.
 from __future__ import annotations
 
 import json
+import math
 import os
+import re
 import sys
 import time
 from datetime import datetime
@@ -103,7 +105,11 @@ def save_edited(ds_id: str, fc: dict) -> dict:
 
     The dataset folder itself is still never written to: originals stay original.
     """
-    payload = json.dumps(fc)
+    # allow_nan=False, so this RAISES rather than writing the bare literals NaN
+    # or Infinity. json.dumps emits them happily and they are not JSON: a working
+    # copy holding one could not be read back by this app or any other tool. The
+    # dump happens before the write, so a refusal leaves the previous file whole.
+    payload = json.dumps(fc, allow_nan=False)
     ep = ds.edited_regions_path(ds_id)
     _write_atomic(ep, payload)
 
@@ -193,7 +199,7 @@ def write_geojson_atomic(path, fc: dict) -> None:
     # NB: this one STRIPS the app's internal properties -- it is the file the
     # annotator keeps. The working copy must not be written through here: it
     # needs _srcFile to survive, or the sidebar stops grouping by file.
-    _write_atomic(path, json.dumps(strip_internal_props(fc)))
+    _write_atomic(path, json.dumps(strip_internal_props(fc), allow_nan=False))
 
 
 def restore_original(ds_id: str) -> dict:
@@ -274,6 +280,78 @@ def run_snap(ds_id: str, before_fc: dict, after_fc: dict,
     }
 
 
+#: Names Windows opens as DEVICES rather than files, whatever directory they
+#: appear in and whatever extension is tacked on.
+_DEVICE_NAMES = frozenset(
+    ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"]
+    + [f"COM{i}" for i in range(1, 10)]
+    + [f"LPT{i}" for i in range(1, 10)])
+
+
+def _refuse_unreadable(p: Path) -> None:
+    """Refuse a path that is not a file we can read, BEFORE opening it.
+
+    Reading CON blocks for ever. The route that does it is async and the read is
+    blocking, so it holds the event loop and every other route stops answering
+    -- the heartbeat and Save included, which leaves an annotator with unsaved
+    edits no way out but to kill the app. Measured: the process had to be
+    taskkill'd. `NUL` and the COM/LPT names are the same family.
+
+    A directory is refused here too. open() on one raises PermissionError, so
+    the message used to be "Permission denied" when the real problem was that
+    the annotator had picked a folder.
+    """
+    stem = p.name.split(".")[0].strip().upper()
+    if stem in _DEVICE_NAMES:
+        raise ValueError(f"{p.name!r} is a reserved device name, not a file")
+    if p.is_dir():
+        raise ValueError(f"{p.name!r} is a folder, not a region file")
+
+
+def _refuse_non_finite(fc: dict) -> None:
+    """Refuse a FeatureCollection holding NaN or infinity, BEFORE anything is
+    written.
+
+    json.dumps writes them as the bare literals NaN and Infinity, which are not
+    JSON (RFC 8259) and which JSONResponse refuses outright. So a file with a
+    NaN coordinate was SAVED as the working copy -- load_regions_file wrote
+    before the route could look at it -- and then the response blew up. The
+    annotator saw a failure and believed nothing had happened; in fact the
+    working copy had been replaced, held the literal NaN, and every later read
+    of it raised: /regions, /info, history, validate, export, notes/preview.
+    The dataset could not be opened again, and the file the app had written was
+    not readable by any other tool either.
+    """
+    bad = []
+
+    def walk(c, where):
+        if len(bad) > 6:
+            return
+        if isinstance(c, bool):
+            return
+        if isinstance(c, (int, float)):
+            if not math.isfinite(c):
+                bad.append(where)
+            return
+        if isinstance(c, (list, tuple)):
+            for x in c:
+                walk(x, where)
+
+    for i, f in enumerate((fc or {}).get("features") or []):
+        nm = (f.get("properties") or {}).get("name")
+        walk(((f.get("geometry") or {}) or {}).get("coordinates"),
+             str(nm) if nm else f"feature #{i + 1}")
+        if len(bad) > 6:
+            break
+    if bad:
+        seen = sorted(set(bad))
+        raise ValueError(
+            "that file has coordinates that are not numbers (NaN or infinity), "
+            f"in {', '.join(seen[:3])}"
+            + (f" and {len(seen) - 3} more" if len(seen) > 3 else "")
+            + " -- nothing was changed")
+
+
 def load_regions_file(ds_id: str, path: str) -> dict:
     """Load a region set from disk and make it this dataset's working copy."""
     fc = read_regions_file(ds_id, path)
@@ -290,6 +368,7 @@ def read_regions_file(ds_id: str, path: str) -> dict:
     vertex, grouped by region name -- see tableio for the columns it accepts,
     including Xenium's micron column names)."""
     p = Path(path)
+    _refuse_unreadable(p)
     if not p.exists():
         raise FileNotFoundError(path)
     d = ds.get_dataset(ds_id)
@@ -303,6 +382,7 @@ def read_regions_file(ds_id: str, path: str) -> dict:
             fc = json.load(f)
         if not isinstance(fc, dict) or fc.get("type") != "FeatureCollection":
             raise ValueError("not a GeoJSON FeatureCollection")
+    _refuse_non_finite(fc)
     # smooth away spikes / heal invalid polygons on load
     fc["features"] = topology.clean_features(fc.get("features", []), d["id_prop"], spike=3.0)
     return fc

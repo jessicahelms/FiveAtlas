@@ -1937,8 +1937,15 @@ async def regions_load(ds_id: str, request: Request):
     path = (body or {}).get("path")
     if not path:
         raise HTTPException(400, "need 'path'")
+    # READ first, write after. load_regions_file() saves as it reads, so a file
+    # that cannot be turned into a response had already replaced the working
+    # copy: a GeoJSON holding a NaN coordinate was written, the response then
+    # failed (NaN is not JSON), and the annotator saw an error and believed
+    # nothing had happened -- while every later read of that dataset raised.
+    # Reading on a worker thread as well, so a slow network read cannot hold the
+    # event loop and stop every other route answering.
     try:
-        fc = geo.load_regions_file(ds_id, path)
+        fc = await run_in_threadpool(geo.read_regions_file, ds_id, str(path))
     except Exception as e:
         raise HTTPException(400, f"load failed: {e}")
     # Stamped AFTER the load so the entry joins whatever trail the incoming file
@@ -1965,8 +1972,14 @@ async def regions_read_file(ds_id: str, request: Request):
     path = (body or {}).get("path")
     if not path:
         raise HTTPException(400, "need 'path'")
+    # On a worker thread. This route is async and the read is blocking, so a
+    # read that never returns held the EVENT LOOP and every other route stopped
+    # answering -- health, Save, everything -- leaving an annotator with unsaved
+    # edits no way out but to kill the app. `path: "CON"` did exactly that
+    # (Windows opens it as a device); geo now refuses those names outright, and
+    # this keeps any other slow read off the loop.
     try:
-        fc = geo.read_regions_file(ds_id, str(path))
+        fc = await run_in_threadpool(geo.read_regions_file, ds_id, str(path))
     except Exception as e:
         raise HTTPException(400, f"could not read {Path(str(path)).name}: {e}")
 
@@ -2015,16 +2028,29 @@ async def regions_load_multi(ds_id: str, request: Request):
     paths = (body or {}).get("paths") or []
     if not paths:
         raise HTTPException(400, "need 'paths': at least one region file")
-    groups, names = [], []
+    # ALL of them, or none. This used to call load_regions_file per path, which
+    # SAVES as it reads, so a bad file after a good one left the working copy
+    # holding just the partial load -- measured: 4 features before, 1 after, one
+    # snapshot written, and an error message that named only the missing file.
+    # Nothing is written now until every file has been read.
+    groups, names, first = [], [], None
     for path in paths:
         try:
-            fc = geo.load_regions_file(ds_id, str(path))
+            fc = await run_in_threadpool(geo.read_regions_file, ds_id, str(path))
         except Exception as e:
-            raise HTTPException(400, f"load failed for {Path(str(path)).name}: {e}")
+            raise HTTPException(400, f"load failed for {Path(str(path)).name}: {e}"
+                                     " -- nothing was changed")
+        if first is None:
+            first = fc
         groups.append((Path(str(path)).stem, fc.get("features") or []))
         names.append(Path(str(path)).name)
     res = topology.concat_region_files(groups, d["id_prop"])
-    out = {"type": "FeatureCollection", "features": res["features"]}
+    # Carry the first file's file-level members -- its provenance trail and its
+    # `_orientation`. Building `out` from scratch dropped both, so loading a
+    # file through the multi path lost the chain of custody that the single-file
+    # path keeps, and a rotated file stopped saying it was rotated.
+    out = provenance.foreign(first or {})
+    out.update({"type": "FeatureCollection", "features": res["features"]})
     detail = " + ".join(names)
     if res["shared"]:
         # Said out loud because it cannot be fixed by listing them apart: one
