@@ -1257,6 +1257,31 @@ def _notes_context(ds_id, body):
                                           if t in DMG.DESIGNATIONS})
         updates[nm] = {"damage": tags, "voids": v["voids"]}
 
+    # What this working copy can SPEAK FOR, per region and per key. Everything
+    # else the shared YAML holds belongs to another annotator, another machine or
+    # another working copy, and notes.apply_regions leaves it alone -- it used to
+    # rewrite a whole key from a partial view, which deleted the rest.
+    #
+    #   voids: a shape THIS copy actually holds. Not "assigned to this region" --
+    #     held at all -- so moving a shape from TH to ISO still takes it off TH,
+    #     while a void recorded from a shape that is not here survives.
+    #   damage: the designation of a shape this copy holds, plus -- only for the
+    #     regions whose ticks the client actually sent -- the designations that
+    #     are never drawn as a shape (Missing, Cutoff, Low/no transcripts...).
+    #     Those live on the region rather than on a shape, so absence is a real
+    #     untick, but ONLY when the client was showing that region's ticks;
+    #     otherwise absence just means this copy never asked.
+    held_voids = {s["name"] for s in res["shapes"]}
+    held_tags = {s["designation"] for s in res["shapes"]}
+    undrawn = {t for t, (_lbl, drawn) in DMG.DESIGNATIONS.items() if drawn is False}
+    asserted = set(body.get("extraDamage") or {})
+    known = {}
+    for nm in updates:
+        tags = set(held_tags)
+        if nm in asserted:
+            tags |= undrawn
+        known[nm] = {"voids": held_voids, "damage": tags}
+
     found = notes.find(d["root"])
     out = {"dataset": ds_id, "root": d["root"], "assignment": res,
            "workedOn": sorted(worked), "scope": scope, "annotator": annotator,
@@ -1273,7 +1298,7 @@ def _notes_context(ds_id, body):
                                  "fingerprint": doc["fingerprint"]}
     else:
         applied = notes.apply_regions(doc["data"], updates, annotator=annotator,
-                                      only=only)
+                                      only=only, known=known)
         changes = applied["changes"]
         after = doc["render"](doc["data"])
         out["files"]["notes"] = {

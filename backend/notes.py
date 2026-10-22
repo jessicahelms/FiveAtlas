@@ -200,14 +200,56 @@ def _read_list(v):
     return [s.strip() for s in str(v).split(",") if s.strip()]
 
 
-def apply_regions(data, updates, annotator=None, only=None):
+def _merge_values(before, want, speaks_for):
+    """What to write for one key: (merged, preserved, dropped).
+
+    This copy's answer governs ONLY the values it can speak for. Every other
+    value the file holds belongs to somebody else and is left exactly as it is.
+
+    The old rule was all-or-nothing -- it refused to write when `want` was
+    ENTIRELY empty, and otherwise replaced the whole key. So a working copy
+    holding a SUBSET rewrote the lot: a file recording
+    `voids: "bubble.1, separation.9"` met a copy holding only bubble.1 and came
+    out as `voids: "bubble.1"`, reported as a successful save, with
+    separation.9 gone. That is the very thing the comment below describes, one
+    step further in.
+
+    `speaks_for` empty (or None) means this copy asserts nothing, so nothing is
+    dropped -- which is what a fresh workdir or Restore original must do, having
+    23 regions and no damage shapes at all.
+
+    The file's own ordering is kept for values that stay, and additions go on
+    the end, so a shared file gets the smallest possible diff.
+    """
+    have = _read_list(before)
+    want = list(want)
+    mine = set(speaks_for or ())
+    merged = [v for v in have if v in want or v not in mine]
+    for v in want:
+        if v not in merged:
+            merged.append(v)
+    preserved = [v for v in have if v not in want and v not in mine]
+    dropped = [v for v in have if v not in want and v in mine]
+    return merged, preserved, dropped
+
+
+def apply_regions(data, updates, annotator=None, only=None, known=None):
     """Write per-region damage/voids into a loaded notes document, in place.
 
     `updates` is {region: {"damage": [...], "voids": [...]}} -- what assign()
     produces. `only` limits the write to the regions this annotator worked on;
     everyone else's entries are not touched at all, byte for byte.
 
-    Returns a list of {region, key, before, after} for the preview.
+    `known` is {region: {"damage": {...}, "voids": {...}}}: per key, the values
+    THIS copy can speak for -- a damage shape it actually holds, or a tick the
+    client sent. Anything else in the file is another annotator's record and
+    survives. Left out, this copy speaks for nothing and the merge only ever
+    adds. The caller decides, because the vocabulary (which designations are
+    drawn as shapes) lives in damage.py, not here.
+
+    Returns {changes, kept}: {region, key, before, after} per change, and per
+    key the values that were preserved because this copy could not speak for
+    them, so the preview can show that it is merging rather than replacing.
     """
     changes, kept = [], []
     for region in list(updates):
@@ -220,28 +262,29 @@ def apply_regions(data, updates, annotator=None, only=None):
             # reported instead (see missing_regions).
             continue
         want = updates[region] or {}
+        speaks = (known or {}).get(region) or {}
         for key in ("damage", "voids"):
             if key not in want:
                 continue
             before = entry.get(key)
-            after = _as_written(before, want[key])
+            # NEVER clear a value the file already holds unless this copy owns
+            # it. The geometry in front of this annotator is one view of the
+            # sample; the YAML accumulates across annotators, machines and
+            # working copies, and damage recorded from a shape that is not in
+            # THIS copy is not gone -- it is just not here. Reported, so the
+            # difference is visible rather than silently either way.
+            merged, preserved, dropped = _merge_values(before, want[key],
+                                                       speaks.get(key))
+            if preserved:
+                kept.append({"region": region, "key": key, "value": before,
+                             "names": preserved})
+            after = _as_written(before, merged)
             if before == after:
-                continue
-            # NEVER clear a value the file already holds. The geometry in front
-            # of this annotator is one view of the sample; the YAML accumulates
-            # across annotators, machines and working copies, and damage
-            # recorded from a shape that is not in THIS copy is not gone -- it
-            # is just not here. Writing "" over it would delete a colleague's
-            # record, which is exactly what a fresh workdir (or Restore
-            # original) produces: 23 regions, zero damage shapes. Reported, so
-            # the difference is visible rather than silently either way.
-            if not want[key] and not is_unset(before):
-                kept.append({"region": region, "key": key, "value": before})
                 continue
             entry[key] = after
             changes.append({"region": region, "key": key,
                             "before": "" if before is None else before,
-                            "after": after})
+                            "after": after, "dropped": dropped})
         if annotator and str(annotator).strip():
             before = entry.get("annotator")
             if is_unset(before) and before != annotator:
