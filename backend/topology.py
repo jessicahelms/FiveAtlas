@@ -1308,7 +1308,11 @@ def _voronoi_partition(area, geoms_by_name, spacing):
     # inside its own region, so the midline still lands on the true shared edge.
     inset = spacing * 0.5
     pts, labels = [], []
-    for n, g in geoms_by_name.items():
+    # Sorted, not dict order: GEOS's Voronoi and the nearest-site lookup below
+    # both settle degenerate cases by input position, so the generator list has
+    # to be the same whichever way the caller named the regions.
+    for n in sorted(geoms_by_name):
+        g = geoms_by_name[n]
         # Inset toward the interior so generators never coincide where two
         # regions already touch. A region smaller than the inset used to fall
         # straight back to its RAW boundary, which is the degenerate case this
@@ -1370,6 +1374,109 @@ def _voronoi_partition(area, geoms_by_name, spacing):
             out[n] = unary_union(v)
         except Exception:
             out[n] = unary_union([p.buffer(0) for p in v])
+    return out
+
+
+def _thin_free_edges(newg, names, fluff, eps):
+    """Strip collinear fluff from each region's FREE edge, pinning the seam.
+
+    _simplify_shared does this through the whole boundary network, which is the
+    better way when it works -- but it has to polygonize and hand every face
+    back, and a speck-sized region loses its face in that rebuild, so the whole
+    thinning is abandoned. `opt` next to the 41 px sAMY.3 therefore came back
+    with 3,209 vertices for a 36-vertex region, and the file grew 2.8x.
+
+    This is the fallback: per region, per ring, walk the vertices and keep every
+    one that lies in the seam zone EXACTLY as it is, simplifying only the runs
+    between them. Those pinned vertices are the ones both regions share, so
+    coincidence survives by construction rather than by reconstruction -- there
+    is no face assignment to fail. `fluff` is a hundredth of a pixel, so this
+    cannot move an outline anywhere a person could see.
+    """
+    from shapely.prepared import prep
+
+    names = [n for n in names if not newg[n].is_empty]
+    if len(names) < 2 or fluff <= 0:
+        return newg
+    bnd = {}
+    for n in names:
+        try:
+            bnd[n] = newg[n].boundary.buffer(eps)
+        except Exception:
+            return newg
+    seams = []
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            try:
+                s = _safe_intersection(bnd[a], bnd[b])
+            except Exception:
+                continue
+            if not s.is_empty:
+                seams.append(s)
+    if not seams:
+        return newg
+    try:
+        zone = prep(unary_union(seams).buffer(0))
+    except Exception:
+        return newg
+
+    def thin_ring(coords):
+        pts = list(coords)
+        if len(pts) < 5:
+            return pts
+        pinned = [zone.intersects(Point(x, y)) for x, y in pts]
+        if all(pinned):
+            return pts
+        out, run = [], []
+        for p, isin in zip(pts, pinned):
+            if isin:
+                if run:
+                    run.append(p)
+                    if len(run) > 2:
+                        run = list(LineString(run).simplify(fluff).coords)
+                    out.extend(run[:-1])
+                    run = []
+                out.append(p)
+            else:
+                if not run:
+                    run = [out.pop()] if out else []
+                run.append(p)
+        if run:
+            if len(run) > 2:
+                run = list(LineString(run).simplify(fluff).coords)
+            out.extend(run)
+        if len(out) < 4 or out[0] != out[-1]:
+            return pts
+        return out
+
+    result = {}
+    for n in names:
+        polys = []
+        for p in _polys(newg[n]):
+            try:
+                q = Polygon(thin_ring(p.exterior.coords),
+                            [thin_ring(r.coords) for r in p.interiors])
+                if not q.is_valid:
+                    q = q.buffer(0)
+            except Exception:
+                q = p
+            if not q.is_empty:
+                polys.append(q)
+        if not polys:
+            return newg
+        g = polys[0] if len(polys) == 1 else unary_union(polys).buffer(0)
+        if g.is_empty or abs(g.area - newg[n].area) > max(2.0, newg[n].area * 1e-6):
+            return newg                       # moved more than fluff should
+        result[n] = g
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            try:
+                if _safe_intersection(result[a], result[b]).area >                         max(_safe_intersection(newg[a], newg[b]).area, 1e-6) + 0.5:
+                    return newg               # opened an overlap: keep the input
+            except Exception:
+                return newg
+    out = dict(newg)
+    out.update(result)
     return out
 
 
@@ -1644,7 +1751,17 @@ def _guard_duplicate_names(features, id_prop, names, what):
         )
 
 
-def partition_regions(features, id_prop, names, tol=40.0, precision=1.0,
+#: Coordinate grid the shared-border result is snapped to. GEOS uses a
+#: snap-rounding noder for a fixed precision model and calls that the robust
+#: path, and the snap also collapses the sub-pixel needles despike() cannot
+#: reach. It has to be far BELOW feature scale to be invisible: the old default
+#: of 1.0 moved every vertex of a hand-traced outline by up to half a pixel --
+#: 9,341 px of TH's free edge, in 67 slivers the whole way round -- while 0.01
+#: costs 65 px and still leaves every seam vertex identical in both regions.
+PARTITION_GRID = 0.01
+
+
+def partition_regions(features, id_prop, names, tol=40.0, precision=PARTITION_GRID,
                       simplify=None, snap_to=None):
     """Make the named regions tile cleanly: fill small gaps between them, remove
     small overlaps, and give every pair a single shared border. Each point of the
@@ -1664,7 +1781,17 @@ def partition_regions(features, id_prop, names, tol=40.0, precision=1.0,
     back out to the individual features at the end. Returns {features, borders}.
     """
     idx = _index_all(features, id_prop)
-    sel = [str(n) for n in names if str(n) in idx]
+    # CANONICAL ORDER, so the answer is a property of the regions and not of the
+    # clicks. Several passes below settle a tie by list position -- the Voronoi
+    # generators are built in this order, and the overlap cede hands the
+    # contested ground to whichever came first -- so clicking TH then HPF gave a
+    # different file from HPF then TH. Measured on the real set: 15 of the 41
+    # pairs the app allows differed between the two orders, dft+RSP by 32,772 px.
+    # It is still arbitrary WHICH region wins a tie, but two annotators now get
+    # the same answer, which is the part that matters for a shared atlas. The
+    # caller's order carries no meaning here: `snap_to` names its region
+    # explicitly, and every result is written back by name.
+    sel = sorted({str(n) for n in names if str(n) in idx})
     if len(sel) < 2:
         raise ValueError("pick at least two regions to share borders")
 
@@ -2049,20 +2176,86 @@ def partition_regions(features, id_prop, names, tol=40.0, precision=1.0,
     # the area moves, so this cannot reshape anatomy -- but the pair is checked
     # as a SET afterwards all the same, because a seam has to stay coincident.
     try:
-        spiked = {n: despike(newg[n]) for n in sel}
-        before = unary_union([newg[n] for n in sel if not newg[n].is_empty]).buffer(0)
-        after = unary_union([g for g in spiked.values() if not g.is_empty]).buffer(0)
-        worst = 0.0
+        spiked = dict(newg)
+        for n in sel:
+            g = newg[n]
+            if g.is_empty or n == snap_keep:   # snapped: back exactly as it came
+                continue
+            # Snap to the precision grid FIRST. A needle narrower than the grid
+            # collapses when its two sides land on the same coordinates, which
+            # is what snap-rounding is for and what despike cannot reach: a
+            # 683 px needle on CP sat 0.004883 px wide and survived despike at
+            # every eps up to 0.5. The grid is sub-pixel (see `precision`), so
+            # the outline does not visibly move.
+            try:
+                if precision and float(precision) > 0:
+                    sn = set_precision(g, float(precision)).buffer(0)
+                    if not sn.is_empty and abs(sn.area - g.area) <= max(
+                            1.0, g.area * 1e-5):
+                        g = sn
+            except Exception:
+                pass
+            d = despike(g)
+            # A needle encloses no area, so taking one off must not move any.
+            # The reconstruction is not exact to the last bit, though: CP's cost
+            # 2.02 px of 24,979,820. This guard used to allow 1e-9 relative --
+            # 0.025 px -- so it REJECTED despike's own successful cleanups, and
+            # it rejected them for the whole SET at once, so one region's noise
+            # blocked every other region's needle too. despike itself allows
+            # area * 1e-4 (2,479 px on CP), which is far too loose to be silent.
+            if not d.is_empty and abs(d.area - g.area) <= max(1.0, g.area * 1e-6):
+                g = d
+            spiked[n] = g
+        # Cleaning can leave a sub-pixel overlap where a needle sat ON the seam.
+        # This used to demand the cleaned set overlap by <= 1e-6 px -- but the
+        # UNCLEANED set already overlaps by up to 0.034 px of ordinary boolean
+        # noise, so the test could essentially never pass and every cleanup was
+        # discarded. That is why 506 px needles that despike removes in one call
+        # were still in the output with the de-spiking supposedly on.
+        #
+        # So resolve the sliver instead of refusing over it: in canonical order
+        # the later region gives it up, which leaves the pair properly disjoint
+        # rather than merely no worse than before. A snapped region gives up
+        # nothing -- that is its contract -- so its partner cedes instead.
         for i, a in enumerate(sel):
             for b in sel[i + 1:]:
-                worst = max(worst, _safe_intersection(spiked[a], spiked[b]).area)
-        if (not after.is_empty
-                and abs(after.area - before.area) <= max(before.area * 1e-9, 1e-6)
-                and worst <= 1e-6
+                ov = _safe_intersection(spiked[a], spiked[b])
+                if ov.is_empty or ov.area <= 0:
+                    continue
+                loser, keeper = (a, b) if b == snap_keep else (b, a)
+                trimmed = _safe_difference(spiked[loser], spiked[keeper])
+                if (not trimmed.is_empty
+                        and spiked[loser].area - trimmed.area
+                        <= max(1.0, spiked[loser].area * 1e-6)):
+                    spiked[loser] = trimmed
+        # The trim can fail on its own terms -- a region too small to afford the
+        # sliver keeps it -- so the overlap is checked explicitly rather than
+        # assumed. Cleaning may never leave the pair overlapping more than it
+        # already did; without this gate one pair went from 0.034 px to 3.663.
+        def _worst(gs):
+            w = 0.0
+            for i, x in enumerate(sel):
+                for y in sel[i + 1:]:
+                    if gs[x].is_empty or gs[y].is_empty:
+                        continue
+                    w = max(w, _safe_intersection(gs[x], gs[y]).area)
+            return w
+
+        base = unary_union([newg[n] for n in sel if not newg[n].is_empty]).buffer(0)
+        got = unary_union([g for g in spiked.values() if not g.is_empty]).buffer(0)
+        if (not got.is_empty
+                and abs(got.area - base.area) <= max(2.0, base.area * 1e-6)
+                and _worst(spiked) <= max(_worst(newg), 1e-6) + 0.5
                 and all(not spiked[n].is_empty or newg[n].is_empty for n in sel)):
             newg = spiked
     except Exception:
-        pass                                  # keep the un-despiked result
+        pass                                  # keep the un-cleaned result
+
+    # Collinear fluff on the free edges, where _simplify_shared could not do it.
+    # AFTER the needle removal, not before: thinning first changed the geometry
+    # enough that the snap no longer collapsed dft's 506 px needle.
+    newg = _thin_free_edges(newg, sel, FREE_EDGE_FLUFF,
+                            max(float(tol) * 0.25, 0.5))
 
     out = json.loads(json.dumps(features))
     for n in sel:

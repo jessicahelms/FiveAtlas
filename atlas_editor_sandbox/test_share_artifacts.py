@@ -190,6 +190,81 @@ for label, fs2, names in (
         check(f"{label}: {n} is valid", got[n].is_valid)
 
 # ---------------------------------------------------------------------------
+section("the answer must not depend on which region was clicked first")
+
+# Several passes used to settle a tie by list position, so clicking a then b
+# gave a different file from b then a. Measured on the real set before the fix:
+# 15 of the 41 pairs the app allows differed, dft+RSP by 32,772 px. On two plain
+# overlapping boxes it was 448,554 px.
+ORDER_CASES = (
+    ("two offset boxes", {"A": box(0, 0, 1000, 1000), "B": box(800, 0, 1800, 1000)}),
+    ("a wide and a narrow one", {"W": box(0, 0, 10000, 1000),
+                                 "N": box(9800, 0, 10800, 1000)}),
+    ("an L and a block", {"L": unary_union([box(0, 0, 200, 900), box(0, 0, 900, 200)]),
+                          "K": box(250, 250, 900, 900)}),
+    ("two annulus sectors", {"S1": sector(800, 600, 0, 350),
+                             "S2": sector(590, 400, 0, 350)}),
+    ("a speck and a slab", {"big": box(0, 0, 9000, 6000),
+                            "tiny": box(9010, 2990, 9050, 3030)}),
+)
+for label, geoms in ORDER_CASES:
+    fs = [feat(n, g) for n, g in geoms.items()]
+    ns = list(geoms)
+    for tol in (40, 150):
+        f = run(fs, ns, tol=float(tol))
+        r = run(fs, list(reversed(ns)), tol=float(tol))
+        sym = max(f[n].symmetric_difference(r[n]).area for n in ns)
+        check(f"{label}, reach {tol}: same answer either way", sym <= 1.0,
+              f"symdiff {sym:,.1f} px")
+
+# Three regions: every ordering has to agree, not just the two-region swap.
+import itertools                                                      # noqa: E402
+tri = {"P": box(0, 0, 1000, 1000), "Q": box(900, 0, 1900, 1000),
+       "R": box(0, 900, 1900, 1900)}
+fs = [feat(n, g) for n, g in tri.items()]
+base = run(fs, ["P", "Q", "R"], tol=40.0)
+worst = 0.0
+for perm in itertools.permutations(["P", "Q", "R"]):
+    got = run(fs, list(perm), tol=40.0)
+    worst = max(worst, max(base[n].symmetric_difference(got[n]).area for n in tri))
+check("all six orderings of three regions agree", worst <= 1.0,
+      f"worst symdiff {worst:,.1f} px")
+
+section("a snapped region comes back as it went in")
+# The docstring promises it; the audit measured it changing in 554 of 2,078
+# snapped runs. Cleaning now skips the snapped region entirely.
+for label, geoms in (("two offset boxes",
+                      {"A": box(0, 0, 1000, 1000), "B": box(1100, 0, 2100, 1000)}),
+                     ("an L and a block",
+                      {"L": unary_union([box(0, 0, 200, 900), box(0, 0, 900, 200)]),
+                       "K": box(250, 250, 900, 900)})):
+    fs = [feat(n, g) for n, g in geoms.items()]
+    ns = list(geoms)
+    for keep in ns:
+        got = run(fs, ns, tol=40.0, snap_to=keep)
+        moved = got[keep].symmetric_difference(geoms[keep]).area
+        check(f"{label}: snapping to {keep} leaves it alone", moved <= 1.0,
+              f"moved {moved:,.1f} px")
+
+section("a speck next to a big region does not inflate it")
+# The smallest region sets the Voronoi sampling density, so a 40x40 speck used
+# to make its neighbour come back with thousands of near-collinear vertices
+# (x89.6 on the real opt). What matters is absolute movement, not percentage:
+# a 31 px region growing by 27 px reads as "+90%" and means nothing.
+big, tiny = box(0, 0, 9000, 6000), box(9010, 2990, 9050, 3030)
+fs = [feat("big", big), feat("tiny", tiny)]
+got = run(fs, ["big", "tiny"], tol=40.0)
+check("the big region keeps a sane vertex count",
+      nv(got["big"]) / nv(big) <= 8.0,
+      f"{nv(big)} -> {nv(got['big'])} verts")
+check("the speck is not erased", got["tiny"].area >= 0.5 * tiny.area,
+      f"{tiny.area:,.0f} -> {got['tiny'].area:,.0f} px")
+check("...nor does it balloon", got["tiny"].area <= tiny.area + 4000.0,
+      f"{tiny.area:,.0f} -> {got['tiny'].area:,.0f} px")
+check("the pair is still disjoint",
+      T._safe_intersection(got["big"], got["tiny"]).area <= 1.0)
+
+# ---------------------------------------------------------------------------
 print()
 if fails:
     print(f"{len(fails)} FAILED: " + "; ".join(fails))
