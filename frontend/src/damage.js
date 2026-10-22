@@ -9,19 +9,33 @@
 // anatomy includes PAL.1, sAMY.2 and VL.1. Only a stem that resolves to a
 // designation counts; anything else is a region and must be left alone.
 
-// Case, spaces, underscores and hyphens are all ignored, so "Small Void",
-// "small_void" and "VoidSmall" are one thing. Same as _key() in damage.py.
-export const fold = (s) => String(s ?? '').replace(/[\s_-]+/g, '').toLowerCase();
+// Case, spaces, underscores, hyphens and dots are all ignored, so "Small Void",
+// "small_void" and "VoidSmall" are one thing — and so is the trailing dot a
+// merge used to leave behind ("separation."). Same as _key() in damage.py.
+export const fold = (s) => String(s ?? '').replace(/[\s_.-]+/g, '').toLowerCase();
 
 // { tag, number } for a damage name, { tag: null, number: null } for anything
 // else. `aliases` is the folded -> tag map served by the backend.
+// Trailing number groups are peeled ONE AT A TIME, mirroring parse_name(). The
+// app used to create names with two of them — a split of separation.7 was called
+// "separation.7 2", a merge of separation.1 and .2 was called "separation." — and
+// neither resolved, so the shape stopped counting as damage and the clean-up
+// tools deleted it. Fixed where the names are made, but such names are already
+// saved in people's files. Peeling more than one group loses track of which
+// shape it is, so the number comes back null.
 export function parseName(name, aliases) {
   const raw = String(name ?? '').trim();
-  const m = raw.match(/^(.*?)[.\s_-]*(\d+)\s*$/);
-  const stem = m ? m[1] : raw;
-  const number = m ? parseInt(m[2], 10) : null;
-  const tag = aliases ? aliases[fold(stem)] : null;
-  return tag ? { tag, number } : { tag: null, number: null };
+  let stem = raw;
+  const peeled = [];
+  for (let i = 0; i < 4; i += 1) {
+    const tag = aliases ? aliases[fold(stem)] : null;
+    if (tag) return { tag, number: peeled.length === 1 ? peeled[0] : null };
+    const m = stem.match(/^(.*?)[.\s_-]*(\d+)\s*$/);
+    if (!m) break;
+    stem = m[1];
+    peeled.push(parseInt(m[2], 10));
+  }
+  return { tag: null, number: null };
 }
 
 export function isDamage(name, aliases) {

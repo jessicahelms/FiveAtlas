@@ -2145,11 +2145,47 @@ def _index(features, id_prop):
 
 
 def _common_base_name(names):
-    """'Fiber Tracts 1' + 'Fiber Tracts 2' -> 'Fiber Tracts'; else the first name."""
-    stripped = [re.sub(r"[\s_\-]*\d+\s*$", "", str(n)).strip() for n in names]
+    """'Fiber Tracts 1' + 'Fiber Tracts 2' -> 'Fiber Tracts'; else the first name.
+
+    Damage shapes are the exception. Stripping the number off 'separation.1' and
+    'separation.2' left 'separation.', which is not a damage name at all: the
+    merged shape stopped counting as damage, and clean_lines -- which skips a
+    feature only when damage.is_damage() says so -- then deleted it. Merging
+    damage of one designation keeps the LOWEST number, so the result is still a
+    damage shape, and still the one the YAML's `voids` already points at.
+    """
+    names = [str(n) for n in names]
+    parsed = [_damage.parse_name(n) for n in names]
+    if parsed and all(t for t, _n in parsed) and len({t for t, _n in parsed}) == 1:
+        tag = parsed[0][0]
+        nums = sorted(n for _t, n in parsed if n is not None)
+        return _damage.format_name(tag, nums[0]) if nums else names[0]
+    stripped = [re.sub(r"[\s_\-]*\d+\s*$", "", n).strip() for n in names]
     if stripped and stripped[0] and all(s == stripped[0] for s in stripped):
         return stripped[0]
-    return str(names[0]) if names else "merged"
+    return names[0] if names else "merged"
+
+
+def _piece_name(name, taken, all_names):
+    """The name for the second piece of a split.
+
+    A DAMAGE shape has to stay one. '<name> 2' produced 'separation.7 2', which
+    is not a damage name, so the piece stopped counting as damage and
+    clean_lines deleted it on the next tidy-up. Damage numbering is global per
+    designation, so the new piece takes the next free number for its own.
+    """
+    tag, _n = _damage.parse_name(name)
+    if tag:
+        n = _damage.next_number(list(all_names), tag)
+        cand = _damage.format_name(tag, n)
+        while cand in taken:
+            n += 1
+            cand = _damage.format_name(tag, n)
+        return cand
+    i = 2
+    while f"{name} {i}" in taken:
+        i += 1
+    return f"{name} {i}"
 
 
 def _rename_props(feature, id_prop, name):
@@ -2340,10 +2376,7 @@ def split_region(features, id_prop, name, points, new_name=None, min_piece=100.0
     taken = set(idx)
     nameB = str(new_name).strip() if new_name else None
     if not nameB or nameB in taken:
-        i = 2
-        while f"{name} {i}" in taken:
-            i += 1
-        nameB = f"{name} {i}"
+        nameB = _piece_name(name, taken, idx)
 
     fA = json.loads(json.dumps(features[idx[name]]))
     fA["geometry"] = mapping(gA)

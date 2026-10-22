@@ -48,9 +48,11 @@ ENCLAVE = "enclave"
 
 
 def _key(s) -> str:
-    """Fold a written name to its tag: case, spaces, hyphens and underscores all
-    ignored, so 'Small Void', 'small_void' and 'VoidSmall' are one thing."""
-    return re.sub(r"[\s_\-]+", "", str(s or "")).lower()
+    """Fold a written name to its tag: case, spaces, hyphens, underscores and
+    DOTS all ignored, so 'Small Void', 'small_void' and 'VoidSmall' are one
+    thing -- and so is the trailing dot a merge used to leave behind
+    ('separation.'), which otherwise resolved to nothing at all."""
+    return re.sub(r"[\s_\-.]+", "", str(s or "")).lower()
 
 
 # Both the tag and the display name resolve to the tag.
@@ -81,12 +83,31 @@ def parse_name(name):
     Tolerates what people actually type: 'Separation 7', 'separation_7',
     'VoidSmall.2'. A name that does not resolve is an ordinary region and must be
     left alone -- never guess.
+
+    Trailing number groups are peeled ONE AT A TIME, because the app used to
+    create names with two of them: split_region called the second piece
+    '<name> 2', so splitting separation.7 gave 'separation.7 2', and merging
+    separation.1 with separation.2 gave 'separation.'. Neither resolved, so the
+    shape stopped counting as damage -- and clean_lines and section_outline,
+    which skip a feature only when is_damage() says so, DELETED it. Both are
+    fixed where the names are made, but names like that are already saved in
+    people's files and have to keep resolving here.
+
+    Peeling more than one group loses track of WHICH shape it is, so the number
+    comes back None and canonicalise() hands it a free one.
     """
     raw = str(name or "").strip()
-    m = re.match(r"^(.*?)[.\s_\-]*(\d+)\s*$", raw)
-    stem, num = (m.group(1), int(m.group(2))) if m else (raw, None)
-    tag = _ALIASES.get(_key(stem))
-    return (tag, num) if tag else (None, None)
+    stem, peeled = raw, []
+    for _ in range(4):                  # beyond that it is not a number suffix
+        tag = _ALIASES.get(_key(stem))
+        if tag:
+            return (tag, peeled[0] if len(peeled) == 1 else None)
+        m = re.match(r"^(.*?)[.\s_\-]*(\d+)\s*$", stem)
+        if not m:
+            break
+        stem = m.group(1)
+        peeled.append(int(m.group(2)))
+    return (None, None)
 
 
 def is_damage(name) -> bool:
