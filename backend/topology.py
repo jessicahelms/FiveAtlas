@@ -2543,10 +2543,64 @@ def merge_regions(features, id_prop, names, new_name=None, seam_tol=40.0):
             raw = _safe_difference(closed, merged)
         except Exception:
             raw = None
+        # Ground belonging to regions that are NOT being merged. Sealing a seam
+        # must never swallow a region sitting in it: measured, a 14 px region in
+        # a 20 px seam was taken 100% into the merged body while its own feature
+        # was left exactly where it was, so two regions ended up claiming the
+        # same ground. partition_regions has defended against this for a while;
+        # this branch never did.
+        #
+        # Except a region that BLANKETS the merge. `hemi` is the whole-hemisphere
+        # outline and contains every seam there is, so defending it would stop
+        # any seam ever sealing -- which is the one thing this branch exists to
+        # do. Same rule partition_regions applies.
+        protected = Polygon()
+        try:
+            blanket_at = 0.98 * closed.area if closed.area > 0 else 0.0
+            keep_out = []
+            for f in features:
+                nm = (f.get("properties") or {}).get(id_prop)
+                if nm is None or str(nm) in sel:
+                    continue
+                g = shape(f["geometry"])
+                if not g.is_valid:
+                    g = g.buffer(0)
+                if g.is_empty:
+                    continue
+                if blanket_at > 0 and _safe_intersection(g, closed).area >= blanket_at:
+                    continue
+                keep_out.append(g)
+            if keep_out:
+                protected = _safe_difference(unary_union(keep_out).buffer(0), merged)
+        except Exception:
+            protected = Polygon()
+
         fill = []
         for c in (_polys(raw) if raw is not None and not raw.is_empty else []):
             if not c.buffer(-w / 2.0).is_empty:
                 continue                      # a fat pocket, not a hairline seam
+            # ANOTHER REGION STANDING IN THE SEAM means these two are not
+            # adjacent here -- it is between them -- so the seam is left alone.
+            # Not bridged round it either: trimming the intruder out and sealing
+            # what is left would still join the two bodies above and below it,
+            # inventing a border where a third region sits.
+            #
+            # The threshold is ABSOLUTE and small, not a share of the corridor.
+            # A share lets a genuinely tiny region be swallowed: a 0.3 px wide,
+            # 60 px sliver sitting in a 10,000 px corridor is under 1% of it and
+            # was eaten whole. One square pixel is well above the fractions of a
+            # pixel a corridor grazes its neighbours' boundaries with as a matter
+            # of course, and well below any region somebody drew. Erring towards
+            # "do not seal" is the safe way round: an unsealed seam shows the old
+            # border and can be widened or the intruder removed, where a
+            # swallowed region is somebody's work gone.
+            if not protected.is_empty:
+                try:
+                    stood_in = _safe_intersection(protected, c).area
+                except Exception:
+                    stood_in = c.area
+                if stood_in > 1.0:
+                    continue
             collar = c.buffer(1.0)
             if sum(1 for b in bodies if b.intersects(collar)) >= 2:
                 fill.append(c)

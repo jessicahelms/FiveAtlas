@@ -512,7 +512,20 @@ export default function Sidebar({
                 <div className="hint dim">
                   The circle on the map is that wide, at the narrowest point
                   between your picks — a gap that fits inside it closes, a wider
-                  one is left alone.
+                  one is left alone. A gap with another region standing in it is
+                  never bridged, however wide the reach.
+                </div>
+                {/* Merge takes the same number but uses it differently: it
+                    closes by HALF the reach and then keeps only corridors
+                    narrower than that again, so its real limit is a quarter of
+                    the figure above. Measured at reach 20/40/100/300: seams of
+                    10/20/50/150 px sealed, against a label claiming
+                    40/80/200/600. Saying so beats quietly meaning something
+                    else with the same slider. */}
+                <div className="hint dim">
+                  <b>Merge into one</b> uses this slider too, but only dissolves
+                  a hairline seam — up to <b>{Math.round(snapTol / 2)} px</b>
+                  {' '}across, a quarter of the figure above.
                 </div>
               </div>
             )}

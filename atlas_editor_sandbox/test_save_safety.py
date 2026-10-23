@@ -175,9 +175,14 @@ def reader():
     while not stop.is_set():
         try:
             json.loads(ep.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            pass                               # a rename is not atomic on the
-                                               # directory entry everywhere
+        except (FileNotFoundError, PermissionError):
+            # The rename window. On Windows a reader that opens the target at
+            # the instant os.replace runs gets PermissionError, and on some
+            # filesystems the directory entry is briefly absent. Neither is a
+            # PARTIAL read, which is the property under test -- failing to open
+            # the file is not the same as reading half of it. Caught by name
+            # rather than broadly so a genuine corrupt read still shows up.
+            pass
         except Exception as e:
             bad.append(type(e).__name__)
         time.sleep(0.001)
