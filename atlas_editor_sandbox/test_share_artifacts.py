@@ -240,20 +240,78 @@ check("all six orderings of three regions agree", worst <= 1.0,
       f"worst symdiff {worst:,.1f} px")
 
 section("a snapped region comes back as it went in")
-# The docstring promises it; the audit measured it changing in 554 of 2,078
-# snapped runs. Cleaning now skips the snapped region entirely.
-for label, geoms in (("two offset boxes",
-                      {"A": box(0, 0, 1000, 1000), "B": box(1100, 0, 2100, 1000)}),
-                     ("an L and a block",
-                      {"L": unary_union([box(0, 0, 200, 900), box(0, 0, 900, 200)]),
-                       "K": box(250, 250, 900, 900)})):
+
+# EVERY FIXTURE HERE HAS A GAP. The previous version of this section used
+# touching boxes, so there was nothing for the snapped region to absorb and the
+# checks passed while the real behaviour was broken: on the dataset, snapping
+# moved the kept region by up to 12,362 px, almost all of it GAINED, because it
+# was taking the bridged gap instead of its partner. A fixture with no gap
+# cannot see that, which is the whole reason it went unnoticed.
+SNAP_CASES = (
+    ("two boxes 60 px apart", {"A": box(0, 0, 1000, 1000),
+                               "B": box(1060, 0, 2060, 1000)}),
+    ("a wide pair, 40 px apart", {"W": box(0, 0, 6000, 800),
+                                  "N": box(6040, 0, 7040, 800)}),
+    ("an L and a block, 50 px apart",
+     {"L": unary_union([box(0, 0, 200, 900), box(0, 0, 900, 200)]),
+      "K": box(250, 250, 900, 900)}),
+    ("a ribbon and a slab", {"R": box(0, 0, 4000, 30),
+                             "S": box(0, 70, 4000, 900)}),
+)
+for label, geoms in SNAP_CASES:
     fs = [feat(n, g) for n, g in geoms.items()]
     ns = list(geoms)
     for keep in ns:
+        other = [n for n in ns if n != keep][0]
         got = run(fs, ns, tol=40.0, snap_to=keep)
         moved = got[keep].symmetric_difference(geoms[keep]).area
-        check(f"{label}: snapping to {keep} leaves it alone", moved <= 1.0,
-              f"moved {moved:,.1f} px")
+        check(f"{label}: snapping to {keep} leaves it untouched", moved <= 1.0,
+              f"moved {moved:,.3f} px")
+        # the gap has to go somewhere, and it must be the partner
+        gained = T._safe_difference(got[other], geoms[other]).area
+        check(f"...and {other} takes the gap", gained > 0,
+              f"{other} gained {gained:,.1f} px")
+        ov = T._safe_intersection(got[keep], got[other]).area
+        check(f"...with no overlap", ov <= 1.0, f"{ov:.3f} px")
+        # and the seam must lie ON the kept region's own outline
+        arc = got[keep].boundary.intersection(got[other].boundary)
+        off = (arc.difference(geoms[keep].boundary.buffer(1e-9)).length
+               if not arc.is_empty else 0.0)
+        check(f"...and the seam runs along {keep}'s own edge", off <= 1e-6,
+              f"{off:.9f} px of it strays off")
+        # nothing unclaimed between them
+        closed = unary_union(list(geoms.values())).buffer(40.0, join_style=2) \
+            .buffer(-40.0, join_style=2).buffer(0)
+        gap = T._safe_difference(closed, unary_union(list(geoms.values())))
+        void = T._safe_difference(gap, unary_union([got[keep], got[other]])).area
+        check(f"...and no void is left behind", void <= 1.0, f"{void:,.1f} px")
+
+# Three regions: snapping to one must not leave the freed ground unclaimed.
+tri = {"P": box(0, 0, 1000, 1000), "Q": box(1060, 0, 2060, 1000),
+       "R": box(0, 1060, 2060, 2060)}
+fs = [feat(n, g) for n, g in tri.items()]
+got = run(fs, list(tri), tol=40.0, snap_to="P")
+check("with three regions, the snapped one is still untouched",
+      got["P"].symmetric_difference(tri["P"]).area <= 1.0,
+      f"moved {got['P'].symmetric_difference(tri['P']).area:,.3f} px")
+check("...and the others are disjoint from it",
+      max(T._safe_intersection(got["P"], got[n]).area for n in ("Q", "R")) <= 1.0)
+
+# A partner that lies INSIDE the kept outline cannot be honoured, and must be
+# refused rather than erased.
+fs = [feat("outer", box(0, 0, 2000, 2000)), feat("inner", box(500, 500, 900, 900))]
+try:
+    run(fs, ["outer", "inner"], tol=40.0, snap_to="outer")
+    refused = False
+    detail = "it went ahead"
+except ValueError as e:
+    # The wording is whichever guard gets there first -- mine, or the older
+    # "leaves the other region(s) nothing". What matters is that it refuses in
+    # words rather than deleting a region to honour the snap.
+    refused = True
+    detail = str(e)[:62]
+check("snapping onto a region that contains its partner is refused", refused,
+      detail)
 
 section("a speck next to a big region does not inflate it")
 # The smallest region sets the Voronoi sampling density, so a 40x40 speck used

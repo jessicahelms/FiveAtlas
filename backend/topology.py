@@ -2280,6 +2280,62 @@ def partition_regions(features, id_prop, names, tol=40.0, precision=PARTITION_GR
     newg = _thin_free_edges(newg, sel, FREE_EDGE_FLUFF,
                             max(float(tol) * 0.25, 0.5))
 
+    # SNAP: the kept region goes back to exactly the outline it arrived with,
+    # and its partner takes everything the snap gives up.
+    #
+    # Done LAST, on purpose. Every pass above can move a boundary a little --
+    # the partition hands out territory, _close_voids hands out leftovers, the
+    # thinning rebuilds rings -- and chasing each one separately is how this
+    # stayed broken. Restoring the exact outline here makes all of that
+    # irrelevant for the snapped region, and because the partner is then
+    # `partner - exact`, the seam is the kept region's own boundary by
+    # construction rather than by reconstruction, so the two coincide to the
+    # last bit.
+    #
+    # The ground the snap gives up has to go somewhere: left unclaimed it is a
+    # black void between two regions that are supposed to tile, which is the
+    # complaint that started all of this. It goes to the partner -- or is split
+    # between the partners by the same nearest-region rule as everything else,
+    # when more than two regions were picked.
+    if snap_keep is not None and snap_keep in newg:
+        exact = raw_bodies.get(snap_keep)
+        if exact is not None and not exact.is_empty:
+            if not exact.is_valid:
+                exact = exact.buffer(0)
+        if exact is not None and not exact.is_empty:
+            others = [n for n in sel if n != snap_keep]
+            freed = _safe_difference(newg[snap_keep], exact)
+            trimmed = {}
+            for n in others:
+                t = _safe_difference(newg[n], exact)
+                # Never erase the partner to honour a snap. It can happen: the
+                # partner may lie wholly inside the kept outline when the two
+                # overlapped to begin with. Better to refuse the snap than to
+                # delete somebody's region, and the caller already reports a
+                # ValueError from here in words.
+                if t.is_empty and not newg[n].is_empty:
+                    raise ValueError(
+                        f"snapping the seam onto {snap_keep!r} would erase "
+                        f"{n!r}, which lies inside it; nothing was changed")
+                trimmed[n] = t
+            if not freed.is_empty and others:
+                if len(others) == 1:
+                    trimmed[others[0]] = unary_union(
+                        [trimmed[others[0]], freed]).buffer(0)
+                else:
+                    live = {n: g for n, g in trimmed.items() if not g.is_empty}
+                    try:
+                        share = _nearest_partition(freed, live, spacing) \
+                            if len(live) > 1 else {next(iter(live)): freed}
+                    except Exception:
+                        share = {}
+                    for n, g in share.items():
+                        if not g.is_empty:
+                            trimmed[n] = unary_union([trimmed[n], g]).buffer(0)
+            newg[snap_keep] = exact
+            for n, g in trimmed.items():
+                newg[n] = g
+
     out = json.loads(json.dumps(features))
     for n in sel:
         _write_body(out, features, idx[n], newg[n])
