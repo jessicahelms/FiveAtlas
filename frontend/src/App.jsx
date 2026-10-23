@@ -488,6 +488,17 @@ export default function App() {
   // resample: thin the shared border after Share borders
   const [resampleTol, setResampleTol] = useState(150);
   const [snapTol, setSnapTol] = useState(40);       // px reach for Share borders / Merge gap bridging
+  // Off (the default): a gap pixel is filled only if its line to BOTH picks is
+  // clear, so the strips beside a region standing in the gap are left alone.
+  // On: every free pixel in the gap is filled. Applies to Share borders and
+  // Merge alike, so the two tools never answer the same question differently.
+  // Remembered per browser -- a working preference, not part of the file.
+  const [fillAll, setFillAll] = useState(() => {
+    try { return localStorage.getItem('fa.fillAll') === '1'; } catch (e) { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('fa.fillAll', fillAll ? '1' : '0'); } catch (e) { /* private window */ }
+  }, [fillAll]);
   const [resample, setResample] = useState(null);   // { counts, fc, tol }
   const resampleTimer = useRef(null);
   const resampleUndoRef = useRef(null);   // handles as they were before previewing
@@ -1445,7 +1456,7 @@ export default function App() {
       ? snapTo : null;
     setBusy(true); setError(null);
     try {
-      const res = await api.partitionRegions(dsId, borderPicks, fc, snapTol, snap);
+      const res = await api.partitionRegions(dsId, borderPicks, fc, snapTol, snap, fillAll);
       let newFc = asFc(res, fc);
 
       // Sharing leaves a Voronoi-dense, unevenly spaced border, so even it out
@@ -1516,7 +1527,7 @@ export default function App() {
       // sentence the backend wrote, not as `Error: 422: {"detail":"…"}`.
       setBorderMsg(`Share failed: ${apiDetail(e)}`);
     } finally { setBusy(false); }
-  }, [dsId, fc, borderPicks, commit, resampleTol, snapTol]);
+  }, [dsId, fc, borderPicks, commit, resampleTol, snapTol, fillAll]);
 
   // Preview a resample: the backend returns both the counts and the resulting FC,
   // so Apply commits what was already computed. Debounced -- the slider fires a
@@ -1594,7 +1605,7 @@ export default function App() {
     if (borderPicks.length < 2) return;
     setBusy(true); setError(null);
     try {
-      const res = await api.mergeRegions(dsId, borderPicks, fc, undefined, snapTol);
+      const res = await api.mergeRegions(dsId, borderPicks, fc, undefined, snapTol, fillAll);
       const newFc = asFc(res, fc);
       commit(newFc); setBaseline(newFc);
       setBorderPicks([]); setBorderArc(null);
@@ -1608,7 +1619,7 @@ export default function App() {
     } catch (e) {
       setBorderMsg(`Merge failed: ${String(e).replace(/^Error:\s*/, '')}`);
     } finally { setBusy(false); }
-  }, [dsId, fc, borderPicks, commit, snapTol]);
+  }, [dsId, fc, borderPicks, commit, snapTol, fillAll]);
 
   // One selection rule for the map and the sidebar list, in the shape people
   // already know from file managers: plain click replaces, Ctrl/Cmd-click adds
@@ -2847,6 +2858,7 @@ export default function App() {
                 onClearBorder={clearBorder} onShareBorders={doShareBorders}
                 onMerge={doMerge} splitMsg={splitMsg}
                 snapTol={snapTol} onSnapTol={setSnapTol}
+                fillAll={fillAll} onFillAll={setFillAll}
                 resample={resample} resampleTol={resampleTol}
                 onResampleTol={previewResample} onApplyResample={applyResample}
                 onCancelResample={cancelResample}

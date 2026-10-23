@@ -16,7 +16,8 @@ import re
 
 from shapely import set_precision
 from shapely.geometry import shape, mapping, LineString, Polygon, Point, MultiPoint
-from shapely.ops import linemerge, polygonize, split, unary_union, voronoi_diagram
+from shapely.ops import (linemerge, nearest_points, polygonize, split, unary_union,
+                         voronoi_diagram)
 from shapely.strtree import STRtree
 
 # Damage shapes sit INSIDE the tissue, so anything that reasons about the extent
@@ -1785,6 +1786,7 @@ PARTITION_GRID = 0.01
 
 
 def partition_regions(features, id_prop, names, tol=40.0, precision=PARTITION_GRID,
+                      fill_all=False,
                       simplify=None, snap_to=None):
     """Make the named regions tile cleanly: fill small gaps between them, remove
     small overlaps, and give every pair a single shared border. Each point of the
@@ -1901,6 +1903,17 @@ def partition_regions(features, id_prop, names, tol=40.0, precision=PARTITION_GR
         # area claim another unselected region.
         return unary_union([U, area.difference(protected)]).buffer(0)
 
+    # STRICT (the default): ground in the shadow of a region standing in the
+    # gap is left alone as well as that region's own ground -- a pixel is filled
+    # only if its line to each pick is clear. Added to `protected` so the
+    # territory, the partition AND the void filling all respect it; leaving it
+    # out of T alone would let _close_voids hand it straight back. `fill_all`
+    # fills every free pixel instead, which is what this always did before.
+    if not fill_all and not protected.is_empty:
+        sh = _shadows_between(protected, [geoms[n] for n in sel],
+                              _safe_difference(T, U), tol)
+        if not sh.is_empty:
+            protected = unary_union([protected, sh]).buffer(0)
     T = _protect(T)
     # De-densify the territory outline BEFORE partitioning: a sparser T gives both
     # sparser free (non-shared) edges and a sparser Voronoi midline, done at the
@@ -2336,6 +2349,53 @@ def partition_regions(features, id_prop, names, tol=40.0, precision=PARTITION_GR
             for n, g in trimmed.items():
                 newg[n] = g
 
+    # FINAL needle sweep, after every pass. Any of them can leave one: in strict
+    # mode the shadow carved out of the territory left an 80 px needle, exactly
+    # 0.000000 px wide, on opt beside sAMY.4 -- downstream of the de-spike
+    # above, which had already run. A needle encloses no area, so removing one
+    # cannot move a region; that is checked anyway, as is that no new overlap
+    # opens, and the snapped region is left exactly as it is.
+    for n in sel:
+        if n == snap_keep or newg[n].is_empty:
+            continue
+        try:
+            d = despike(newg[n])
+        except Exception:
+            continue
+        if d.is_empty or abs(d.area - newg[n].area) > max(1.0, newg[n].area * 1e-6):
+            continue
+        clash = False
+        for m in sel:
+            if m == n or newg[m].is_empty:
+                continue
+            try:
+                # No new overlap at all, beyond float noise. Allowing half a
+                # pixel here took the worst pairwise overlap from 0.000 to 0.308.
+                if (_safe_intersection(d, newg[m]).area
+                        > _safe_intersection(newg[n], newg[m]).area + 1e-6):
+                    clash = True
+                    break
+            except Exception:
+                clash = True
+                break
+        if not clash:
+            newg[n] = d
+
+    # ...and any DEGENERATE part left behind. Taking a needle off can leave its
+    # tip as a separate polygon of no real area: opt beside sAMY.4 came out in
+    # two parts, the second 0.0 px. Nothing anybody draws is below half a pixel,
+    # so a part that small is never anatomy, and removing one takes no ground
+    # from anyone. The snapped region is still left exactly as it is.
+    for n in sel:
+        if n == snap_keep or newg[n].is_empty:
+            continue
+        parts = _polys(newg[n])
+        if len(parts) < 2:
+            continue
+        keep = [p for p in parts if p.area >= 0.5]
+        if keep and len(keep) < len(parts):
+            newg[n] = keep[0] if len(keep) == 1 else unary_union(keep).buffer(0)
+
     out = json.loads(json.dumps(features))
     for n in sel:
         _write_body(out, features, idx[n], newg[n])
@@ -2511,7 +2571,75 @@ def concat_region_files(groups, id_prop, src_prop=SRC_PROP):
     return {"features": feats, "sources": sources, "shared": shared}
 
 
-def merge_regions(features, id_prop, names, new_name=None, seam_tol=40.0):
+def _intruder_shadow(blocker, a, b, zone):
+    """The part of `zone` that `blocker` hides from region a or from region b.
+
+    "Only fill ground with nothing in between" means a pixel in the gap is
+    filled only if its straight line to EACH of the two regions is clear.
+    Beside a region standing in the gap one of those lines runs through it, so
+    that ground is in its shadow and is left alone. With nothing in the way the
+    strict and fill-all answers are the same; they differ exactly in the strips
+    beside an intruder, which fill-all claims and strict does not.
+
+    For each part of the blocker, its shadow toward a region is the hull of the
+    part and its projection onto that region -- the strip it sweeps across the
+    gap. Exact for a straight gap and an approximation for a curved one, which
+    is why it is clipped to `zone`, the bridgeable gap, and never allowed to
+    reach out into anybody's own ground.
+    """
+    hulls = []
+    for part in _polys(blocker):
+        if len(part.exterior.coords) > 400:      # bound the projection work
+            part = part.simplify(1.0)
+        ring = list(part.exterior.coords)
+        for side in (a, b):
+            if side is None or side.is_empty:
+                continue
+            pts = list(ring)
+            for c in ring:
+                try:
+                    q = nearest_points(Point(c), side)[1]
+                    pts.append((q.x, q.y))
+                except Exception:
+                    pass
+            if len(pts) >= 3:
+                try:
+                    hulls.append(MultiPoint(pts).convex_hull)
+                except Exception:
+                    pass
+    if not hulls:
+        return Polygon()
+    return _safe_intersection(unary_union(hulls).buffer(0), zone)
+
+
+def _shadows_between(protected, bodies, gap, reach):
+    """Every intruder's shadow across `gap`, for every pair of `bodies`.
+
+    Only protected ground within `reach` of the gap is considered a blocker --
+    a region far away cannot stand in it -- and the result is clipped to the
+    gap, so this can only ever withhold gap ground, never anyone's own."""
+    if protected is None or protected.is_empty or gap is None or gap.is_empty:
+        return Polygon()
+    try:
+        near = _safe_intersection(protected, gap.buffer(max(float(reach), 1.0)))
+    except Exception:
+        return Polygon()
+    if near.is_empty:
+        return Polygon()
+    out = []
+    for i, a in enumerate(bodies):
+        for b in bodies[i + 1:]:
+            try:
+                sh = _intruder_shadow(near, a, b, gap)
+            except Exception:
+                continue
+            if not sh.is_empty:
+                out.append(sh)
+    return unary_union(out).buffer(0) if out else Polygon()
+
+
+def merge_regions(features, id_prop, names, new_name=None, seam_tol=40.0,
+                  fill_all=False):
     """Combine the named regions into ONE region -- the shared border DISSOLVES.
 
     A geometric union alone is not enough for that: in these files adjacent
@@ -2575,39 +2703,55 @@ def merge_regions(features, id_prop, names, new_name=None, seam_tol=40.0):
         except Exception:
             protected = Polygon()
 
+        # STRICT (the default): leave the strips beside an intruder alone too,
+        # not just its own ground. `fill_all` seals every free pixel of the seam.
+        if not fill_all and not protected.is_empty and raw is not None \
+                and not raw.is_empty:
+            sh = _shadows_between(protected, bodies, raw, w)
+            if not sh.is_empty:
+                protected = unary_union([protected, sh]).buffer(0)
+
         fill = []
-        for c in (_polys(raw) if raw is not None and not raw.is_empty else []):
-            if not c.buffer(-w / 2.0).is_empty:
-                continue                      # a fat pocket, not a hairline seam
-            # ANOTHER REGION STANDING IN THE SEAM means these two are not
-            # adjacent here -- it is between them -- so the seam is left alone.
-            # Not bridged round it either: trimming the intruder out and sealing
-            # what is left would still join the two bodies above and below it,
-            # inventing a border where a third region sits.
+        for c0 in (_polys(raw) if raw is not None and not raw.is_empty else []):
+            # Another region's ground comes OUT of the corridor first, and what
+            # is left is then judged on its own merits. So the clear stretches of
+            # a seam seal and the stretch the intruder occupies does not, which
+            # is the same answer partition_regions gives for a gap with a region
+            # standing in part of it. What must never happen -- and did, taking a
+            # 14 px region in a 20 px seam 100% into the merged body while its own
+            # feature stayed put -- is the intruder being sealed over.
             #
-            # The threshold is ABSOLUTE and small, not a share of the corridor.
-            # A share lets a genuinely tiny region be swallowed: a 0.3 px wide,
-            # 60 px sliver sitting in a 10,000 px corridor is under 1% of it and
-            # was eaten whole. One square pixel is well above the fractions of a
-            # pixel a corridor grazes its neighbours' boundaries with as a matter
-            # of course, and well below any region somebody drew. Erring towards
-            # "do not seal" is the safe way round: an unsealed seam shows the old
-            # border and can be widened or the intruder removed, where a
-            # swallowed region is somebody's work gone.
+            # Judging each piece AFTER the trim matters: taking somebody's ground
+            # out of a corridor can leave something that is no longer a hairline,
+            # or that no longer reaches two of the merged bodies, and neither is a
+            # seam to seal.
+            pieces = [c0]
             if not protected.is_empty:
                 try:
-                    stood_in = _safe_intersection(protected, c).area
+                    pieces = [p for p in _polys(_safe_difference(c0, protected))
+                              if p.area > 0]
                 except Exception:
-                    stood_in = c.area
-                if stood_in > 1.0:
-                    continue
-            collar = c.buffer(1.0)
-            if sum(1 for b in bodies if b.intersects(collar)) >= 2:
-                fill.append(c)
+                    pieces = []
+            for c in pieces:
+                if not c.buffer(-w / 2.0).is_empty:
+                    continue                  # a fat pocket, not a hairline seam
+                collar = c.buffer(1.0)
+                if sum(1 for b in bodies if b.intersects(collar)) >= 2:
+                    fill.append(c)
         if fill:
             merged = unary_union([merged] + fill).buffer(0)
             merged = _snap_polys(merged, 0.01)     # fuse the hairline join
             merged = clean_geom(merged, smooth=False)
+            # LAST: take anybody else's ground back off. The grid snap and the
+            # clean both nudge the boundary outward a hair, which is enough to
+            # cover half of a thin neighbour -- measured, 30 px of a 0.3 px wide,
+            # 60 px sliver ended up under the merged body even though the
+            # corridor fill had correctly left it alone. Trimming the corridors
+            # is not sufficient on its own; this is.
+            if not protected.is_empty:
+                m2 = _safe_difference(merged, protected)
+                if not m2.is_empty and m2.area >= 0.5 * merged.area:
+                    merged = m2
             sealed = float(sum(c.area for c in fill))
 
     # EVERY merge, not just the sealed ones: a union of outlines that nearly

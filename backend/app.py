@@ -1712,7 +1712,8 @@ async def regions_partition(ds_id: str, request: Request):
         raise HTTPException(422, topology.containment_message(contained))
     try:
         res = topology.partition_regions(fc["features"], d["id_prop"], names,
-                                         tol=tol, snap_to=snap_to)
+                                         tol=tol, snap_to=snap_to,
+                                         fill_all=bool(body.get("fillAll")))
     except ValueError as e:
         raise HTTPException(422, str(e))
     except Exception as e:
@@ -1807,7 +1808,8 @@ async def regions_merge(ds_id: str, request: Request):
     fc = body.get("fc") or geo.load_regions(ds_id)[0]
     try:
         res = topology.merge_regions(fc["features"], d["id_prop"], names, body.get("name"),
-                                     seam_tol=float(body.get("tol", 40.0)))
+                                     seam_tol=float(body.get("tol", 40.0)),
+                                     fill_all=bool(body.get("fillAll")))
     except ValueError as e:
         raise HTTPException(422, str(e))
     except Exception as e:

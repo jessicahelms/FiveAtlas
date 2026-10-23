@@ -97,18 +97,19 @@ check("the main seam sealed; the far lobe stays a separate part",
       res["parts"] == 2, f"parts={res['parts']}")
 
 # ---------------------------------------------------------------------------
-print("\na region standing in the seam is not merged over")
+print("\na region standing in the seam is never merged over")
 
 # Sealing a hairline seam used to take in anything sitting in it: a 14 px region
 # in a 20 px seam was absorbed 100% into the merged body while its own feature
-# stayed exactly where it was, so two regions claimed the same ground. A region
-# between the two is a region BETWEEN them -- they are not adjacent there, so
-# the seam is left alone. Not bridged round the intruder either: trimming it out
-# and sealing what is left would still join the two bodies above and below it.
+# stayed where it was, so two regions claimed the same ground. Now it is never
+# taken, in either mode. What the modes decide is the strips BESIDE it:
+#   strict (default)  a seam pixel seals only if its line to both bodies is
+#                     clear, so the strips beside the intruder stay unsealed
+#   fill_all          every free pixel of the seam seals
 from shapely.ops import unary_union                 # noqa: E402
 
 
-def merge_with(gap, probe=None, tol=40.0, blanket=False):
+def merge_with(gap, probe=None, tol=40.0, blanket=False, fill_all=False):
     fs = [feat("A", box(0, 0, 1000, 500)),
           feat("B", box(1000 + gap, 0, 2000, 500))]
     pg = None
@@ -118,34 +119,53 @@ def merge_with(gap, probe=None, tol=40.0, blanket=False):
         y0, y1, wd = probe
         pg = box(1000 + (gap - wd) / 2.0, y0, 1000 + (gap + wd) / 2.0, y1)
         fs.append(feat("probe", pg))
-    res = T.merge_regions(fs, "name", ["A", "B"], seam_tol=tol)
+    res = T.merge_regions(fs, "name", ["A", "B"], seam_tol=tol, fill_all=fill_all)
     g = merged_geom(res)
-    eaten = (T._safe_intersection(g, pg).area if pg is not None else 0.0)
+    taken = T._safe_intersection(g, pg).area if pg is not None else 0.0
     still = None
+    beside = 0.0
     if pg is not None:
         still = shape(next(f for f in res["features"]
                            if f["properties"]["name"] == "probe")["geometry"])
-    return res, g, eaten, still
+        y0, y1, wd = probe
+        strip = box(1000, y0, 1000 + gap, y1).difference(pg)
+        beside = T._safe_intersection(g, strip).area
+    return res, g, taken, still, beside
 
 
-res, g, _, _ = merge_with(12)
-check("with nothing in the seam it still seals", res["parts"] == 1,
+res, g, _, _, _ = merge_with(12)
+check("with nothing in the seam it seals", res["parts"] == 1,
       f"parts={res['parts']}, sealed {res.get('sealed', 0):,.0f} px")
 
 for label, gap, probe in (("an 8 px region in a 12 px seam", 12, (150, 350, 8)),
                           ("a 14 px region in a 20 px seam", 20, (150, 350, 14)),
                           ("one spanning only part of it", 20, (200, 260, 14)),
                           ("a 0.3 px wide sliver region", 20, (150, 350, 0.3))):
-    res, g, eaten, still = merge_with(gap, probe)
-    check(f"{label}: none of it is taken", eaten <= 1.0, f"{eaten:,.1f} px taken")
-    check(f"...and the seam is left alone", res["parts"] == 2,
-          f"parts={res['parts']}, sealed {res.get('sealed', 0):,.0f} px")
-    check(f"...and its own geometry is untouched",
-          abs(still.area - (probe[1] - probe[0]) * probe[2]) < 0.01)
+    for fill_all in (False, True):
+        mode = "fill-all" if fill_all else "strict"
+        res, g, taken, still, beside = merge_with(gap, probe, fill_all=fill_all)
+        check(f"{label} [{mode}]: none of it is taken", taken <= 1.0,
+              f"{taken:,.1f} px taken")
+        check(f"...its own geometry is untouched",
+              abs(still.area - (probe[1] - probe[0]) * probe[2]) < 0.01)
+        check(f"...and the clear stretches still seal", res["parts"] == 1,
+              f"parts={res['parts']}")
+        if fill_all:
+            check(f"...and the strips beside it seal too", beside > 1.0 or probe[2] >= gap - 0.5,
+                  f"{beside:,.1f} px sealed beside it")
+        else:
+            check(f"...but the strips beside it do NOT", beside <= 1.0,
+                  f"{beside:,.1f} px sealed beside it")
+
+for fill_all in (False, True):
+    res, g, taken, _, _ = merge_with(20, (0, 500, 14), fill_all=fill_all)
+    check(f"a region spanning the WHOLE seam blocks it [{'fill-all' if fill_all else 'strict'}]",
+          res["parts"] == 2 and taken <= 1.0,
+          f"parts={res['parts']}, {taken:,.1f} px taken")
 
 # hemi contains every seam there is, so defending it would stop any seam ever
 # sealing -- the one thing this is for.
-res, g, _, _ = merge_with(12, blanket=True)
+res, g, _, _, _ = merge_with(12, blanket=True)
 check("a region that wraps the whole merge does not block it",
       res["parts"] == 1, f"parts={res['parts']}")
 
@@ -155,7 +175,7 @@ print("\nthe reach means a quarter of what the slider says")
 for tol, want in ((20.0, 10), (40.0, 20), (100.0, 50)):
     widest = 0
     for gap in range(2, int(tol * 1.4), 2):
-        res, g, _, _ = merge_with(gap, tol=tol)
+        res, g, _, _, _ = merge_with(gap, tol=tol)
         if res["parts"] == 1:
             widest = gap
         else:

@@ -332,6 +332,40 @@ check("the pair is still disjoint",
       T._safe_intersection(got["big"], got["tiny"]).area <= 1.0)
 
 # ---------------------------------------------------------------------------
+section("a region standing in the gap: strict leaves its shadow, fill-all fills it")
+
+# Two regions 40 px apart, a third standing in the middle 200 px of the 500 px
+# gap. Its own ground is never taken in either mode. Strict fills a gap pixel
+# only if its line to BOTH picks is clear, so the strips beside the intruder
+# (2 x 10 x 200 = 4,000 px) stay empty; fill-all fills them.
+A, B = box(0, 0, 1000, 500), box(1040, 0, 2000, 500)
+P = box(1010, 150, 1030, 350)
+GAP = box(1000, 0, 1040, 500)
+fs = [feat("A", A), feat("B", B), feat("P", P), feat("hemi", box(-200, -200, 2200, 700))]
+for fill_all, want_unclaimed in ((False, 4000.0), (True, 0.0)):
+    mode = "fill-all" if fill_all else "strict"
+    got = run(fs, ["A", "B"], tol=40.0, fill_all=fill_all)
+    keep = T._safe_intersection(
+        unary_union([shape(f["geometry"]) for f in T.partition_regions(
+            fs, "name", ["A", "B"], tol=40.0, fill_all=fill_all)["features"]
+            if f["properties"]["name"] == "P"]), P).area
+    un = T._safe_difference(GAP, unary_union([got["A"], got["B"], P])).area
+    check(f"[{mode}] the region in the gap keeps all its ground", keep >= P.area - 1.0,
+          f"{keep:,.0f} of {P.area:,.0f} px")
+    check(f"[{mode}] A and B still meet where nothing is between them",
+          got["A"].boundary.intersection(got["B"]).length >= 290.0,
+          f"{got['A'].boundary.intersection(got['B']).length:,.0f} px of shared border")
+    check(f"[{mode}] unclaimed ground is the strips beside it, and only them",
+          abs(un - want_unclaimed) <= 50.0, f"{un:,.0f} px unclaimed")
+    check(f"[{mode}] disjoint", T._safe_intersection(got["A"], got["B"]).area <= 1.0)
+
+# With nothing in the gap, the two modes must agree exactly.
+fs2 = [feat("A", A), feat("B", B), feat("hemi", box(-200, -200, 2200, 700))]
+s, f = run(fs2, ["A", "B"], tol=40.0), run(fs2, ["A", "B"], tol=40.0, fill_all=True)
+check("with nothing in the gap, strict and fill-all give the same answer",
+      max(s[n].symmetric_difference(f[n]).area for n in ("A", "B")) <= 1.0)
+
+# ---------------------------------------------------------------------------
 section("the outline handed in is not eroded")
 
 # The input cleaning was a morphological open whose only guard let it lose 35%

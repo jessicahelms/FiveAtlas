@@ -68,11 +68,12 @@ export async function sharedBorder(ds, regionA, regionB, fc, { bridge = false, t
 // give every pair one shared border). Returns updated FC + shared borders.
 // `snapTo` names the region whose edge the new border should land on, leaving
 // that region untouched. Null splits the contested ground down the middle.
-export async function partitionRegions(ds, regions, fc, tol = 40, snapTo = null) {
+export async function partitionRegions(ds, regions, fc, tol = 40, snapTo = null,
+                                       fillAll = false) {
   const r = await fetch(`${API}/datasets/${ds}/regions/partition`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ regions, fc, tol, snapTo }),
+    body: JSON.stringify({ regions, fc, tol, snapTo, fillAll }),
   });
   if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
   return r.json(); // { type, features, borders }
@@ -91,11 +92,11 @@ export async function resampleRegions(ds, regions, fc, tol = 150) {
 }
 
 // Combine several regions into one feature. Returns updated FC + the new name.
-export async function mergeRegions(ds, regions, fc, name, tol = 40) {
+export async function mergeRegions(ds, regions, fc, name, tol = 40, fillAll = false) {
   const r = await fetch(`${API}/datasets/${ds}/regions/merge`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ regions, fc, name, tol }),
+    body: JSON.stringify({ regions, fc, name, tol, fillAll }),
   });
   if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
   return r.json(); // { type, features, name }

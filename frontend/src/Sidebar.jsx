@@ -37,7 +37,7 @@ export default function Sidebar({
   overlapAsk, onAnswerOverlap, onToggleTranslate,
   mode, onToggleModify, onToggleBorder, onToggleSplit, onToggleDissolve, onToggleDraw,
   borderPicks, borderMsg, borderShared, onClearBorder, onShareBorders, onMerge,
-  snapTol, onSnapTol,
+  snapTol, onSnapTol, fillAll, onFillAll,
   splitMsg, drawMsg, drawKind, onDrawKind, designations, damageAsk, onAnswerDamage,
   resample, resampleTol, onResampleTol, onApplyResample, onCancelResample,
   gapFind, gapMsg, onDissolve, onFillGap, onClearGap,
@@ -526,6 +526,23 @@ export default function Sidebar({
                   <b>Merge into one</b> uses this slider too, but only dissolves
                   a hairline seam — up to <b>{Math.round(snapTol / 2)} px</b>
                   {' '}across, a quarter of the figure above.
+                </div>
+                {/* What to do with the strips BESIDE a region that stands in
+                    the gap. Its own ground is never taken either way. */}
+                <label className="chk" title={
+                  'Off: a gap pixel is filled only if its straight line to both '
+                  + 'regions is clear, so the strips beside a region standing in '
+                  + 'the gap stay empty. On: every free pixel in the gap is '
+                  + 'filled. A region in the gap is never taken either way.'}>
+                  <input type="checkbox" checked={!!fillAll} disabled={busy}
+                    onChange={(e) => onFillAll && onFillAll(e.target.checked)} />
+                  <span>Fill all pixels in the gap</span>
+                </label>
+                <div className="hint dim">
+                  {fillAll
+                    ? 'Every free pixel in the gap is filled, including beside a region standing in it.'
+                    : 'Only ground with nothing in between is filled; the strips beside a region standing in the gap are left alone.'}
+                  {' '}Applies to Share borders and Merge.
                 </div>
               </div>
             )}
