@@ -512,8 +512,8 @@ export default function Sidebar({
                 <div className="hint dim">
                   The circle on the map is that wide, at the narrowest point
                   between your picks — a gap that fits inside it closes, a wider
-                  one is left alone. A gap with another region standing in it is
-                  never bridged, however wide the reach.
+                  one is left alone. A region standing in the gap is never taken,
+                  however wide the reach — what happens beside it is the box below.
                 </div>
                 {/* Merge takes the same number but uses it differently: it
                     closes by HALF the reach and then keeps only corridors
