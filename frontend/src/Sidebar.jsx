@@ -37,7 +37,7 @@ export default function Sidebar({
   overlapAsk, onAnswerOverlap, onToggleTranslate,
   mode, onToggleModify, onToggleBorder, onToggleSplit, onToggleDissolve, onToggleDraw,
   borderPicks, borderMsg, borderShared, onClearBorder, onShareBorders, onMerge,
-  snapTol, onSnapTol, fillAll, onFillAll,
+  snapTol, onSnapTol, reachGap, fillAll, onFillAll,
   splitMsg, drawMsg, drawKind, onDrawKind, designations, damageAsk, onAnswerDamage,
   resample, resampleTol, onResampleTol, onApplyResample, onCancelResample,
   gapFind, gapMsg, onDissolve, onFillGap, onClearGap,
@@ -506,6 +506,26 @@ export default function Sidebar({
                   <span>bridges gaps up to</span>
                   <span className="v">{snapTol * 2} px across</span>
                 </div>
+                {/* The measured gap between the picks (backend gap_between): its
+                    width at its widest, and whether the current reach closes it.
+                    The yellow circle on the map sits at that widest point. */}
+                {reachGap && reachGap.kind === 'gap' && (
+                  <div className="prop-readout">
+                    <span>this gap is</span>
+                    <span className="v">
+                      {Math.round(reachGap.width)} px across
+                      {snapTol * 2 >= reachGap.width
+                        ? ' — this reach closes it ✓'
+                        : ` — needs reach ${Math.ceil(reachGap.width / 2)}`}
+                    </span>
+                  </div>
+                )}
+                {reachGap && reachGap.kind === 'apart' && (
+                  <div className="prop-readout">
+                    <span>picks are</span>
+                    <span className="v">{Math.round(reachGap.width)} px apart at their closest</span>
+                  </div>
+                )}
                 {/* It said `{snapTol} px` before, which is half the truth: a
                     close of radius r bridges a gap up to 2r wide. At reach 40 a
                     79 px gap closes and an 81 px one does not. */}

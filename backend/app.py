@@ -1631,6 +1631,36 @@ async def shared_border(ds_id: str, request: Request):
             "fc": {"type": "FeatureCollection", "features": res["features"]}}
 
 
+@app.post("/api/datasets/{ds_id}/regions/gap")
+async def regions_gap(ds_id: str, request: Request):
+    """Where the unclaimed gap between the picked regions is, and how wide it is
+    at its widest point -- so the Snap reach circle can sit on the gap the user
+    is actually filling, not on a border they already share. Body:
+    {regions:[names], fc?, search?}. Returns {kind, centre, width, area, pieces}
+    (kind "gap" or "apart"), or {kind: null} when they touch with nothing
+    between. Reports only; changes no geometry.
+
+    Not to be confused with topology.region_gap (used by shared-border above),
+    which measures the distance between two named regions."""
+    try:
+        d = ds.get_dataset(ds_id)
+    except KeyError:
+        raise HTTPException(404, "unknown dataset")
+    body = await request.json()
+    names = body.get("regions") or body.get("names")
+    if not names or len(names) < 2:
+        raise HTTPException(400, "need 'regions': at least two region names")
+    # Take the FC from the body like the other geometry routes: the client's
+    # copy may hold unsaved edits, and the gap has to reflect what is on screen.
+    fc = body.get("fc") or geo.load_regions(ds_id)[0]
+    search = float(body.get("search", topology.GAP_SEARCH))
+    try:
+        res = topology.gap_between(fc["features"], d["id_prop"], names, search=search)
+    except Exception as e:
+        raise HTTPException(500, f"gap failed: {e}")
+    return JSONResponse(res if res is not None else {"kind": None})
+
+
 @app.post("/api/datasets/{ds_id}/regions/move-border")
 async def move_border(ds_id: str, request: Request):
     """Rebuild BOTH regions around a dragged shared border. Body:

@@ -2571,6 +2571,148 @@ def concat_region_files(groups, id_prop, src_prop=SRC_PROP):
     return {"features": feats, "sources": sources, "shared": shared}
 
 
+#: How far apart two picks can be for a gap between them to be found at all.
+#: Generous on purpose: the circle has to be able to show a gap WIDER than the
+#: current reach, or it could never tell anyone to raise it.
+GAP_SEARCH = 1000.0
+
+
+def gap_between(features, id_prop, names, search=GAP_SEARCH):
+    """Where the gap between the picked regions is, and how wide it is there.
+
+    The Snap reach circle used to sit at the midpoint of the closest pair of
+    vertices. That is the wrong question as soon as the two regions touch
+    anywhere: where they touch they are 0 px apart, so the "closest point" is
+    somewhere on the border they already share -- in practice whichever
+    zero-distance pair the search met first -- and the gap you are actually
+    trying to fill is exactly where they do NOT touch, so the circle could never
+    land on it. Measured on HPF + dft: the circle sat on their shared border,
+    7,886 px from the only unclaimed gap between them.
+
+    So this finds the gap itself: ground nobody owns, lying between at least
+    two of the picks, within reach of a close at `search`. Of those pieces the
+    largest is "the gap", and the circle goes at its WIDEST point -- the centre
+    of the largest circle that fits inside it -- because that is where it is
+    hardest to bridge. A close of radius r bridges up to 2r across, so the reach
+    that closes the whole gap is half its width there, and the circle drawn at
+    that point is directly comparable with it.
+
+    Same ownership rules as partition_regions: another region's ground is never
+    gap, and a region that wraps the picks (`hemi`) is a container rather than a
+    neighbour -- its ground is exactly what a gap between two of its children is.
+
+    Returns {kind, centre, width, area, pieces}:
+      kind "gap"    -- the circle goes on the gap; `width` is the gap's width at
+                       its widest, so a reach of width/2 closes all of it
+      kind "apart"  -- no unclaimed gap, but the picks do not touch; the circle
+                       goes where they come closest and `width` is that distance
+      None          -- they already touch with nothing visible between them, so
+                       there is nothing to bridge and no circle to draw
+    """
+    from shapely.ops import polylabel
+    idx = _index_all(features, id_prop)
+    sel = sorted({str(n) for n in names if str(n) in idx})
+    if len(sel) < 2:
+        return None
+    bodies = {}
+    for n in sel:
+        g = _body(features, idx[n])
+        if g is not None and not g.is_empty:
+            bodies[n] = g if g.is_valid else g.buffer(0)
+    if len(bodies) < 2:
+        return None
+    U = unary_union(list(bodies.values())).buffer(0)
+    R = max(float(search), 1.0)
+    try:
+        closed = U.buffer(R, join_style=2).buffer(-R, join_style=2).buffer(0)
+    except Exception:
+        return None
+    zone = _safe_difference(closed, U)
+    if zone.is_empty:
+        return _narrowest_answer(bodies)
+
+    blankets, others = [], []
+    for f in features:
+        nm = (f.get("properties") or {}).get(id_prop)
+        if nm is None or str(nm) in bodies:
+            continue
+        try:
+            g = shape(f["geometry"])
+            if not g.is_valid:
+                g = g.buffer(0)
+        except Exception:
+            continue
+        if g.is_empty:
+            continue
+        # wraps the picks: a container, not a neighbour
+        if U.area > 0 and _safe_intersection(g, U).area >= 0.98 * U.area:
+            blankets.append(g)
+        else:
+            others.append(g)
+    if others:
+        zone = _safe_difference(zone, unary_union(others).buffer(0))
+    if blankets:
+        # ground outside the section is not a gap between two of its regions
+        zone = _safe_intersection(zone, unary_union(blankets).buffer(0))
+    if zone.is_empty:
+        return _narrowest_answer(bodies)
+
+    # Only pieces BETWEEN picks -- each must touch at least two of them -- and
+    # only ones a person could see. Boolean noise along a shared border leaves
+    # slivers a pixel or two wide all over real files (7 px, 1.7 px across, on
+    # HPF + dft), and a circle parked on one of those says nothing.
+    names_ = list(bodies)
+    found = []
+    for p in _polys(zone):
+        if p.area <= 1.0:
+            continue
+        if sum(1 for n in names_ if p.distance(bodies[n]) < 1.0) < 2:
+            continue
+        try:
+            c = polylabel(p, tolerance=max(0.5, (p.area ** 0.5) / 500.0))
+        except Exception:
+            c = p.representative_point()
+        w = 2.0 * c.distance(p.exterior)
+        for h in p.interiors:
+            w = min(w, 2.0 * c.distance(h))
+        if w >= MIN_GAP_WIDTH:
+            found.append((p, c, w))
+    if found:
+        p, c, w = max(found, key=lambda t: t[0].area)
+        return {"kind": "gap", "centre": [float(c.x), float(c.y)], "width": float(w),
+                "area": float(p.area), "pieces": len(found)}
+    return _narrowest_answer(bodies)
+
+
+#: A gap narrower than this is boolean noise, not something anybody is trying
+#: to fill.
+MIN_GAP_WIDTH = 2.0
+
+
+def _narrowest_answer(bodies):
+    """No real gap between the picks. If they are apart, the circle goes where
+    they come closest -- measured edge to edge, not between vertices, which on
+    HY + PAL.2 put the old circle 1,343 px from the true narrowest point. If they
+    already touch, there is nothing to bridge, and no circle is the honest
+    answer: the old one sat on their shared border, somewhere arbitrary."""
+    names_ = list(bodies)
+    best = None
+    for i, a in enumerate(names_):
+        for b in names_[i + 1:]:
+            try:
+                pa, pb = nearest_points(bodies[a], bodies[b])
+            except Exception:
+                continue
+            d = pa.distance(pb)
+            if best is None or d < best[0]:
+                best = (d, pa, pb)
+    if best is None or best[0] < 1.0:
+        return None
+    d, pa, pb = best
+    return {"kind": "apart", "centre": [(pa.x + pb.x) / 2.0, (pa.y + pb.y) / 2.0],
+            "width": float(d), "area": 0.0, "pieces": 0}
+
+
 def _intruder_shadow(blocker, a, b, zone):
     """The part of `zone` that `blocker` hides from region a or from region b.
 

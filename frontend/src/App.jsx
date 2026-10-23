@@ -1398,54 +1398,34 @@ export default function App() {
     }
   }, [propEdit, propRadius, applyMoveBorder, currentBorderArcCoords, replaceVisibleBorderArc, stableBorderArcCoords, borderSegmentIndex]);
 
-  // The Snap reach, as a circle where the gap actually is. A close of radius r
-  // bridges a gap up to 2r ACROSS, so a circle of that radius is exactly as wide
-  // as the widest gap the slider will close: what fits inside it closes, what
-  // does not is left alone. Put at the narrowest point between the two picked
-  // regions, because that is where the question is being asked.
-  const reachCentre = useMemo(() => {
-    if (mode !== 'border' || borderShared || borderPicks.length < 2) return null;
-    const ptsOf = (nm) => {
-      const out = [];
-      for (const f of (fc && fc.features) || []) {
-        if (featureName(f, idProp) !== nm) continue;
-        const g = f.geometry || {};
-        const polys = g.type === 'Polygon' ? [g.coordinates]
-          : g.type === 'MultiPolygon' ? g.coordinates : [];
-        for (const poly of polys) for (const ring of poly) for (const c of ring) out.push(c);
-      }
-      return out;
-    };
-    const A = ptsOf(borderPicks[0]);
-    const B = ptsOf(borderPicks[1]);
-    if (!A.length || !B.length) return null;
-    // These outlines carry hundreds of points and this re-runs on every drag of
-    // the slider, so walk them at a stride rather than every pair.
-    const stride = (arr) => Math.max(1, Math.floor(arr.length / 300));
-    const sa = stride(A);
-    const sb = stride(B);
-    let best = Infinity;
-    let centre = null;
-    for (let i = 0; i < A.length; i += sa) {
-      for (let j = 0; j < B.length; j += sb) {
-        const dx = A[i][0] - B[j][0];
-        const dy = A[i][1] - B[j][1];
-        const d = dx * dx + dy * dy;
-        if (d < best) {
-          best = d;
-          centre = [(A[i][0] + B[j][0]) / 2, (A[i][1] + B[j][1]) / 2];
-        }
-      }
+  // The Snap reach, as a circle where the gap actually is. The gap is found on
+  // the backend (topology.gap_between): the largest piece of unclaimed ground
+  // lying between the picks, with the circle at its WIDEST point -- a close of
+  // radius r bridges a gap up to 2r across, so a reach of width/2 closes it.
+  // This is the right question the moment the regions touch anywhere: where
+  // they touch they are 0 px apart, so the old nearest-vertex search landed on
+  // the border they already share (7,886 px off on HPF + dft), never on the gap
+  // being filled. gap_between returns kind "gap"/"apart", or null when they
+  // touch with nothing between (then there is nothing honest to draw).
+  const [gapInfo, setGapInfo] = useState(null);
+  useEffect(() => {
+    if (mode !== 'border' || borderShared || borderPicks.length < 2 || !dsId) {
+      setGapInfo(null);
+      return undefined;
     }
-    return centre;
-    // NB: the reach is deliberately NOT a dependency. Where the gap is does not
-    // move when the slider does, and re-running this nearest-pair search on
-    // every move is what made the slider stutter.
-  }, [mode, borderShared, borderPicks, fc, idProp]);
+    let live = true;
+    api.regionGap(dsId, borderPicks, fc)
+      .then((g) => { if (live) setGapInfo(g && g.kind ? g : null); })
+      .catch(() => { if (live) setGapInfo(null); });
+    return () => { live = false; };
+    // NB: the reach (snapTol) is deliberately NOT a dependency. Where the gap is
+    // does not move when the slider does, and refetching on every slider move is
+    // what made the slider stutter.
+  }, [mode, borderShared, borderPicks, fc, idProp, dsId]);
 
   const reachRing = useMemo(
-    () => (reachCentre ? { center: reachCentre, radius: snapTol } : null),
-    [reachCentre, snapTol],
+    () => (gapInfo && gapInfo.centre ? { center: gapInfo.centre, radius: snapTol } : null),
+    [gapInfo, snapTol],
   );
 
   const doShareBorders = useCallback(async (snapTo = null) => {
@@ -2857,7 +2837,7 @@ export default function App() {
                 borderPicks={borderPicks} borderMsg={borderMsg} borderShared={borderShared}
                 onClearBorder={clearBorder} onShareBorders={doShareBorders}
                 onMerge={doMerge} splitMsg={splitMsg}
-                snapTol={snapTol} onSnapTol={setSnapTol}
+                snapTol={snapTol} onSnapTol={setSnapTol} reachGap={gapInfo}
                 fillAll={fillAll} onFillAll={setFillAll}
                 resample={resample} resampleTol={resampleTol}
                 onResampleTol={previewResample} onApplyResample={applyResample}

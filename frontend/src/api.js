@@ -64,6 +64,20 @@ export async function sharedBorder(ds, regionA, regionB, fc, { bridge = false, t
   return r.json(); // { regionA, regionB, arcs, bridged, gapPx, touching, fc? }
 }
 
+// Where the unclaimed gap between the picked regions is, and how wide it is at
+// its widest point -- so the reach circle can sit on the gap, not on a border
+// they already share. Sends the current (possibly edited) FC. Reports only;
+// changes no geometry.
+export async function regionGap(ds, regions, fc, search) {
+  const r = await fetch(`${API}/datasets/${ds}/regions/gap`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(search != null ? { regions, fc, search } : { regions, fc }),
+  });
+  if (!r.ok) throw new Error(`gap ${r.status}: ${await r.text()}`);
+  return r.json(); // { kind: 'gap'|'apart'|null, centre, width, area, pieces }
+}
+
 // Make a set of regions tile cleanly (fill small gaps, remove small overlaps,
 // give every pair one shared border). Returns updated FC + shared borders.
 // `snapTo` names the region whose edge the new border should land on, leaving
