@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useSyncExternalStore } from 'react';
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import {
   DeckGL,
   OrthographicView,
@@ -153,6 +153,9 @@ function pyramidTileLayer({ id, levels, tileSize, width, height, opacity, urlFor
     maxZoom: 0,
     extent: [0, 0, width, height],
     opacity,
+    // deck defaults to 6 concurrent tile fetches; a few more fills a fresh pan
+    // faster and localhost soaks it up (the JP2 decode is the real limit).
+    maxRequests: 10,
     // Each 1024 tile is a ~4 MB texture, and by default deck keeps as many as
     // it likes. On a laptop's integrated GPU that memory is shared with the
     // system, so cap it; tiles dropped here come back from the server cache.
@@ -184,10 +187,14 @@ const EMPTY_SET = new Set();
 const TILE_CACHE_BYTES = 256 * 1024 * 1024;   // per tile layer
 const STAIN_CACHE_BYTES = 192 * 1024 * 1024;  // all stain channels together
 
-// HiDPI laptop screens report a devicePixelRatio of 1.5-2, and drawing at full
-// device resolution is 2-4x the pixels for the GPU to fill. Capping at 1.5
-// keeps lines and text crisp while taking most of that cost off the table.
-const DEVICE_PIXELS = Math.min(window.devicePixelRatio || 1, 1.5);
+// Draw at full device resolution when the view is still -- the sharpest the
+// panel can show -- but drop to 1x while panning/zooming/dragging, when the
+// moving image does not need the pixels and a laptop's integrated GPU cannot
+// spare them. Idle is capped at 2x so a 3x phone panel does not quadruple the
+// fill cost. The viewer flips between the two on deck's interaction state.
+// (Was a flat 1.5x cap, which softened everything on a 2x laptop even at rest.)
+const DEVICE_PIXELS_IDLE = Math.min(window.devicePixelRatio || 1, 2);
+const DEVICE_PIXELS_MOVING = 1;
 
 // One view for the life of the app: a new View every render makes deck diff it.
 const VIEWS = [new OrthographicView({ flipY: true, controller: true })];
@@ -215,6 +222,12 @@ export default function Viewer({
   const bOffKey = [...bOff].sort().join('|');
   const fOffKey = [...fOff].sort().join('|');
   const deckRef = useRef(null);
+  // Full resolution when still, 1x while the view is moving (see DEVICE_PIXELS_*
+  // above). `interacting` flips only at the edges of a gesture, so it costs two
+  // re-renders per pan, not one per frame.
+  const [interacting, setInteracting] = useState(false);
+  const idleTimerRef = useRef(null);
+  useEffect(() => () => { if (idleTimerRef.current) clearTimeout(idleTimerRef.current); }, []);
 
   // One instance each, kept for the life of the component: a new mode object
   // would reset the click sequence mid-draw.
@@ -712,8 +725,23 @@ export default function Viewer({
       <DeckGL
       ref={deckRef}
       views={VIEWS}
-      useDevicePixels={DEVICE_PIXELS}
+      useDevicePixels={interacting ? DEVICE_PIXELS_MOVING : DEVICE_PIXELS_IDLE}
       initialViewState={initialViewState}
+      onInteractionStateChange={(s) => {
+        const moving = !!(s && (s.isDragging || s.isPanning || s.isZooming
+          || s.isRotating || s.inTransition));
+        if (moving) {
+          if (idleTimerRef.current) { clearTimeout(idleTimerRef.current); idleTimerRef.current = null; }
+          setInteracting(true);                 // React bails if already true
+        } else if (!idleTimerRef.current) {
+          // let the view settle before paying for the full-res redraw, so a
+          // flick-and-stop does not thrash the GPU with a framebuffer realloc
+          idleTimerRef.current = setTimeout(() => {
+            idleTimerRef.current = null;
+            setInteracting(false);
+          }, 200);
+        }
+      }}
       layers={stack}
       getCursor={() => (mode === 'modify' || mode === 'border' || mode === 'split'
         || mode === 'dissolve' || mode === 'draw' || mode === 'clean' ? 'crosshair' : 'grab')}

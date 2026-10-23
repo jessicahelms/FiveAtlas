@@ -213,6 +213,7 @@ export function stainTileLayer({
     maxZoom: 0,
     extent: [0, 0, width, height],
     opacity,
+    maxRequests: 10,
     maxCacheSize,
     // read by renderSubLayers; a change regenerates the tiles' sublayers
     // (cheap -- new uniforms) without refetching anything
