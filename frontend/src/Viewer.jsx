@@ -177,6 +177,9 @@ function pyramidTileLayer({ id, levels, tileSize, width, height, opacity, urlFor
         data: null,
         image: props.data.image,
         bounds: [bb[0][0], bb[1][1], bb[1][0], bb[0][1]], // flipY [left,bottom,right,top]
+        // Smooth when zoomed out, crisp when zoomed in past native -- otherwise
+        // the GPU's bilinear magnification blurs full-res pixels into mush.
+        textureParameters: { minFilter: 'linear', magFilter: 'nearest' },
       });
     },
     updateTriggers: { getTileData: [refetchKey] },

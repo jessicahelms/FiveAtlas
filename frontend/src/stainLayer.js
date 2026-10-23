@@ -47,12 +47,19 @@ out vec4 fragColor;
 
 float texel(usampler2D t, ivec2 p) { return float(texelFetch(t, p, 0).r); }
 
-// Integer textures can only be sampled nearest, so filter by hand -- the same
-// four-tap bilinear the old PNG tiles got from the GPU, so zoomed-in pixels
-// stay smooth rather than turning blocky.
+// Integer textures can only be sampled nearest, so filter by hand. When zoomed
+// OUT (a screen pixel spans several texels) a four-tap bilinear avoids shimmer.
+// But when zoomed IN past native (one texel spans several screen pixels) that
+// bilinear just smears each pixel into a blur -- so there we sample nearest and
+// keep native pixels crisp, the way Xenium Explorer stays sharp past full res.
+// fwidth(uv)*size is texels-per-screen-pixel; < 1 means we are magnifying.
 float sampleRaw(usampler2D t, vec2 uv) {
   ivec2 size = textureSize(t, 0);
   ivec2 lim = size - 1;
+  vec2 duv = fwidth(uv) * vec2(size);
+  if (max(duv.x, duv.y) < 1.0) {
+    return texel(t, clamp(ivec2(floor(uv * vec2(size))), ivec2(0), lim));
+  }
   vec2 p = uv * vec2(size) - 0.5;
   vec2 f = fract(p);
   ivec2 i = ivec2(floor(p));
