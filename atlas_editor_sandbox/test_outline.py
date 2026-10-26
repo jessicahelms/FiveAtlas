@@ -200,8 +200,19 @@ else:
                        {"fc": fc0, "point": gap_pt})
     code_off, offres = post(f"/api/datasets/{ds_id}/regions/dissolve-gap",
                             {"fc": fc0, "point": gap_pt, "exclude": ["hemi"]})
-    check("with the outline on, the point counts as inside a region, not a gap",
-          code_on == 422, str(code_on))
+    # The section outline is a container, not a neighbour: with it ON the same gap
+    # is found as with it off (topology.find_gap sets it aside and bounds the gap
+    # by it). It used to answer "inside hemi" here, so Fix a gap never worked with
+    # the outline on -- the default -- unless you knew to switch it off first.
+    check("with the outline on, the same gap is found",
+          code_on == 200 and code_off == 200
+          and abs(on["area"] - offres["area"]) < 1e-6,
+          f"on={code_on} {on.get('area') if code_on == 200 else str(on)[:80]}")
+    if code_on == 200:
+        back_on = next(geom(f) for f in on["features"]
+                       if (f["properties"] or {})[id_prop] == "hemi")
+        check("...and the outline itself comes back untouched",
+              abs(back_on.area - hemi0.area) < 1e-6, f"{back_on.area - hemi0.area:+.6f}")
 if code_off == 200:
     check("with it off, the gap under the same point is found",
           offres["area"] > 0, f"{offres['area']:,.0f} px²")

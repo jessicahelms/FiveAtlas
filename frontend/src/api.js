@@ -106,14 +106,18 @@ export async function resampleRegions(ds, regions, fc, tol = 150) {
 }
 
 // Combine several regions into one feature. Returns updated FC + the new name.
-export async function mergeRegions(ds, regions, fc, name, tol = 40, fillAll = false) {
+// With the section outline (hemi) among the picks the backend first answers
+// {needsContainerChoice, container, regions}; re-post with intoContainer=true to
+// fold the other picks into the outline.
+export async function mergeRegions(ds, regions, fc, name, tol = 40, fillAll = false,
+                                   intoContainer = false) {
   const r = await fetch(`${API}/datasets/${ds}/regions/merge`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ regions, fc, name, tol, fillAll }),
+    body: JSON.stringify({ regions, fc, name, tol, fillAll, intoContainer }),
   });
   if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
-  return r.json(); // { type, features, name }
+  return r.json(); // { type, features, name } | { needsContainerChoice, container, regions }
 }
 
 // Cut one region into two along a drawn line. Returns updated FC + the two names.
@@ -253,12 +257,13 @@ export async function browseFile() {
 // region the outline covers cede that ground, so the file stays a clean partition.
 // `damage` is a designation tag: the server names the shape <tag>.<n> and never
 // carves, because damage sits inside its host and the host stays whole.
+// `exclude` names switched-off regions: they are left untouched and not asked about.
 export async function addRegion(ds, fc, points,
-  { name = null, carve = true, damage = null, overlap = null, ask = false } = {}) {
+  { name = null, carve = true, damage = null, overlap = null, ask = false, exclude = null } = {}) {
   const r = await fetch(`${API}/datasets/${ds}/regions/add`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ fc, points, name, carve, damage, overlap, ask }),
+    body: JSON.stringify({ fc, points, name, carve, damage, overlap, ask, exclude }),
   });
   if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
   // ask=true with no `overlap` and something already on that ground comes back

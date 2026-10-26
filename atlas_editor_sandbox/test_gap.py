@@ -18,7 +18,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "backend"))
 
-from shapely.geometry import box, mapping   # noqa: E402
+from shapely.geometry import box, mapping, shape   # noqa: E402
+from shapely.ops import unary_union                # noqa: E402
 
 import topology as T                         # noqa: E402
 
@@ -68,6 +69,46 @@ if r and r.get("kind") == "gap":
     check("centre y is within the boxes", 0.0 <= cy <= 100.0, f"cy={cy:.1f}")
     # ...and the width at that point is the 50 px gap (a reach of 25 closes it).
     check("width ~= 50 px (the gap)", 45.0 <= r["width"] <= 55.0, f"width={r['width']:.1f}")
+    # The reach is MEASURED with the close Share borders uses, not assumed to be
+    # width/2 -- on the real file width/2 was wrong for 21 of 22 gaps. For this
+    # straight slot the two agree: a close of 25 bridges 50.
+    rr = r.get("reach")
+    check("reach is measured (~25 for a 50 px slot)",
+          rr is not None and 24.0 <= rr <= 26.5, f"reach={rr}")
+    if rr:
+        res = T.partition_regions([feat("A", A), feat("B", B)], "name", ["A", "B"],
+                                  tol=rr, fill_all=True)
+        covered = sum(shape(f["geometry"]).area for f in res["features"])
+        check("Share borders at that reach really fills the gap (>= 95%)",
+              covered >= 20000 + 0.95 * 5000, f"covered={covered:.0f} of 25000")
+
+
+# ---------------------------------------------------------------------------
+section("the reach accounts for an open bay, where width/2 under-promises")
+# B is a U-shaped cup around A, open at the top: the ground between them is a
+# 40 px moat on three sides that runs out of the cup at the open end. Its widest
+# point is 40 px across, but the part at the open mouth only closes once the
+# close spans the mouth -- the measured reach must cover the piece, so it can be
+# no smaller than half the width and must actually fill it at Share borders.
+cupA = box(40, 0, 160, 160)
+cupB = unary_union([box(-40, -40, 240, 0),       # floor A sits on
+                    box(-40, 0, 0, 200),          # left arm
+                    box(200, 0, 240, 200)])       # right arm
+r = gap(feat_list := [feat("A", cupA), feat("B", cupB)], ["A", "B"])
+if r and r.get("kind") == "gap":
+    rr = r.get("reach")
+    check("bay: reach measured and >= width/2", rr is not None and rr >= r["width"] / 2 - 0.5,
+          f"width={r['width']:.1f} reach={rr}")
+    if rr:
+        res = T.partition_regions(feat_list, "name", ["A", "B"], tol=rr, fill_all=True)
+        got = unary_union([shape(f["geometry"]) for f in res["features"]])
+        piece_area = r["area"]
+        before = unary_union([cupA, cupB]).area
+        check("bay: Share borders at the measured reach fills >= 90% of the piece",
+              got.area - before >= 0.90 * piece_area,
+              f"filled={got.area - before:.0f} of piece {piece_area:.0f}")
+else:
+    check("bay: a gap is found", False, repr(r))
 
 
 # ---------------------------------------------------------------------------

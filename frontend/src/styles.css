@@ -14,6 +14,9 @@ body {
 .dsbar select { background: #1a212b; color: #e6e9ef; border: 1px solid #2f3a4c; border-radius: 6px; padding: 5px 8px; font-size: 13px; max-width: 320px; }
 .dsbar .pathin { flex: 1; min-width: 120px; background: #1a212b; color: #e6e9ef; border: 1px solid #2f3a4c; border-radius: 6px; padding: 5px 8px; font-size: 12px; }
 .dsbar-busy { font-size: 12px; color: #ffcf4d; }
+.dsbar-error { display: inline-flex; align-items: center; gap: 6px; max-width: 46ch;
+  padding: 2px 8px; background: #3a1c1c; border: 1px solid #6b2b2b; border-radius: 6px;
+  font-size: 12px; color: #ffb4b4; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .dsbar-version { font-size: 11px; color: #6b7482; white-space: nowrap; padding-right: 6px; border-right: 1px solid #232a35; }
 .update-strip { flex: 0 0 auto; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 8px 12px; background: #2a2210; border-bottom: 1px solid #b8892a; color: #ffcf4d; font-size: 13px; }
 .update-strip b { color: #ffe08a; }
@@ -85,11 +88,42 @@ body {
   border-right: 1px solid #232a35;
 }
 .splitter:hover { background: #2f3a4c; }
+/* the right-hand imagery panel (layers, stains, genes) */
+.sidebar.right { border-right: 0; border-left: 1px solid #232a35; padding-top: 8px; }
+.splitter.right { border-right: 0; border-left: 1px solid #232a35; }
+.pane-hide {
+  display: block; margin: 0 0 4px auto; background: none; border: 0; padding: 2px 4px;
+  color: #7d8796; font-size: 11px; cursor: pointer;
+}
+.pane-hide:hover { color: #e6e9ef; }
+.pane-tab {
+  flex: 0 0 26px; writing-mode: vertical-rl; background: #151a22; color: #9aa4b3;
+  border: 0; border-left: 1px solid #232a35; font-size: 11px; letter-spacing: 0.04em;
+  cursor: pointer; padding: 10px 0;
+}
+.pane-tab:hover { background: #1e2530; color: #e6e9ef; }
 .sidebar h1 { font-size: 16px; margin: 0 0 4px; }
 /* folding section headers */
-.section-title.fold, .slabel.fold { cursor: pointer; user-select: none; }
-.section-title.fold:hover, .slabel.fold:hover { color: #e6e9ef; }
-.fold .arr { display: inline-block; width: 12px; color: #9aa4b2; }
+/* the whole title bar is the button: full width, a hover band, the arrow at the
+   right end where it lines up section to section */
+button.fold {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  width: calc(100% + 12px); margin-left: -6px; margin-right: -6px;
+  padding: 6px; min-height: 32px; box-sizing: border-box;
+  background: none; border: 0; border-radius: 6px; text-align: left;
+  font-family: inherit; cursor: pointer; user-select: none;
+}
+button.section-title.fold { margin-top: -6px; margin-bottom: 6px; }
+button.slabel.fold { min-height: 28px; margin-top: 8px; margin-bottom: 4px; }
+button.fold:hover { background: #1e2530; color: #e6e9ef; }
+button.fold:focus-visible { outline: 2px solid #5a96ff; outline-offset: -2px; }
+.fold .fold-label { min-width: 0; }
+.fold .arr {
+  flex: none; width: 22px; height: 22px; display: inline-flex; align-items: center;
+  justify-content: center; border-radius: 5px; font-size: 14px; color: #9aa4b2;
+  background: #1a212b; border: 1px solid #2b3442;
+}
+button.fold:hover .arr { color: #e6e9ef; border-color: #3a4658; }
 .ds { font-size: 13px; color: #9aa4b2; }
 .dims { font-size: 11px; color: #6b7482; margin-bottom: 8px; }
 
@@ -120,23 +154,35 @@ body {
   border-radius: 6px; padding: 6px 8px; font-size: 12px;
 }
 
+.region-search { width: 100%; box-sizing: border-box; margin: 6px 0 4px; padding: 4px 8px;
+  background: #11161d; border: 1px solid #2b3648; border-radius: 6px; color: #dbe2ea; font-size: 12px; }
 .regions { list-style: none; margin: 0; padding: 0; max-height: 280px; overflow-y: auto; }
 .regions li {
-  padding: 5px 8px; font-size: 13px; border-radius: 5px; cursor: pointer;
-  display: flex; justify-content: space-between;
+  padding: 3px 6px 3px 8px; font-size: 13px; border-radius: 5px; cursor: pointer;
+  display: flex; justify-content: space-between; align-items: center; gap: 6px;
 }
+.regions li > span:first-child { min-width: 0; overflow-wrap: anywhere; }
 .regions li:hover { background: #1e2530; }
 .regions li.sel { background: #2b3648; color: #fff; }
 .regions li.moved { color: #ffcf4d; }
 .regions li.off { color: #5d6672; }
 .regions li.off > span:first-child { text-decoration: line-through; }
-.regions li .rowend { display: inline-flex; align-items: center; gap: 6px; }
+.regions li .rowend { display: inline-flex; align-items: center; gap: 4px; flex: none; }
+.regions li .mark { width: 10px; text-align: center; font-size: 10px; }
+/* the three toggles, and the column labels above them: same width each */
+.regions li .eye, .regions li .col { width: 30px; flex: none; text-align: center; }
 .regions li .eye {
-  background: none; border: 0; color: #4d5765; cursor: pointer; padding: 0;
-  font-size: 12px; line-height: 1;
+  height: 24px; display: inline-flex; align-items: center; justify-content: center;
+  background: none; border: 1px solid transparent; border-radius: 5px;
+  color: #6b7584; cursor: pointer; padding: 0; font-size: 16px; line-height: 1;
 }
-.regions li:hover .eye { color: #8b95a4; }
-.regions li .eye:hover { color: #e6e9ef; }
+.regions li:hover .eye { color: #9aa4b3; border-color: #2f3a4c; }
+.regions li .eye:hover { color: #e6e9ef; background: #2b3648; }
+.regions li.legend {
+  position: sticky; top: 0; z-index: 1; cursor: default; padding-top: 0; padding-bottom: 2px;
+  background: #151a22; font-size: 10px; letter-spacing: 0.02em; border-radius: 0;
+}
+.regions li.legend:hover { background: #151a22; }
 .regions li.pickA { background: #16341f; color: #7df0a2; box-shadow: inset 2px 0 0 #50e678; }
 .regions li.pickB { background: #16233f; color: #9cc0ff; box-shadow: inset 2px 0 0 #5a96ff; }
 .regions li.pickX { background: #241a34; color: #cda2ff; box-shadow: inset 2px 0 0 #be78ff; }
@@ -267,6 +313,10 @@ body {
 .btn.primary:hover:not(:disabled) { background: #266087; }
 .row { display: flex; gap: 8px; }
 .row .btn { flex: 1; }
+/* a row of many buttons (Faces / Borders / Show all): wrap instead of
+   squeezing the last ones off the sidebar's edge */
+.row.wrap { flex-wrap: wrap; gap: 6px; }
+.row.wrap .btn { flex: 1 1 auto; white-space: nowrap; }
 
 /* shared-border pick (A / B) */
 .border-pick { margin: 4px 0 10px; padding: 8px; background: #131820; border: 1px solid #232a35; border-radius: 6px; }

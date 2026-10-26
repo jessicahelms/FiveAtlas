@@ -10,7 +10,9 @@ Fresh build (no dependency on snap_borders); uses only shapely/GEOS geometry.
 """
 from __future__ import annotations
 
+import itertools
 import json
+import math
 import os
 import re
 
@@ -57,6 +59,27 @@ def _polys(geom):
             out.extend(_polys(g))
         return out
     return []
+
+
+def _valid(geom):
+    """`geom` made valid WITHOUT dropping ground. buffer(0) keeps only one lobe
+    of a self-crossing outline -- a figure-8 of two 5,000 px2 lobes came back as
+    5,000 px2 and was reported "repaired" -- where make_valid keeps both. Only the
+    polygon parts are kept (make_valid can also return the crossing's lines)."""
+    if geom is None or geom.is_empty or geom.is_valid:
+        return geom
+    try:
+        from shapely import make_valid
+        parts = _polys(make_valid(geom))
+        if parts:
+            g = parts[0] if len(parts) == 1 else unary_union(parts)
+            if not g.is_valid:
+                g = g.buffer(0)
+            if not g.is_empty:
+                return g
+    except Exception:
+        pass
+    return geom.buffer(0)
 
 
 def _holes(geom):
@@ -711,6 +734,14 @@ def containment_message(c) -> str:
               f'"{c["outer"]}" keeps wrapping it.')
 
 
+#: The widest band between a nested pair's coast and the container's outline
+#: that Share borders treats as a border artefact and absorbs, however far the
+#: reach slider goes. Wider ground is an unlabelled pocket -- somebody's future
+#: region. Without it the close grew with the reach: at reach 5000, HY took
+#: 7,461,012 px^2 of margin and ISO 4,011,440 (with a new spike).
+NESTED_BAND_MAX = 100.0
+
+
 def snap_to_container(features, id_prop, names, tol=40.0):
     """Merge a nested pair's borders WHERE THEY NEIGHBOUR: the hairline band
     between the inner's edge and the container's outline joins the inner, so
@@ -752,7 +783,7 @@ def snap_to_container(features, id_prop, names, tol=40.0):
     protected = unary_union(others).buffer(0) if others else Polygon()
 
     free = _safe_difference(_safe_difference(outer, inner), protected)
-    w = max(float(tol), 4.0)
+    w = min(max(float(tol), 4.0), NESTED_BAND_MAX)
     # The band is the ground BETWEEN the two boundaries. A morphological
     # CLOSING of (inner + the outline) yields exactly that: the fill a
     # radius-tol/2 close adds is the ground spanning gaps up to `tol` wide
@@ -778,6 +809,17 @@ def snap_to_container(features, id_prop, names, tol=40.0):
             continue                       # does not touch the inner
         if not piece.intersects(edge):
             continue                       # does not reach the outline
+        # The docstring's promise, enforced: only a hairline BAND (it erodes to
+        # nothing just past the close radius). A close can still fan out into a
+        # concave corner of the coast; that fan is a pocket, not a band.
+        try:
+            if not piece.buffer(-(r + 0.5), join_style=2).is_empty:
+                continue
+        except Exception:
+            pass
+        # (No tip-shaving here: cutting a band's tip short left a razor notch
+        # between it and the inner -- a new spike on SSp. The ISO spike that
+        # prompted it came from the uncapped fan, which the cap above removes.)
         fill.append(piece)
     # The inner may also POKE PAST the container's outline (the containment
     # threshold admits up to ~10% outside). No amount of gap-filling merges
@@ -809,12 +851,12 @@ def snap_to_container(features, id_prop, names, tol=40.0):
             fill.append(skin)
             new_inner = unary_union([new_inner, skin]).buffer(0)
     new_inner = _snap_polys(new_inner, 0.01)
-    new_inner = clean_geom(new_inner, smooth=False)
+    new_inner = despike(clean_geom(new_inner, smooth=False))   # needles only
 
     new_outer = outer
     if covered > 0.0:
-        new_outer = clean_geom(unary_union([outer, new_inner]).buffer(0),
-                               smooth=False)
+        new_outer = despike(clean_geom(unary_union([outer, new_inner]).buffer(0),
+                                       smooth=False))
 
     out = json.loads(json.dumps(features))
     _write_body(out, features, idx[c["inner"]], new_inner)
@@ -855,6 +897,110 @@ def summary(features, id_prop="name", grid=4.0):
         "total_shared_length": round(total, 1),
         "per_region": {k: round(v, 1) for k, v in sorted(per_region.items())},
     }
+
+
+def _splice_handles(lobe, old_ring, new_ring, eps=1e-6):
+    """`lobe` with each run of moved handles spliced into its real outline.
+
+    `old_ring` / `new_ring` are the drag handles before and after (closed, same
+    length): a simplified copy of the lobe's exterior, so every handle is one of
+    its vertices. For each run of handles that moved, the stretch of the real
+    outline between the unmoved handles either side is replaced by the moved
+    handles; everything else keeps every vertex. Returns None when that cannot
+    be done exactly (handles added or removed, a handle not on the outline, the
+    lobe not one polygon), and the caller falls back."""
+    try:
+        if lobe is None or lobe.geom_type != "Polygon":
+            return None
+        old = [tuple(map(float, p)) for p in old_ring[:-1]]
+        new = [tuple(map(float, p)) for p in new_ring[:-1]]
+        if len(old) != len(new) or len(old) < 3:
+            return None
+        changed = [abs(a[0] - b[0]) > eps or abs(a[1] - b[1]) > eps for a, b in zip(old, new)]
+        if not any(changed):
+            return lobe
+        if all(changed):
+            return None                    # the whole ring moved: nothing to anchor to
+        coords = [tuple(c) for c in list(lobe.exterior.coords)[:-1]]
+        n, m = len(coords), len(old)
+
+        def at(p):
+            # border_between hands the handles back to within ~0.007 px of the
+            # outline's own vertices, not exactly on them
+            hits = [i for i, c in enumerate(coords)
+                    if abs(c[0] - p[0]) <= 0.05 and abs(c[1] - p[1]) <= 0.05]
+            return hits[0] if len(hits) == 1 else None
+
+        pos = [at(p) if not changed[j] else None for j, p in enumerate(old)]
+        anchors = [j for j in range(m) if pos[j] is not None]
+        if len(anchors) < 2:
+            return None
+        # handle order runs along the outline one way or the other
+        a0, a1 = anchors[0], anchors[1]
+        step = (pos[a1] - pos[a0]) % n
+        back = (pos[a0] - pos[a1]) % n
+        forward = step <= back
+        out = list(coords)
+        # splice from the end of the outline backwards so earlier indices hold
+        runs, j = [], 0
+        start = next(k for k in range(m) if not changed[k])
+        k = start
+        while True:
+            nxt = (k + 1) % m
+            if changed[nxt]:
+                run = []
+                while changed[nxt]:
+                    run.append(nxt)
+                    nxt = (nxt + 1) % m
+                if pos[k] is None or pos[nxt] is None:
+                    return None
+                runs.append((k, run, nxt))
+            k = nxt
+            if k == start:
+                break
+        pieces = []                         # (index after which to cut, count, points)
+        for k, run, nxt in runs:
+            i0, i1 = pos[k], pos[nxt]
+            if forward:
+                span = (i1 - i0) % n
+                pts = [new[r] for r in run]
+                pieces.append((i0, span, pts))
+            else:
+                span = (i0 - i1) % n
+                pts = [new[r] for r in reversed(run)]
+                pieces.append((i1, span, pts))
+        # rebuild once: walk the outline, replacing each spanned stretch
+        cut = {}
+        for i0, span, pts in pieces:
+            cut[i0] = (span, pts)
+        ring, i, seen = [], 0, 0
+        # start at a vertex that begins no cut and lies in none
+        inside = set()
+        for i0, (span, _) in cut.items():
+            for t in range(1, span):
+                inside.add((i0 + t) % n)
+        start_i = next((v for v in range(n) if v not in inside), None)
+        if start_i is None:
+            return None
+        i = start_i
+        while seen < n:
+            ring.append(coords[i])
+            if i in cut:
+                span, pts = cut[i]
+                ring.extend(pts)
+                i = (i + span) % n
+                seen += span
+            else:
+                i = (i + 1) % n
+                seen += 1
+        holes = [list(r.coords) for r in lobe.interiors]
+        cand = Polygon(ring + [ring[0]], holes)
+        if not cand.is_valid:
+            cand = cand.buffer(0)
+        cand = unary_union(_polys(cand))
+        return cand if not cand.is_empty else None
+    except Exception:
+        return None
 
 
 def move_border(features, id_prop, region_a, region_b, points, drag_start=None, orig=None):
@@ -900,7 +1046,16 @@ def move_border(features, id_prop, region_a, region_b, points, drag_start=None, 
         except Exception:
             pass
     other_union = unary_union(other_geoms).buffer(0) if other_geoms else Polygon()
-    protected = other_union.difference(pair_base).buffer(0) if not other_union.is_empty else Polygon()
+    # When one of the picks IS the section outline, it covers every neighbour, so
+    # subtracting it (as part of the pair) left nothing protected: picking hemi +
+    # CP let a drag take 104,798 px^2 of dft. Real neighbours are protected
+    # against the non-container pick alone.
+    wrap_picks = section_containers(features, id_prop) & {str(region_a), str(region_b)}
+    shield = pair_base
+    if wrap_picks:
+        kept = [g for nm, g in ((region_a, A), (region_b, B)) if str(nm) not in wrap_picks]
+        shield = unary_union(kept).buffer(0) if kept else Polygon()
+    protected = other_union.difference(shield).buffer(0) if not other_union.is_empty else Polygon()
 
     new_arc = [(float(x), float(y)) for x, y in points]
     if len(new_arc) < 2:
@@ -932,10 +1087,17 @@ def move_border(features, id_prop, region_a, region_b, points, drag_start=None, 
         outer_keys = idx[region_b if inner_is_a else region_a]
         inner_name = region_a if inner_is_a else region_b
 
-        # the dragged lobe: the part of the inner whose outline the drag began on
-        start_pt = Point(*old_arc[0])
+        # the dragged lobe: the part(s) of the inner the dragged outline runs
+        # along. Not just the one nearest its first point -- an outward drag can
+        # leave the inner in two pieces, and dragging back then rebuilt one and
+        # kept the other, so drag-back never undid it (765,938 px2 left on SSp).
+        arc_line = LineString(old_arc)
         lobes = _polys(small)
-        lobe = min(lobes, key=lambda pg: pg.exterior.distance(start_pt))
+        touched = [pg for pg in lobes if pg.exterior.distance(arc_line) <= 1.0]
+        if not touched:
+            start_pt = Point(*old_arc[0])
+            touched = [min(lobes, key=lambda pg: pg.exterior.distance(start_pt))]
+        lobe = unary_union(touched)
         rest = _safe_difference(small, lobe)
 
         ring = list(new_arc)
@@ -943,34 +1105,141 @@ def move_border(features, id_prop, region_a, region_b, points, drag_start=None, 
             ring.append(ring[0])
         if len(ring) < 4:
             raise ValueError("the dragged outline collapsed -- try a smaller drag")
-        new_lobe = Polygon(ring).buffer(0)
+        # Apply what the drag CHANGED to the real outline, not the dragged ring
+        # itself: the handles are a simplified copy of the outline, and
+        # rebuilding the inner from them dropped the detail between handles on
+        # every drag (VL.2: 865 px2 gone on a drag that moved nothing).
+        new_lobe = None
+        old_ring = list(old_arc)
+        if old_ring[0] != old_ring[-1]:
+            old_ring.append(old_ring[0])
+        # Best: the handles ARE vertices of the real outline, so between the two
+        # unmoved handles either side of each dragged one, splice the dragged
+        # handles in place of the real outline -- every other vertex stays put.
+        new_lobe = _splice_handles(lobe, old_ring, ring)
+        if new_lobe is None and len(old_ring) >= 4:
+            try:
+                oldP = unary_union(_polys(Polygon(old_ring).buffer(0)))
+                newP = unary_union(_polys(Polygon(ring).buffer(0)))
+                if not oldP.is_empty and not newP.is_empty \
+                        and oldP.symmetric_difference(lobe).area < 0.05 * lobe.area:
+                    grow = _safe_difference(newP, oldP)
+                    shrink = _safe_difference(oldP, newP)
+                    # where the real outline dips INSIDE the handle ring, the
+                    # grown piece does not touch it -- fill the dips that bridge
+                    # the two, or an outward drag splits the inner in two
+                    bridge = []
+                    if not grow.is_empty:
+                        dips = _safe_difference(_safe_intersection(oldP, newP), lobe)
+                        bridge = [d for d in _polys(dips)
+                                  if d.distance(grow) <= 0.5 and d.distance(lobe) <= 0.5]
+                    new_lobe = _safe_difference(unary_union([lobe, grow] + bridge).buffer(0),
+                                                shrink)
+                    # where the real outline bulged past the handle ring, cutting
+                    # the shrink band strands the bulge as crumbs (VL.2 came back
+                    # in 10 parts): a small piece lying mostly OUTSIDE the new
+                    # ring is one of those, not ground the drag meant to keep
+                    pieces = _polys(new_lobe)
+                    if len(pieces) > 1:
+                        total = sum(p.area for p in pieces)
+                        pieces = [p for p in pieces
+                                  if p.area >= 0.01 * total
+                                  or _safe_intersection(p, newP).area >= 0.5 * p.area]
+                        pieces = [p for p in pieces if not p.buffer(-0.5).is_empty]
+                        new_lobe = unary_union(pieces) if pieces else new_lobe
+            except Exception:
+                new_lobe = None
+        if new_lobe is None:
+            new_lobe = Polygon(ring).buffer(0)
         new_lobe = unary_union(_polys(new_lobe))
         if new_lobe.is_empty or new_lobe.area < 1.0:
             raise ValueError(f"that drag would erase {inner_name} -- try a smaller one")
         if not protected.is_empty:
-            new_lobe = _safe_difference(new_lobe, protected)   # never take a neighbour
-        new_inner = clean_geom(unary_union([rest, new_lobe]).buffer(0), smooth=False)
+            # Never take a neighbour -- with the ground this drag GAINS. Clipping
+            # the whole lobe also stripped overlap the inner already had, far
+            # from the drag: VL.2 lost 865-1,357 px2 on every drag, a no-op too.
+            kept_part = _safe_intersection(new_lobe, lobe)
+            new_lobe = unary_union([kept_part, _safe_difference(
+                _safe_difference(new_lobe, lobe), protected)]).buffer(0)
+            # Clipping the dragged outline against a neighbour leaves zero-width
+            # needles and razor-thin wedges where the two boundaries meet at a
+            # shallow angle (measured: hemi + CP, 800 px drag). Shave only the
+            # ground this drag GAINED -- a 1 px opening of the new ground, so the
+            # existing outline is never eroded -- unless the gain is itself mostly
+            # that thin (a tiny nudge), which is kept as drawn.
+            gained = _safe_difference(new_lobe, lobe)
+            if not gained.is_empty and gained.area > 0:
+                try:
+                    shaved = gained.buffer(-1.0, join_style=2).buffer(1.0, join_style=2)
+                    shaved = _safe_intersection(shaved, gained)
+                except Exception:
+                    shaved = gained
+                if not shaved.is_empty and shaved.area >= 0.5 * gained.area:
+                    # ...but only the slivers next to a neighbour: shaving all of
+                    # it also cut the thin neck that joins newly gained ground to
+                    # the inner, leaving it in two parts touching at a point
+                    thin = _safe_difference(gained, shaved)
+                    thin = _safe_intersection(thin, protected.buffer(2.0))
+                    if not thin.is_empty and thin.area > 0:
+                        new_lobe = _safe_difference(new_lobe, thin)
+        # Only the ground this drag changed is touched. clean_geom over the WHOLE
+        # inner shaved hairline slivers off it far from the drag, and the coast
+        # recession below then cut a 1,229 px needle into ISO -- on a drag that
+        # moved nothing.
+        moved = unary_union([_safe_difference(new_lobe, lobe),
+                             _safe_difference(lobe, new_lobe)]).buffer(2.0)
+        new_inner = unary_union([rest, new_lobe]).buffer(0)
+        new_inner = unary_union([p for p in _polys(new_inner)
+                                 if p.area >= 1.0 or not p.intersects(moved)] or [Polygon()])
+        new_inner = despike(new_inner, within=moved)   # needles only, only here
+        # and sharp tips the cut leaves where it meets the old outline -- only in
+        # the moved zone, and never closing a crack over a neighbour
+        new_inner = _trim_spikes(new_inner, moved, protected)
         if new_inner.is_empty or new_inner.area < 1.0:
             raise ValueError(f"that drag would erase {inner_name} -- try a smaller one")
-        new_outer = clean_geom(unary_union([big, new_inner]).buffer(0), smooth=False)
+        # The container keeps covering the inner -- but it grows only by the
+        # ground the inner GAINED in this drag. Uniting it with the whole inner
+        # also pulled in everything the inner already stuck out by: ISO grew
+        # 1,133,470 px2 (SSp) or 1,597,067 px2 (RSP) on every drag, even one
+        # that moved nothing.
+        gained_inner = _safe_difference(new_inner, small)
+        new_outer = big
+        # Only real ground that joins the container: rebuilding the inner from
+        # its ring leaves sub-pixel slivers along its overhang, and adding those
+        # left ISO in 6 parts with 18 hairlines on a drag that moved nothing.
+        add = [p for p in _polys(gained_inner)
+               if p.area >= 1.0 and not p.buffer(-0.5).is_empty
+               and p.distance(big) <= 0.5]
+        if add:
+            new_outer = unary_union([big] + add).buffer(0)
+            new_outer = despike(new_outer, within=unary_union(add).buffer(2.0))
 
         # Where the dragged stretch COINCIDED with the container's own outline
         # (borders merged, e.g. after Share borders on a coastal pair), the two
         # edges are one line and move as one -- exactly like a side-by-side
-        # pair's shared border. So the ground the inner ceded that touches the
-        # container's outer boundary recedes from the container too. Inland
-        # cessions never touch that boundary, so there the container keeps
-        # covering as before; and nothing another region owns is ever cut away.
+        # pair's shared border. So ground the inner ceded ALONG the coast
+        # recedes from the container too. A ceded piece only counts as coastal
+        # if most of the edge it was cut from lay on the coast: one that merely
+        # touches it at a vertex is an inland wedge (SSp's vertex 14, 1,724 px
+        # inland, orphaned 766,027 px2 because its neighbour vertex sat on the
+        # coast), and the container keeps covering it. Nothing another region
+        # owns is ever cut away.
         ceded = _safe_difference(lobe, new_lobe)
         if not ceded.is_empty and ceded.area > 1e-6:
-            edge = big.boundary.buffer(2.0)
-            coastal = [p for p in _polys(ceded) if p.intersects(edge)]
+            coast = big.boundary.buffer(2.0)
+            lobe_edge = lobe.boundary.buffer(0.5)
+            coastal = []
+            for p in _polys(ceded):
+                old_side = p.boundary.intersection(lobe_edge).length
+                on_coast = p.boundary.intersection(lobe_edge).intersection(coast).length
+                if old_side > 0 and on_coast >= 0.5 * old_side:
+                    coastal.append(p)
             if coastal:
                 keep_cover = unary_union([new_inner, other_union]).buffer(0)
                 cut = _safe_difference(unary_union(coastal), keep_cover)
                 if not cut.is_empty and cut.area > 1e-6:
-                    receded = clean_geom(_safe_difference(new_outer, cut).buffer(0),
-                                         smooth=False)
+                    receded = _safe_difference(new_outer, cut).buffer(0)
+                    receded = despike(receded, within=cut.buffer(2.0))
                     if not receded.is_empty and receded.area >= 1.0:
                         new_outer = receded
 
@@ -982,16 +1251,24 @@ def move_border(features, id_prop, region_a, region_b, points, drag_start=None, 
     # The old and new arc share endpoints, so old_arc + reversed(new_arc) closes a
     # thin loop = the area the border swept across. buffer(0) heals any self-touch;
     # if the drag crossed itself we keep every resulting lobe.
-    sliver = Polygon(new_arc + old_arc[::-1]).buffer(0)
-    sliver = unary_union(_polys(sliver))
+    # make_valid, not buffer(0): an S-shaped drag sweeps a bow-tie, and buffer(0)
+    # kept ONE of its lobes -- the other half of the drag was silently ignored
+    # (CP/dft, 300 px S: 1,321,380 px2).
+    sliver = unary_union(_polys(_valid(Polygon(new_arc + old_arc[::-1]))))
     if sliver.is_empty or sliver.area < 1e-6:
         return json.loads(json.dumps(features))       # no real movement
 
-    # Which way did it move? If the swept area sits INSIDE A the border was pushed
-    # into A (A shrinks); if it sits outside A, A grew. A owns the dragged arc, so A
-    # is authoritative and B conforms.
-    frac_in_a = sliver.intersection(A).area / sliver.area
-    gA = A.difference(sliver) if frac_in_a > 0.5 else A.union(sliver)
+    # Which way did it move -- lobe by lobe, since an S-drag pushes one way here
+    # and the other way there. A lobe covering more of A than of B pushed the
+    # border into A (A shrinks); otherwise A grew. Judging the whole sweep by
+    # "is half of it inside A" misread a deep drag whose far end ran past A as
+    # growth, and nothing moved (dft/CP, 1,500 px: 4.73 M px2 ignored).
+    gA = A
+    for lobe in _polys(sliver):
+        in_a = lobe.intersection(A).area
+        in_b = lobe.intersection(B).area
+        gA = gA.difference(lobe) if in_a > in_b else gA.union(lobe)
+    gA = gA.buffer(0)
     # Is B right up against the swept sliver? True for a shared border even with the
     # few px of slop these spaghetti GeoJSONs carry, but False across a real gap --
     # so a genuinely-separated B never teleports a slab across the gap to "fill".
@@ -1001,10 +1278,15 @@ def move_border(features, id_prop, region_a, region_b, points, drag_start=None, 
         # the couple into ONE solid (bridging the spaghetti slop between their non-
         # coincident edges), carve out the authoritative A, and B is exactly what's
         # left: area conserved, no gap, no overlap, whichever way the border went.
-        if A.distance(B) <= 0.5:
+        gap_ab = A.distance(B)
+        if gap_ab <= 0.5:
             U = pair_base
         else:
-            U = pair_base.buffer(1.5, join_style=2).buffer(-1.5, join_style=2)
+            # close the slop by HALF the actual gap (+ a hair), up to 3 px: a fixed
+            # 1.5 px spanned only 3 px, so across a 3-6 px gap the ground A gave up
+            # never joined B and came back to A -- "Border moved" and nothing had
+            r = min(max(1.5, gap_ab / 2.0 + 0.5), 3.5)
+            U = pair_base.buffer(r, join_style=2).buffer(-r, join_style=2)
         if not protected.is_empty:
             U = unary_union([pair_base, _safe_difference(U, protected)]).buffer(0)
         # A drag may reach PAST the pair's outer boundary -- past the section
@@ -1026,6 +1308,18 @@ def move_border(features, id_prop, region_a, region_b, points, drag_start=None, 
         gB = _safe_difference(B, gA)                   # gapped: B only cedes real overlap
         gA = clean_geom(gA.buffer(0), smooth=False)   # keep the thin transferred sliver
         gB = clean_geom(gB.buffer(0), smooth=False)
+    # An overlap the two ALREADY had stays as it was away from the drag: taking
+    # the complement handed all of it to the dragged region, so a 5 px nudge on
+    # dft/RSP took 832,449 px2 from RSP, 654,546 of it over 200 px away.
+    # (Real overlap only: a hairline band of it -- dft/HPF's 742 px2 is one --
+    # pasted back left an 899 px zero-width needle in dft.)
+    old_ov = _safe_intersection(A, B)
+    if not old_ov.is_empty and old_ov.area > 1.0:
+        keep_ov = _safe_difference(old_ov, sliver.buffer(1.0))
+        keep_ov = unary_union([p for p in _polys(keep_ov) if not _hairline(p)] or [Polygon()])
+        if not keep_ov.is_empty and keep_ov.area > 1.0:
+            gB = unary_union([gB, keep_ov]).buffer(0)
+            gB = despike(gB, within=keep_ov.buffer(2.0))
     if gA.is_empty or gA.area < 1.0:
         raise ValueError(f"that move would erase {region_a} -- try a smaller drag")
     if gB.is_empty or gB.area < 1.0:
@@ -1504,7 +1798,7 @@ def _thin_free_edges(newg, names, fluff, eps):
     return out
 
 
-def _simplify_shared(newg, tol, precision, keep_out=None):
+def _simplify_shared(newg, tol, precision, keep_out=None, frozen=None):
     """Thin out vertices on a set of border-sharing polygons WITHOUT breaking
     their coincidence. Node every boundary into one network (a shared border is a
     single edge in it), simplify each edge once -- Douglas-Peucker keeps the
@@ -1545,6 +1839,11 @@ def _simplify_shared(newg, tol, precision, keep_out=None):
     if not seams:
         return newg                       # nothing is shared: nothing to thin
     seam_zone = unary_union(seams).buffer(0)
+    # `frozen`: border the regions ALREADY shared before this edit. It is exact
+    # already; re-thinning it moved it by up to `tol` into one of them (HPF +
+    # dft: 12,024 px2 of HPF's own ground went to dft, on every Share).
+    if frozen is not None and not frozen.is_empty:
+        seam_zone = _safe_difference(seam_zone, frozen)
     if seam_zone.is_empty:
         return newg
     raw = unary_union(list(bnd.values()))
@@ -1602,8 +1901,17 @@ def _simplify_shared(newg, tol, precision, keep_out=None):
         if owner is None:
             if keep_out is not None and not keep_out.is_empty:
                 try:
-                    if keep_out.contains(rp):
-                        continue           # somebody else's ground / a real hole
+                    # by AREA, not by one point: the thinned face for OLF's
+                    # 146,324 px2 hole had its representative point just
+                    # outside the hole, so the hole was handed to OLF and filled.
+                    # And only the part IN keep_out stays out -- skipping the
+                    # whole face lost 1,549 px2 of HY + opt's own ground that
+                    # shared a face with a strict-mode shadow.
+                    if f.intersection(keep_out).area >= 0.5 * f.area:
+                        f = _safe_difference(f, keep_out)
+                        if f.is_empty or f.area < 1.0:
+                            continue       # somebody else's ground / a real hole
+                        rp = f.representative_point()
                 except Exception:
                     pass
             owner = min(names, key=lambda n: newg[n].distance(rp))
@@ -1662,7 +1970,7 @@ def _geom_at(features, k):
         g = shape(features[k]["geometry"])
     except Exception:
         return Polygon()
-    return g if g.is_valid else g.buffer(0)
+    return g if g.is_valid else _valid(g)
 
 
 def _body(features, ks):
@@ -1864,6 +2172,29 @@ def partition_regions(features, id_prop, names, tol=40.0, precision=PARTITION_GR
         Th = _safe_difference(T, _pre_holes)
         if not Th.is_empty:
             T = Th
+    # The close fills EVERY concavity narrower than 2*tol, including bays of one
+    # pick nowhere near the other: HY + PAL.2 (111 px apart, nothing to bridge)
+    # gave HY 28,945 px2 in pieces up to 9,557 px from PAL.2, and at reach 500
+    # opt + sAMY.1 took 364,000 px2 far from their seam. A close of radius tol
+    # bridges a gap up to 2*tol wide, so ground in it lies within 2*tol of BOTH
+    # sides; ground further than that from every other pick is a bay of one
+    # pick, not a gap between two. Keep only the former. And new
+    # ground stays inside the section outline (hemi) -- picks grew up to 902,000
+    # px2 past it at reach 5000.
+    if tol and tol > 0 and len(sel) >= 2:
+        bridged = _safe_difference(T, U)
+        if not bridged.is_empty:
+            # round, not mitre: a mitred corner reaches sqrt(2) times further
+            near = {n: geoms[n].buffer(2.0 * tol, quad_segs=8) for n in sel}
+            between = unary_union([_safe_intersection(near[a], near[b])
+                                   for a, b in itertools.combinations(sel, 2)] or [Polygon()])
+            keep_new = _safe_intersection(bridged, between)
+            _cont = section_containers(features, id_prop) - set(sel)
+            if _cont:
+                cont = unary_union([_body(features, idx[c]) for c in _cont if c in idx]).buffer(0)
+                if not cont.is_empty:
+                    keep_new = _safe_intersection(keep_new, cont)
+            T = unary_union([U, keep_new]).buffer(0)
     # Ground belonging to regions that are NOT being shared, so the bridged fill
     # cannot eat a third region.
     #
@@ -1915,16 +2246,11 @@ def partition_regions(features, id_prop, names, tol=40.0, precision=PARTITION_GR
         if not sh.is_empty:
             protected = unary_union([protected, sh]).buffer(0)
     T = _protect(T)
-    # De-densify the territory outline BEFORE partitioning: a sparser T gives both
-    # sparser free (non-shared) edges and a sparser Voronoi midline, done at the
-    # source so the result stays a clean disjoint tiling. Adjacent Voronoi cells
-    # share EXACT edges, so we do NOT snap per-region afterwards -- that would break
-    # the coincidence and leave sub-pixel slivers of overlap.
-    if simplify != 0:
-        s = min(max(tol * 0.5, 3.0), MAX_THIN) if simplify is None else float(simplify)
-        Ts = T.simplify(s)
-        if not Ts.is_empty and Ts.is_valid and Ts.area >= 0.98 * T.area:
-            T = _protect(Ts.buffer(0))
+    # (No territory simplify. It de-densified the WHOLE territory outline, so it
+    # reshaped coasts thousands of px from the seam -- 92% of the far-from-seam
+    # ground at reach 40 -- filled regions' own holes and grew picks outside
+    # hemi. The shared network is still thinned afterwards, by _simplify_shared,
+    # which keeps the tiling exact.)
 
     # Voronoi sampling: coarse (== tol) for large regions so the output stays sparse,
     # but never coarser than ~1/24 of the smallest region's perimeter, so small
@@ -1975,7 +2301,27 @@ def partition_regions(features, id_prop, names, tol=40.0, precision=PARTITION_GR
             for n, got in parts.items():
                 claimed[n] = unary_union(got).buffer(0) if got else Polygon()
     else:
-        claimed = _nearest_partition(T, geoms, spacing)
+        # Ground only ONE pick owns stays that pick's. The nearest-region split
+        # samples each outline at `spacing` (up to the reach) and insets the
+        # sites, so run over the whole territory it handed pieces of a pick's own
+        # body to its partner -- 33 of 41 real pairs over 100 px2 at reach 40
+        # (TH + lft 48,576), up to 275,814 at 500 -- and every further Share moved
+        # the seam again (HY + TH 531,927 px2 on the second pass). Only contested
+        # ground -- the bridged gap and any overlap between the picks -- is split.
+        excl = {}
+        for n in sel:
+            others = [geoms[m] for m in sel if m != n]
+            excl[n] = _safe_difference(geoms[n], unary_union(others)) if others else geoms[n]
+        owned = unary_union([g for g in excl.values() if not g.is_empty] or [Polygon()])
+        contested = _safe_difference(T, owned)
+        claimed = {n: excl[n] for n in sel}
+        if not contested.is_empty and contested.area > 1e-6:
+            share = _nearest_partition(contested, geoms, spacing)
+            for n in sel:
+                got = share.get(n)
+                if got is not None and not got.is_empty:
+                    got = _safe_intersection(got, contested)
+                    claimed[n] = unary_union([claimed[n], got]).buffer(0)
 
     newg = {}
     for n in sel:
@@ -2122,7 +2468,21 @@ def partition_regions(features, id_prop, names, tol=40.0, precision=PARTITION_GR
     # the kept region's own outline, and the other's new edge is a copy of it --
     # and thinning the network would move the one outline that has to stay put.
     if thin > 0 and snap_keep is None:
-        newg = _simplify_shared(newg, thin, precision, keep_out=keep_out)
+        # border the picks already shared is left exactly where it was
+        frozen = Polygon()
+        try:
+            fz = []
+            for i, a in enumerate(sel):
+                for b in sel[i + 1:]:
+                    c = _safe_intersection(geoms[a].boundary.buffer(0.5),
+                                           geoms[b].boundary.buffer(0.5))
+                    if not c.is_empty:
+                        fz.append(c)
+            if fz:
+                frozen = unary_union(fz).buffer(0)
+        except Exception:
+            frozen = Polygon()
+        newg = _simplify_shared(newg, thin, precision, keep_out=keep_out, frozen=frozen)
         # Thinning is what used to leave the black wedges: measured over 72
         # configurations it opened an interior void in 10 of them, up to 607 px,
         # while skipping it left 2 of 72 at 1.4 px. Douglas-Peucker moves a
@@ -2134,6 +2494,33 @@ def partition_regions(features, id_prop, names, tol=40.0, precision=PARTITION_GR
         except Exception:
             _rim = None
         _close_voids(2, skip=_rim)
+        # Thinning a seam that runs along the coast can cut a pick's OWN ground
+        # (1,549 px2 of HY + opt), and the rim skip above keeps it from coming
+        # back. Give such ground back to the pick that owned it -- only that
+        # pick, only where it is still attached, so no new part, no stray shard.
+        try:
+            claimed_now = unary_union([g for g in newg.values() if not g.is_empty]).buffer(0)
+            lost_own = _safe_difference(U, claimed_now)
+            if not keep_out.is_empty:
+                lost_own = _safe_difference(lost_own, keep_out)
+            for piece in _polys(lost_own):
+                if piece.area < 1.0:
+                    continue
+                owner = max(sel, key=lambda n: _safe_intersection(geoms[n], piece).area)
+                if (_safe_intersection(geoms[owner], piece).area >= 0.5 * piece.area
+                        and newg[owner].distance(piece) < 1e-6):
+                    joined = unary_union([newg[owner], piece]).buffer(0)
+                    if len(_polys(joined)) <= len(_polys(newg[owner])):
+                        newg[owner] = joined
+        except Exception:
+            pass
+
+    # Every pick valid before the overlap pass: the void-closing grid snap can
+    # leave a self-touching ring (opt + sAMY.2 at reach 500 raised "side location
+    # conflict" in the intersects() below).
+    for n in sel:
+        if not newg[n].is_empty and not newg[n].is_valid:
+            newg[n] = _valid(newg[n])
 
     # Guarantee a clean tiling: remove any residual sliver overlaps deterministically
     # (later-listed region cedes the overlap to the earlier one, giving an exact
@@ -2149,7 +2536,13 @@ def partition_regions(features, id_prop, names, tol=40.0, precision=PARTITION_GR
             continue
         for j in range(i + 1, len(sel)):
             b = newg[sel[j]]
-            if b.is_empty or not a.intersects(b):
+            if b.is_empty:
+                continue
+            try:
+                hit = a.intersects(b)
+            except Exception:          # GEOS "side location conflict" on near-
+                hit = True             # degenerate input: let the robust path decide
+            if not hit:
                 continue
             try:
                 ov = _safe_intersection(a, b)
@@ -2332,19 +2725,58 @@ def partition_regions(features, id_prop, names, tol=40.0, precision=PARTITION_GR
                         f"{n!r}, which lies inside it; nothing was changed")
                 trimmed[n] = t
             if not freed.is_empty and others:
-                if len(others) == 1:
-                    trimmed[others[0]] = unary_union(
-                        [trimmed[others[0]], freed]).buffer(0)
-                else:
-                    live = {n: g for n, g in trimmed.items() if not g.is_empty}
-                    try:
-                        share = _nearest_partition(freed, live, spacing) \
-                            if len(live) > 1 else {next(iter(live)): freed}
-                    except Exception:
-                        share = {}
+                # Only freed ground a partner actually TOUCHES goes to it, and
+                # never a hairline. Handing over everything gave CP 24 detached
+                # shards and +18 needles / +42 spikes on "Snap to dft" -- the
+                # slivers from all round dft's outline, and a 12,224 px2 notch
+                # between dft and V3, 11,600 px from the seam. Ground no partner
+                # touches stays as it was before the share: unclaimed.
+                live = {n: g for n, g in trimmed.items() if not g.is_empty}
+                for piece in _polys(freed):
+                    if _hairline(piece):
+                        continue
+                    touch = {n: g for n, g in live.items() if g.distance(piece) <= 0.5}
+                    if not touch:
+                        continue
+                    if len(touch) == 1:
+                        share = {next(iter(touch)): piece}
+                    else:
+                        try:
+                            share = _nearest_partition(piece, touch, spacing)
+                        except Exception:
+                            share = {}
                     for n, g in share.items():
-                        if not g.is_empty:
+                        if g is not None and not g.is_empty:
+                            g = _safe_intersection(g, piece)
                             trimmed[n] = unary_union([trimmed[n], g]).buffer(0)
+                            live[n] = trimmed[n]
+            # what the partner keeps of its own result, minus the kept region,
+            # can be a hairline crumb (a sliver of the kept outline it used to
+            # overlap): drop those too
+            # -- and a part that is ALL new ground, cut off from the partner by
+            # the kept outline, is a shard of bridged territory (opt took 110,795
+            # px2 up to 1,915 px away snapping to sAMY.1 at reach 500): it stays
+            # unclaimed, as it was
+            for n in list(trimmed):
+                ps = _polys(trimmed[n])
+                if len(ps) > 1:
+                    own = raw_bodies.get(n)
+                    good = [p for p in ps if not _hairline(p)
+                            and (own is None or own.is_empty
+                                 or _safe_intersection(p, own).area > 1.0)]
+                    if good:
+                        trimmed[n] = unary_union(good)
+            # where the kept edge meets the partner's own edge at a hair's angle
+            # the partner is left a sharp crack (opt beside sAMY.1); trim such
+            # vertices along the seam, closing a crack only over empty ground
+            try:
+                seam_zone = exact.boundary.buffer(2.0)
+                taken = unary_union([exact] + ([protected] if not protected.is_empty else []))
+                for n in list(trimmed):
+                    if not trimmed[n].is_empty:
+                        trimmed[n] = _trim_spikes(trimmed[n], seam_zone, taken)
+            except Exception:
+                pass
             newg[snap_keep] = exact
             for n, g in trimmed.items():
                 newg[n] = g
@@ -2396,6 +2828,24 @@ def partition_regions(features, id_prop, names, tol=40.0, precision=PARTITION_GR
         if keep and len(keep) < len(parts):
             newg[n] = keep[0] if len(keep) == 1 else unary_union(keep).buffer(0)
 
+    # LAST: a sharp tip where the new seam meets a pick's own, exactly kept edge
+    # at a hair's angle (opt and sAMY.4 at reach 500). Only where this Share
+    # changed the outline, and a crack is closed only over ground nobody holds.
+    for n in sel:
+        if n == snap_keep or newg[n].is_empty:
+            continue
+        try:
+            zone = newg[n].symmetric_difference(geoms[n]).buffer(2.0)
+            if zone.is_empty:
+                continue
+            others = unary_union([newg[m] for m in sel if m != n and not newg[m].is_empty]
+                                 + ([protected] if not protected.is_empty else []))
+            t = _trim_spikes(newg[n], zone, others)
+            if t is not None and not t.is_empty and t.area >= 0.99 * newg[n].area:
+                newg[n] = t
+        except Exception:
+            pass
+
     out = json.loads(json.dumps(features))
     for n in sel:
         _write_body(out, features, idx[n], newg[n])
@@ -2403,7 +2853,7 @@ def partition_regions(features, id_prop, names, tol=40.0, precision=PARTITION_GR
     return {"features": out, "borders": _shared_arcs(newg, sel, spacing)}
 
 
-def snap_to_edits(before, after, id_prop, moved, tol=40.0, precision=1.0):
+def snap_to_edits(before, after, id_prop, moved, tol=40.0, precision=0.0):
     """Authoritative snap: the moved region(s) keep exactly the shape the user
     dragged; every other region conforms. Handles BOTH directions --
       * push (mover grew into a neighbour): the overlap is cut out of the neighbour;
@@ -2454,6 +2904,12 @@ def snap_to_edits(before, after, id_prop, moved, tol=40.0, precision=1.0):
     idx = _index_all(after, id_prop)
     for n in others:
         g = newg[n]
+        # Only a region the snap actually changed is rewritten. Writing every
+        # one back through a 1 px grid moved ISO 13,198 px2 from 5,900 px away,
+        # lost ~14,000 px2 of map and added +2,663 px2 of overlap -- with no
+        # edit at all. (precision now defaults to 0: no rounding.)
+        if g.symmetric_difference(aidx[n]).area <= 1e-9:
+            continue
         if precision and not g.is_empty:
             g = set_precision(g, float(precision))
         g = g.buffer(0)
@@ -2492,7 +2948,8 @@ def _common_base_name(names):
         tag = parsed[0][0]
         nums = sorted(n for _t, n in parsed if n is not None)
         return _damage.format_name(tag, nums[0]) if nums else names[0]
-    stripped = [re.sub(r"[\s_\-]*\d+\s*$", "", n).strip() for n in names]
+    # a dot counts as a separator too: 'PAL.1' + 'PAL.2' used to merge to 'PAL.'
+    stripped = [re.sub(r"[\s_\-.]*\d+\s*$", "", n).strip() for n in names]
     if stripped and stripped[0] and all(s == stripped[0] for s in stripped):
         return stripped[0]
     return names[0] if names else "merged"
@@ -2576,6 +3033,51 @@ def concat_region_files(groups, id_prop, src_prop=SRC_PROP):
 #: current reach, or it could never tell anyone to raise it.
 GAP_SEARCH = 1000.0
 
+#: A gap narrower than this is boolean noise, not something anybody is trying
+#: to fill.
+MIN_GAP_WIDTH = 2.0
+
+#: The reach readout is the smallest Snap reach whose close covers this share
+#: of the gap -- "closes it" in the sense the user sees, not to the last pixel.
+GAP_COVER = 0.95
+
+
+def _reach_to_close(U, piece, hi):
+    """Smallest Snap reach whose close of the picks' union U covers GAP_COVER of
+    `piece` -- the same mitre close partition_regions uses, so this is the reach
+    at which Share borders (Fill all) actually fills the gap. The close only
+    grows with its radius, so bisect. A close at radius r is decided by U within
+    a few r of a point (mitre joins reach further than r at sharp corners), so U
+    is clipped to a window around the piece first. None if even `hi` does not
+    cover it."""
+    target = piece.area * GAP_COVER
+    if target <= 0:
+        return None
+
+    def covered(r):
+        win = piece.envelope.buffer(6.0 * r + 2.0, join_style=2)
+        u = _safe_intersection(U, win)
+        if u.is_empty:
+            return False
+        try:
+            c = u.buffer(r, join_style=2).buffer(-r, join_style=2)
+        except Exception:
+            return False
+        return _safe_intersection(c, piece).area >= target
+
+    lo, hi = 0.5, float(hi)
+    if not covered(hi):
+        return None
+    for _ in range(14):
+        if hi - lo < 0.5:
+            break
+        mid = 0.5 * (lo + hi)
+        if covered(mid):
+            hi = mid
+        else:
+            lo = mid
+    return hi
+
 
 def gap_between(features, id_prop, names, search=GAP_SEARCH):
     """Where the gap between the picked regions is, and how wide it is there.
@@ -2592,18 +3094,19 @@ def gap_between(features, id_prop, names, search=GAP_SEARCH):
     So this finds the gap itself: ground nobody owns, lying between at least
     two of the picks, within reach of a close at `search`. Of those pieces the
     largest is "the gap", and the circle goes at its WIDEST point -- the centre
-    of the largest circle that fits inside it -- because that is where it is
-    hardest to bridge. A close of radius r bridges up to 2r across, so the reach
-    that closes the whole gap is half its width there, and the circle drawn at
-    that point is directly comparable with it.
+    of the largest circle that fits inside it. The reach that closes the gap is
+    MEASURED (`reach`), not taken as half that width: the widest circle is
+    usually pinned by a third region or the section edge, and an open bay needs
+    far more than width/2. Assuming width/2 was wrong for 21 of 22 real gaps.
 
     Same ownership rules as partition_regions: another region's ground is never
     gap, and a region that wraps the picks (`hemi`) is a container rather than a
     neighbour -- its ground is exactly what a gap between two of its children is.
 
-    Returns {kind, centre, width, area, pieces}:
+    Returns {kind, centre, width, area, pieces[, reach]}:
       kind "gap"    -- the circle goes on the gap; `width` is the gap's width at
-                       its widest, so a reach of width/2 closes all of it
+                       its widest; `reach` is the smallest Snap reach that
+                       closes it (None if no reach up to `search` does)
       kind "apart"  -- no unclaimed gap, but the picks do not touch; the circle
                        goes where they come closest and `width` is that distance
       None          -- they already touch with nothing visible between them, so
@@ -2679,14 +3182,11 @@ def gap_between(features, id_prop, names, search=GAP_SEARCH):
             found.append((p, c, w))
     if found:
         p, c, w = max(found, key=lambda t: t[0].area)
+        reach = _reach_to_close(U, p, R)
         return {"kind": "gap", "centre": [float(c.x), float(c.y)], "width": float(w),
-                "area": float(p.area), "pieces": len(found)}
+                "area": float(p.area), "pieces": len(found),
+                "reach": None if reach is None else float(reach)}
     return _narrowest_answer(bodies)
-
-
-#: A gap narrower than this is boolean noise, not something anybody is trying
-#: to fill.
-MIN_GAP_WIDTH = 2.0
 
 
 def _narrowest_answer(bodies):
@@ -2768,6 +3268,17 @@ def _shadows_between(protected, bodies, gap, reach):
         return Polygon()
     if near.is_empty:
         return Polygon()
+    # Only a piece that actually STANDS IN the gap casts a shadow. A neighbour
+    # merely within reach -- touching the end of a seam, or beside it -- used to
+    # shadow it too: strict Merge left up to 74,647 px2 of seam (PAL.1 + sAMY.1)
+    # unsealed with nothing standing in it.
+    try:
+        near = unary_union([q for q in _polys(near) if q.intersection(gap).area > 1.0]
+                           or [Polygon()])
+    except Exception:
+        pass
+    if near.is_empty:
+        return Polygon()
     out = []
     for i, a in enumerate(bodies):
         for b in bodies[i + 1:]:
@@ -2801,12 +3312,22 @@ def merge_regions(features, id_prop, names, new_name=None, seam_tol=40.0,
     sel = [str(n) for n in names if str(n) in idx]
     if len(sel) < 2:
         raise ValueError("pick at least two regions to merge")
+    _refuse_container_picks(features, id_prop, sel, "merged into another region")
+    # Damage and tissue never merge: [separation.1, TH] turned all of TH into the
+    # damage shape, and [TH, separation.1] silently deleted the damage.
+    kinds = {bool(_damage.is_damage(n)) for n in sel}
+    if len(kinds) > 1:
+        raise ValueError("those picks mix damage shapes with regions -- merge damage "
+                         "with damage, or regions with regions")
     bodies = [_body(features, idx[n]) for n in sel]
     merged = unary_union(bodies).buffer(0)
 
     sealed = 0.0
     parts = _polys(merged)
-    if len(parts) > 1 or any(p.interiors for p in parts):
+    # Always look for seams. Only a union in several parts or with holes used to
+    # be sealed, so a slit open at ONE end -- neither -- stayed open (13,004 px2
+    # on the real lft + TH).
+    if parts:
         w = max(float(seam_tol) / 2.0, 1.0)
         try:
             closed = merged.buffer(w, join_style=2).buffer(-w, join_style=2).buffer(0)
@@ -2880,21 +3401,28 @@ def merge_regions(features, id_prop, names, new_name=None, seam_tol=40.0,
                 collar = c.buffer(1.0)
                 if sum(1 for b in bodies if b.intersects(collar)) >= 2:
                     fill.append(c)
+        # A seal stays inside the section outline (hemi): TH + V3 at reach 5000
+        # sealed 89,523 px2 outside it.
+        _cont = section_containers(features, id_prop) - set(sel)
+        if fill and _cont:
+            cont = unary_union([_body(features, idx[c]) for c in _cont if c in idx]).buffer(0)
+            if not cont.is_empty:
+                fill = [p for c in fill for p in _polys(_safe_intersection(c, cont))
+                        if p.area > 0]
         if fill:
-            merged = unary_union([merged] + fill).buffer(0)
-            merged = _snap_polys(merged, 0.01)     # fuse the hairline join
-            merged = clean_geom(merged, smooth=False)
-            # LAST: take anybody else's ground back off. The grid snap and the
-            # clean both nudge the boundary outward a hair, which is enough to
-            # cover half of a thin neighbour -- measured, 30 px of a 0.3 px wide,
-            # 60 px sliver ended up under the merged body even though the
-            # corridor fill had correctly left it alone. Trimming the corridors
-            # is not sufficient on its own; this is.
+            # Taken in the way Fix a gap takes a gap in: changed only within a
+            # pixel of the seal. A grid snap and clean_geom over the WHOLE
+            # outline used to re-shape it everywhere (a dense outline went from
+            # 3,193 vertices to 13) and dropped any part under 25 px2.
+            seal = unary_union(fill).buffer(0)
+            merged = _absorb_at(merged, seal, seal.buffer(1.0), protected)
+            # LAST: take anybody else's ground back off -- only ground the seal
+            # added can be theirs.
             if not protected.is_empty:
                 m2 = _safe_difference(merged, protected)
                 if not m2.is_empty and m2.area >= 0.5 * merged.area:
                     merged = m2
-            sealed = float(sum(c.area for c in fill))
+            sealed = float(seal.area)
 
     # EVERY merge, not just the sealed ones: a union of outlines that nearly
     # coincide leaves zero-width needles -- the "line going into the region" that
@@ -2904,9 +3432,28 @@ def merge_regions(features, id_prop, names, new_name=None, seam_tol=40.0,
     # commonest, so the pass belongs here.
     merged = despike(merged)
 
-    name = str(new_name).strip() if new_name else _common_base_name(sel)
-    keep = idx[sel[0]][0]
+    # The LARGEST pick is the base -- its name (unless the picks share a base
+    # name), colour and properties -- whatever order they were clicked in; the
+    # first click decided before. Anything the base lacks is carried over from
+    # the others, and their notes are kept alongside its own: a merge used to
+    # drop every property of every pick but the first.
+    order = sorted(sel, key=lambda n: -bodies[sel.index(n)].area)
+    name = str(new_name).strip() if new_name else _common_base_name(order)
+    keep = idx[order[0]][0]
     first = _rename_props(json.loads(json.dumps(features[keep])), id_prop, name)
+    props = dict(first.get("properties") or {})
+    for n in order[1:]:
+        for k in idx[n]:
+            for key, val in ((features[k].get("properties") or {}).items()):
+                if key in (id_prop, "classification", "color", "colour", "fill") or val in (None, ""):
+                    continue
+                cur = props.get(key)
+                if cur in (None, ""):
+                    props[key] = val
+                elif (isinstance(cur, str) and isinstance(val, str) and val != cur
+                      and any(t in key.lower() for t in ("note", "comment", "descr"))):
+                    props[key] = f"{cur} | {val}"
+    first["properties"] = props
     first["geometry"] = mapping(merged)
     drop = {k for n in sel for k in idx[n]}     # every lobe of every merged name
     out = []
@@ -2947,6 +3494,7 @@ def split_region(features, id_prop, name, points, new_name=None, min_piece=100.0
     if name not in idx:
         raise ValueError(f"region not found: {name!r}")
     _guard_duplicate_names(features, id_prop, [name], "splitting")
+    _refuse_container_picks(features, id_prop, [name], "split")
     G = shape(features[idx[name]]["geometry"])
     if not G.is_valid:
         G = G.buffer(0)
@@ -2956,15 +3504,33 @@ def split_region(features, id_prop, name, points, new_name=None, min_piece=100.0
     if len(coords) > 2 and not LineString(coords).is_simple:
         raise ValueError("that cut line crosses itself — draw a single stroke across the region")
 
-    # Extend by the region's own diagonal, not a fixed distance: a stroke drawn
-    # through the middle of a 15,000 px region has to reach both edges to cut it.
+    # The stroke has to reach the edge to cut, so an end that stops short INSIDE
+    # the region is carried on -- but only to where it first leaves the region.
+    # Extending by the whole diagonal cut regions nobody drew across: a 300 px
+    # stroke ending 8,958 px short of dft still cut it in two, and a stroke ending
+    # in one arm of dft cut the other arm as well.
+    if not LineString(coords).intersects(G):
+        raise ValueError("that cut line doesn't touch the region — draw it across the region")
     minx, miny, maxx, maxy = G.bounds
     ext = max(((maxx - minx) ** 2 + (maxy - miny) ** 2) ** 0.5, 1000.0)
+    edge = G.boundary
 
     def _ext(end, prev):
+        if not G.contains(Point(end)):
+            return end                         # already at or past the edge
         dx, dy = end[0] - prev[0], end[1] - prev[1]
         n = (dx * dx + dy * dy) ** 0.5 or 1.0
-        return (end[0] + dx / n * ext, end[1] + dy / n * ext)
+        ux, uy = dx / n, dy / n
+        ray = LineString([end, (end[0] + ux * ext, end[1] + uy * ext)])
+        hit = ray.intersection(edge)
+        pts = []
+        for g in ([hit] if hit.geom_type in ("Point", "LineString") else list(getattr(hit, "geoms", []))):
+            pts.extend(list(g.coords) if g.geom_type == "LineString" else [(g.x, g.y)])
+        pts = [p for p in pts if (p[0] - end[0]) ** 2 + (p[1] - end[1]) ** 2 > 1e-12]
+        if not pts:
+            return (end[0] + ux * ext, end[1] + uy * ext)
+        fx, fy = min(pts, key=lambda p: (p[0] - end[0]) ** 2 + (p[1] - end[1]) ** 2)
+        return (fx + ux * 1.0, fy + uy * 1.0)  # a pixel past the edge, so it cuts
 
     line = LineString([_ext(coords[0], coords[1])] + coords[1:-1] + [_ext(coords[-1], coords[-2])])
     pieces = _polys(split(G, line))
@@ -2984,6 +3550,11 @@ def split_region(features, id_prop, name, points, new_name=None, min_piece=100.0
     if small < float(min_piece):
         raise ValueError(f"that cut only shaves a {small:.0f} px² sliver off the edge — "
                          "draw it further across the region")
+    # The LARGER piece keeps the name, whichever way the stroke was drawn: the
+    # drawing direction decided before, and HY's main body came out as "HY 2"
+    # (over 40 cuts the smaller piece kept the name half the time).
+    if gA.area < gB.area:
+        gA, gB = gB, gA
 
     taken = set(idx)
     nameB = str(new_name).strip() if new_name else None
@@ -3124,7 +3695,7 @@ def repair_features(features, id_prop):
             continue
         if g.is_valid and not g.is_empty:
             continue
-        healed = g.buffer(0)
+        healed = _valid(g)                 # keeps every lobe, unlike buffer(0)
         if healed.is_empty or not healed.is_valid:
             continue
         f["geometry"] = mapping(healed)
@@ -3149,7 +3720,7 @@ def _feature_geoms(features, id_prop):
         except Exception:
             continue
         if not g.is_valid:
-            g = g.buffer(0)
+            g = _valid(g)
         if g.is_empty:
             continue
         key = str(i)
@@ -3203,22 +3774,61 @@ def find_gap(features, id_prop, point, tol=40.0, grab=None, max_close=None):
     geoms, names = _feature_geoms(features, id_prop)
     if not geoms:
         raise ValueError("no regions loaded")
+    # The section outline (hemi) covers every void between its regions, so with it
+    # counted every click answered "that point is inside hemi" and the tool never
+    # worked with hemi switched on -- the default. It is a container, not a
+    # neighbour: set it aside, and instead use it as the bound -- a gap is ground
+    # INSIDE the section, so a click outside it, or a gap reaching past it, is not
+    # one (with hemi off, a click near the edge used to hand 320,000 px^2 of
+    # background outside the section to V3).
+    wrap = section_containers(features, id_prop)
+    container = None
+    if wrap:
+        container = unary_union([g for k, g in geoms.items() if names[k] in wrap]).buffer(0)
+        geoms = {k: g for k, g in geoms.items() if names[k] not in wrap}
+        names = {k: n for k, n in names.items() if k in geoms}
+        if not geoms:
+            raise ValueError("no regions loaded")
+        if not container.covers(pt):
+            raise ValueError(f"that point is outside {sorted(wrap)[0]} -- click a gap "
+                             "inside the section")
     inside = [names[k] for k, g in geoms.items() if g.covers(pt)]
     if inside:
         raise ValueError(f"that point is inside {inside[0]} -- click the empty gap itself")
+
+    def _bounded(gp):
+        # Clip to the section and keep the piece under the click. Clipping at the
+        # outline's edge can leave a zero-width needle where the two boundaries
+        # run together, so despike it (needles only -- area-preserving).
+        if gp is None or container is None:
+            return gp
+        gp = _void_at(_safe_intersection(gp, container), pt, grab)
+        if gp is None or gp.is_empty:
+            return None
+        gp = despike(gp)
+        return gp if gp is not None and not gp.is_empty and gp.area > 0 else None
 
     U = unary_union(list(geoms.values())).buffer(0)
     grab = float(tol if grab is None else grab)
 
     holes = _holes(U)
-    gap = _void_at(unary_union(holes), pt, grab) if holes else None
+    gap = _bounded(_void_at(unary_union(holes), pt, grab) if holes else None)
     if gap is not None:
+        # A void with ONE region all around it is that region's own hole (OLF's
+        # 146,324 px^2, HY's 60,562 on the real file), not ground left between
+        # regions. Deliberate holes are kept -- the same rule Share borders follows
+        # -- so it is refused here rather than silently filled into the region.
+        owners = _touching_regions(geoms, gap, 1.0)
+        if len(owners) == 1:
+            raise ValueError(f"that is a hole inside {names[owners[0]]} itself, not a gap "
+                             "between regions -- holes in a region are kept. If it should "
+                             "not be there, remove it from that region in Edit points.")
         return gap, "enclosed", geoms, names
 
     if tol and tol > 0:
         try:
             closed = U.buffer(tol, join_style=2).buffer(-tol, join_style=2).buffer(0)
-            gap = _void_at(_safe_difference(closed, U), pt, grab)
+            gap = _bounded(_void_at(_safe_difference(closed, U), pt, grab))
         except Exception:
             gap = None
         if gap is not None and not gap.is_empty:
@@ -3233,6 +3843,7 @@ def find_gap(features, id_prop, point, tol=40.0, grab=None, max_close=None):
     span = max(((maxx - minx) ** 2 + (maxy - miny) ** 2) ** 0.5, tol * 4)
     cap = float(span if max_close is None else max_close)
     r = float(tol) if tol and tol > 0 else 40.0
+    rim = False
     while r <= cap:
         window = pt.buffer(r * 6.0 + 50.0)
         local = _safe_intersection(U, window)
@@ -3243,9 +3854,26 @@ def find_gap(features, id_prop, point, tol=40.0, grab=None, max_close=None):
             except Exception:
                 comp = None
             if comp is not None and comp.area > 0 and comp.within(window):
-                if len(_touching_regions(geoms, comp, tol * 0.05)) >= 2:
+                comp = _bounded(comp)
+                # The margin between the tissue's coast and the section outline is
+                # background, not a gap between regions. A corridor between two
+                # regions meets the outline, if at all, across a mouth about as wide
+                # as itself; ground that meets it along more than 4x the reach (or a
+                # fifth of its perimeter) is that margin. Measured on the real file:
+                # one click 686 px from the tissue found a 4,692,033 px^2 pocket
+                # meeting hemi's edge along 3,944 px, and handed it to seven regions.
+                # (Switching the outline off still lets a wide coastal corridor fill.)
+                if comp is not None and container is not None:
+                    edge = comp.boundary.intersection(container.boundary.buffer(1.0)).length
+                    if edge > min(4.0 * float(tol or 40.0), 0.2 * comp.length):
+                        rim = True              # a wider bridge only reaches further in
+                        break
+                if comp is not None and len(_touching_regions(geoms, comp, tol * 0.05)) >= 2:
                     return comp, "between", geoms, names
         r *= 2.0
+    if rim:
+        raise ValueError(f"that is the margin between the tissue and {sorted(wrap)[0]}'s "
+                         "outline, not a gap between regions")
 
     # NB: no "near both regions" fallback here. Growing two buffers until they
     # overlap eventually matches ANY point, including empty background far from
@@ -3254,22 +3882,245 @@ def find_gap(features, id_prop, point, tol=40.0, grab=None, max_close=None):
     raise ValueError("no gap there -- click inside the empty sliver you want removed")
 
 
+_MIN_GAP_AREA = 1.0     # px2: a "gap" smaller than this is a hairline, not ground
+
+
+def _hairline(p):
+    """The sandbox lint's hairline test: a part (or hole) that all but vanishes
+    under a half-pixel erosion."""
+    if p.area < _MIN_GAP_AREA:
+        return True
+    e = p.buffer(-0.5)
+    return e.is_empty or e.area < 0.01 * p.area
+
+
+def _trim_spikes(geom, zone, others=None, max_deg=2.0, min_len=3.0, passes=50):
+    """Remove the sharp vertices (edges leaving under `max_deg` apart, both at
+    least `min_len` long -- the sandbox lint's spike) that lie in `zone`.
+    A tip of the region is cut off, and the sliver stays empty ground; a crack
+    INTO the region is closed only if the sliver that fills it overlaps none of
+    `others`. Either way the sliver must lie inside `zone`, so nothing away
+    from the gap moves."""
+    from shapely.geometry.polygon import orient
+    if geom is None or geom.is_empty:
+        return geom
+    reach = zone.buffer(0.5)
+    out, any_change = [], False
+    for p in _polys(geom):
+        p = orient(p, 1.0)               # exterior CCW, holes CW
+        rings = [list(p.exterior.coords)[:-1]] + [list(r.coords)[:-1] for r in p.interiors]
+        changed = False
+        for ri in range(len(rings)):
+            pts = rings[ri]
+            for _ in range(passes):
+                n, drop = len(pts), None
+                if n < 4:
+                    break
+                for i in range(n):
+                    p0, p1, p2 = pts[i - 1], pts[i], pts[(i + 1) % n]
+                    ax, ay = p0[0] - p1[0], p0[1] - p1[1]
+                    bx, by = p2[0] - p1[0], p2[1] - p1[1]
+                    la, lb = math.hypot(ax, ay), math.hypot(bx, by)
+                    if la < 0.5 or lb < 0.5:
+                        continue
+                    c = max(-1.0, min(1.0, (ax * bx + ay * by) / (la * lb)))
+                    ang = math.degrees(math.acos(c))
+                    # the lint's spike: sharp AND long-legged; a near-zero-width
+                    # doubling back counts at any length from half a pixel (a
+                    # 2.4 px needle on lft escaped the 3 px rule)
+                    if not ((la >= min_len and lb >= min_len and ang < max_deg)
+                            or ang < 0.5):
+                        continue
+                    # with this orientation a positive turn is a tip of the region
+                    # itself (dropping the vertex takes material away); a negative
+                    # one is a crack into it (dropping it adds the sliver)
+                    turn = (p1[0] - p0[0]) * (p2[1] - p1[1]) - (p1[1] - p0[1]) * (p2[0] - p1[0])
+                    if abs(turn) < 1e-6:
+                        # the ring doubles straight back (a zero-area zig-zag the
+                        # union leaves at the seam): dropping it changes no ground
+                        if reach.covers(Point(p1)):
+                            drop = i
+                            break
+                        continue
+                    tri = Polygon([p0, p1, p2])
+                    if not tri.is_valid or not tri.within(reach):
+                        continue
+                    if turn < 0 and others is not None and not others.is_empty \
+                            and tri.intersection(others).area > 1e-6:
+                        continue
+                    drop = i
+                    break
+                if drop is None:
+                    break
+                pts = pts[:drop] + pts[drop + 1:]
+                changed = True
+            rings[ri] = pts
+        if changed and len(rings[0]) >= 3:
+            q = Polygon(rings[0] + [rings[0][0]],
+                        [r + [r[0]] for r in rings[1:] if len(r) >= 3])
+            out.append(q if q.is_valid else q.buffer(0))
+            any_change = True
+        else:
+            out.append(p)
+    if not any_change:
+        return geom
+    return out[0] if len(out) == 1 else unary_union(out)
+
+
+def _zone_flaws(geom, zone):
+    """Spikes + needles on the rings of `geom`, counting only rings that reach
+    `zone` (cheap: a region's far-away outline is never walked)."""
+    import shapely as _sh
+    n = 0
+    for p in _polys(geom):
+        for r in [p.exterior] + list(p.interiors):
+            if not r.intersects(zone):
+                continue
+            cs = list(r.coords)[:-1]
+            m = len(cs)
+            if m < 3:
+                continue
+            inz = _sh.dwithin(_sh.points(cs), zone, 0.0)
+            for i in (i for i in range(m) if inz[i]):
+                # spike at vertex i (the lint's test)
+                p0, p1, p2 = cs[i - 1], cs[i], cs[(i + 1) % m]
+                ax, ay = p0[0] - p1[0], p0[1] - p1[1]
+                bx, by = p2[0] - p1[0], p2[1] - p1[1]
+                la, lb = math.hypot(ax, ay), math.hypot(bx, by)
+                if la >= 3.0 and lb >= 3.0:
+                    c = max(-1.0, min(1.0, (ax * bx + ay * by) / (la * lb)))
+                    if math.degrees(math.acos(c)) < 2.0:
+                        n += 1
+                # needle: edge i running back along one of the next few edges
+                ea = LineString([cs[i], cs[(i + 1) % m]])
+                if ea.length < 2.0:
+                    continue
+                for j in range(i + 2, i + 8):
+                    q0, q1 = cs[j % m], cs[(j + 1) % m]
+                    if {tuple(cs[i]), tuple(cs[(i + 1) % m])} & {tuple(q0), tuple(q1)}:
+                        continue
+                    eb = LineString([q0, q1])
+                    if eb.length < 2.0 or ea.distance(eb) >= 0.01:
+                        continue
+                    short, other = (ea, eb) if ea.length <= eb.length else (eb, ea)
+                    if short.interpolate(0.5, normalized=True).distance(other) < 0.01:
+                        n += 1
+    return n
+
+
+def _absorb_at(region, claim, zone, others=None):
+    """`region` grown by `claim`, touched only inside `zone` (the gap plus a
+    pixel): the union, clipped off `others` (the regions around the gap, so the
+    seam cannot overlap them), then the needles, spikes, hairline cracks and
+    crumbs the seam leaves -- but only those within `zone`, so the rest of the
+    outline keeps every vertex exactly where it was."""
+    near = (_safe_intersection(others, zone.buffer(1.0))
+            if others is not None and not others.is_empty else Polygon())
+    if not near.is_empty:
+        claim = _safe_difference(claim, near)
+    # A gap and the region it borders can meet only at points to within float
+    # noise; the union then keeps the claim as a separate hairline piece and the
+    # crumb pass drops it (a 159 px2 sliver along lft came back 0% filled); and
+    # a claim corner 0.2 px off the region's edge left a 5 px zig-zag spike on
+    # dft. Snap the CLAIM's vertices onto the region's outline within half a
+    # pixel so they share edges; the region itself does not move.
+    try:
+        from shapely import snap as _snap
+        claim = _snap(claim, _safe_intersection(region, zone.buffer(1.0)).boundary, 0.5)
+        claim = claim if claim.is_valid else claim.buffer(0)
+    except Exception:
+        pass
+    g = unary_union([region, claim]).buffer(0)
+    if g.is_empty:
+        return g
+    # Tidy, then enforce the invariant -- the region gains only ground nobody
+    # else holds -- and tidy again what that clip leaves, until it clips nothing.
+    for _ in range(4):
+        # despike drops a whole needle if its path crosses the zone -- and a long
+        # one running in from the gap took dft 2 px2 over CP, 140 px from it.
+        # Keep what it did inside the zone only.
+        gd = despike(g, within=zone)
+        if gd.symmetric_difference(g).difference(zone).area > 1e-9:
+            gd = unary_union([_safe_intersection(gd, zone),
+                              _safe_difference(g, zone)]).buffer(0)
+        g = _trim_spikes(gd, zone, near)
+        if near.is_empty:
+            break
+        taken = _safe_intersection(_safe_difference(g, region), near)
+        if taken.area <= 1e-9:
+            break
+        g = _safe_difference(g, taken)
+    else:
+        # out of passes with a clip last: its cut can leave a zero-area zig-zag
+        # (lft at reach 500). Trimming only removes tips and zig-zags and closes
+        # cracks nobody else holds, so it cannot bring the overlap back.
+        g = _trim_spikes(g, zone, near)
+    keep = []
+    for p in _polys(g):
+        # a crumb of the seam, not ground -- one that reaches the gap counts,
+        # not only one wholly inside it (TH kept a 4-point sliver just past it)
+        if p.intersects(zone) and _hairline(p) and _safe_difference(p, region).area >= 0.5 * p.area:
+            continue
+        holes = []
+        for r in p.interiors:
+            h = Polygon(r)
+            # a hairline crack along the seam is closed -- one that reaches the
+            # gap, not only one wholly inside it (dft kept a 3-point sliver hole
+            # whose far corner sat 2 px past the gap: a spike) -- provided it is
+            # (nearly all) nobody else's ground
+            if h.intersects(zone) and _hairline(h) and (
+                    h.area < 0.5                # a numeric crumb (TH: 0.006 px2), whoever's
+                    or near.is_empty or h.intersection(near).area < 0.5 * h.area):
+                continue
+            holes.append(list(r.coords))
+        q = Polygon(list(p.exterior.coords), holes) if len(holes) != len(p.interiors) else p
+        keep.append(q if q.is_valid else q.buffer(0))
+    if not keep:
+        return Polygon()
+    return keep[0] if len(keep) == 1 else unary_union(keep)
+
+
 def dissolve_gap(features, id_prop, point, tol=40.0, grab=None):
     """Delete the gap under `point`: it is handed to the region(s) surrounding it,
     so the void closes with no new overlap. A single neighbour takes the whole
     gap; several split it by nearest-region, which lands the new border on the
     midline. Returns {features, gap, area, kind, regions}."""
     gap, kind, geoms, names = find_gap(features, id_prop, point, tol=tol, grab=grab)
-    if gap.area <= 0:
-        raise ValueError("that gap has no area")
+    if gap.area < _MIN_GAP_AREA:
+        raise ValueError("that gap is smaller than a pixel -- nothing to fill. "
+                         "Clean up stray lines removes hairlines like this.")
 
     collar = gap.buffer(max(1.0, float(tol) * 0.05))
-    touching = {k: g for k, g in geoms.items() if g.intersects(collar)}
+    # never a damage shape: it marks damage, it is not ground to grow (one in a
+    # gap between A and B was handed 41.7 px2 of it) -- Clean already skips them
+    touching = {k: g for k, g in geoms.items()
+                if g.intersects(collar) and not _damage.is_damage(names[k])}
     if not touching:
         raise ValueError("that gap isn't next to any region")
 
+    thin = gap.buffer(-1.0).is_empty
     if len(touching) == 1:
         claims = {next(iter(touching)): gap}
+    elif thin:
+        # Nowhere wider than 2 px: split between several regions it became a
+        # string of hairline pieces that could not be joined back cleanly (a
+        # third of a 159 px2 sliver was left open). Give the whole sliver to the
+        # neighbour it runs along furthest -- at this width the split is moot.
+        # Of the neighbours, the one left with no new spike or needle at the gap
+        # (a sliver's needle-sharp tip handed to VL.1 became its spike; CP
+        # carries the same sliver cleanly); then the longest contact.
+        rim = gap.boundary
+        zone0 = gap.buffer(1.0)
+
+        def _cost(k):
+            rest = unary_union([touching[o] for o in touching if o != k] or [Polygon()])
+            g = _absorb_at(touching[k], gap, zone0, rest)
+            new = (_zone_flaws(g, zone0) - _zone_flaws(touching[k], zone0)
+                   if g is not None and not g.is_empty else 99)
+            return (max(new, 0), -rim.intersection(touching[k].buffer(0.5)).length)
+
+        owner = min(sorted(touching), key=_cost)
+        claims = {owner: gap}
     else:
         # Partition against each neighbour's LOCAL outline only: same midline
         # answer as the full geometry, without sampling megapixel boundaries.
@@ -3280,6 +4131,24 @@ def dissolve_gap(features, id_prop, point, tol=40.0, grab=None):
             local[k] = g if gl.is_empty else gl
         spacing = max(min(float(tol), gap.length / 24.0), 2.0)
         claims = _nearest_partition(gap, local, spacing)
+        # A piece of a claim that does not touch its own region would be a
+        # detached crumb of it (opt, 2 px from a hairline gap between HY and lft,
+        # was dealt every third stretch of it, and those were dropped as crumbs --
+        # leaving a third of the gap open). Hand each such piece to the region it
+        # does touch.
+        regive = {}
+        for k in list(claims):
+            c = claims[k]
+            if c is None or c.is_empty:
+                continue
+            stay = []
+            for p in _polys(_safe_intersection(c, gap)):
+                best = k if p.distance(touching[k]) <= 0.01 else \
+                    min(touching, key=lambda o: p.distance(touching[o]))
+                (stay if best == k else regive.setdefault(best, [])).append(p)
+            claims[k] = unary_union(stay) if stay else Polygon()
+        for k, ps in regive.items():
+            claims[k] = unary_union([claims.get(k) or Polygon()] + ps)
 
     out = json.loads(json.dumps(features))
     filled = []
@@ -3291,10 +4160,20 @@ def dissolve_gap(features, id_prop, point, tol=40.0, grab=None):
         claim = _safe_intersection(claim, gap)
         if claim.is_empty or claim.area <= 0:
             continue
-        g = unary_union([geoms[k], claim]).buffer(0)
-        g = _snap_polys(g, 0.01)          # fuse the hairline seam the union leaves
-        g = clean_geom(g, smooth=False)   # keep thin fill; drop sub-pixel crumbs
-        if g.is_empty:
+        # Only the ground at the gap may change. This used to snap the WHOLE
+        # region to a 0.01 grid and run clean_geom over it: a sub-pixel shift
+        # all round a 10,000 px outline added 35-140 px2 of overlap with its
+        # neighbours and lost ~50 px2 of ground far from the gap, on every click.
+        zone = gap.buffer(1.0)
+        # everything this region must not take: its neighbours as they were AND
+        # the other neighbours' shares of this gap (closing a crack in one region
+        # covered 0.6 px2 of the next one's share)
+        rest = unary_union([geoms[o] for o in touching if o != k]
+                           + [c for o, c in claims.items()
+                              if o != k and c is not None and not c.is_empty]
+                           or [Polygon()])
+        g = _absorb_at(geoms[k], claim, zone, rest)
+        if g is None or g.is_empty:
             continue
         out[int(k)]["geometry"] = mapping(g)
         filled.append(names[k])
@@ -3302,6 +4181,66 @@ def dissolve_gap(features, id_prop, point, tol=40.0, grab=None):
         raise ValueError("couldn't hand that gap to a neighbouring region")
     return {"features": out, "gap": mapping(gap), "area": float(gap.area),
             "kind": kind, "regions": filled}
+
+
+def section_containers(features, id_prop):
+    """The whole-section outline(s) -- hemi, whatever it is called: regions that
+    wrap every other region, with at least TWO others to wrap. With only one
+    other, "wraps everything" is just a nested pair (ISO around SSp), which
+    Merge and the border tools must still treat as two ordinary regions."""
+    _, names = _feature_geoms(features, id_prop)
+    if len(set(names.values())) < 3:
+        return set()
+    return set(blankets(features, id_prop))
+
+
+def fold_into_container(features, id_prop, names):
+    """Merge regions INTO the whole-section outline -- the explicit, opt-in way to
+    merge with hemi. The folded regions' labels go; the outline keeps covering
+    their ground, as it always did. The outline keeps its own name, colour,
+    notes and draw position whatever order the regions were picked in (a plain
+    merge let the first pick win, so [TH, hemi] handed TH the whole hemisphere
+    and deleted hemi). Where a folded region poked past the outline, the outline
+    grows to cover it, so no ground is lost. Returns {features, name, folded}."""
+    picked = [str(n) for n in names]
+    cont = section_containers(features, id_prop) & set(picked)
+    if len(cont) != 1:
+        raise ValueError("pick the section outline and the region(s) to fold into it")
+    container = next(iter(cont))
+    others = [n for n in dict.fromkeys(picked) if n != container]
+    if not others:
+        raise ValueError("pick at least one region to fold into the outline")
+    idx = _index_all(features, id_prop)
+    missing = [n for n in others if n not in idx]
+    if missing:
+        raise ValueError(f"region not found: {missing[0]!r}")
+    outer = _body(features, idx[container])
+    folded = unary_union([_body(features, idx[n]) for n in others]).buffer(0)
+    out = json.loads(json.dumps(features))
+    spill = _safe_difference(folded, outer)
+    if not spill.is_empty and spill.area > 1e-6:
+        # No clean_geom here: a poke-out joined to the outline only THROUGH the
+        # folded region becomes a detached piece of the outline, and clean_geom
+        # drops small pieces as shards -- TH's 643 px^2 past hemi vanished,
+        # ground no region then owned. Keep every piece; only needles go.
+        grown = despike(unary_union([outer, folded]).buffer(0))
+        _write_body(out, features, idx[container], grown)
+    drop = {k for n in others for k in idx[n]}
+    out = [f for k, f in enumerate(out) if k not in drop]
+    return {"features": out, "name": container, "folded": others}
+
+
+def _refuse_container_picks(features, id_prop, names, what):
+    """The whole-section outline (hemi, whatever it is called) wraps every other
+    region: it is a container, never a peer. Picked as one of the regions an
+    edit acts on, it did real damage -- merging it into a child deleted hemi and
+    handed the child the whole hemisphere; splitting it left half the regions
+    outside it. Refuse plainly instead."""
+    wraps = section_containers(features, id_prop) & {str(n) for n in names}
+    if wraps:
+        nm = sorted(wraps)[0]
+        raise ValueError(f"{nm} is the outline that wraps every other region -- "
+                         f"it can't be {what}")
 
 
 def blankets(features, id_prop, keep=None, frac=0.95):
@@ -3414,11 +4353,39 @@ def clean_lines(features, id_prop, points, width=12.0):
         d = despike(g, within=lasso)
         if d.is_empty:
             continue
+        # ...and a thin spike WITH a little width (a 30 x 1 px one poking out of
+        # a healthy region was refused: "nothing sliver-thin inside that loop").
+        # Inside the loop only, only long thin pieces an opening of half the
+        # width removes -- a corner chip is short and stays.
+        try:
+            inside = _safe_intersection(d, lasso)
+            opened = d.buffer(-w / 2.0, join_style=2).buffer(w / 2.0, join_style=2)
+            thin = _safe_difference(inside, opened)
+            cut = []
+            for q in _polys(thin):
+                if q.area <= 0:
+                    continue
+                mrr = q.minimum_rotated_rectangle
+                xs = list(mrr.exterior.coords)
+                sides = [((xs[i][0] - xs[i + 1][0]) ** 2 + (xs[i][1] - xs[i + 1][1]) ** 2) ** 0.5
+                         for i in range(2)]
+                long_side = max(sides) if sides else 0.0
+                if long_side >= 2.0 * w and q.area / max(long_side, 1e-9) < w / 2.0:
+                    cut.append(q)
+            if cut:
+                shaved = _safe_difference(d, unary_union(cut))
+                if not shaved.is_empty and shaved.area >= 0.9 * d.area:
+                    d = unary_union([p_ for p_ in _polys(shaved) if p_.area >= 1.0]
+                                    or [Polygon()])
+        except Exception:
+            pass
+        if d.is_empty:
+            continue
         gone = _vertex_count(g) - _vertex_count(d)
-        if gone <= 0:
+        if gone <= 0 and abs(g.area - d.area) < 1e-6:
             continue
         despiked[k] = d
-        despiked_report.append({"region": names[k], "vertices": int(gone)})
+        despiked_report.append({"region": names[k], "vertices": int(max(gone, 0))})
     # the voids below are judged on the cleaned outlines
     for k, d in despiked.items():
         geoms[k] = d
@@ -3613,13 +4580,312 @@ def _swap_ring_span(ring, arc_line, new_pts, eps):
     return out
 
 
+# ---- Resample points on a shared border (Edit shared borders) ---------------------
+#
+# The border used to come from border_between's corridor arc, which runs ~25 px
+# past each junction, and was swapped into both rings with a tolerance of
+# tol/4 (37 px at the default 150). Nothing checked the result, so the pair
+# pushed into third regions in 34 of 41 real pairs (up to 13,580 px2), spiked at
+# fine spacing and depended on click order. Now the border is read off the
+# rings themselves, every point a third region touches stays put, and each
+# re-pointed stretch is kept only if the pair's combined outline is unchanged
+# (so no neighbour gains or loses a pixel), the two do not overlap more, and no
+# new spike or needle appears; otherwise it is retried finer, then left alone.
+
+_RS_EPS = 0.5          # px: a vertex this close to the other outline is ON it
+_RS_TRIES = 5          # finer spacings tried before a stretch is left as it was
+
+
+def _ring_flaws(cs, max_deg=2.0, min_len=3.0, needle_tol=0.01, window=8):
+    """Spikes + needles in one closed ring -- the same tests as the sandbox's
+    geom_lint, so the slider is held to what the sweeps check."""
+    pts = cs[:-1] if len(cs) > 1 and tuple(cs[0]) == tuple(cs[-1]) else cs
+    n = len(pts)
+    if n < 3:
+        return 0
+    flaws = 0
+    for i in range(n):
+        p0, p1, p2 = pts[i - 1], pts[i], pts[(i + 1) % n]
+        ax, ay = p0[0] - p1[0], p0[1] - p1[1]
+        bx, by = p2[0] - p1[0], p2[1] - p1[1]
+        la, lb = math.hypot(ax, ay), math.hypot(bx, by)
+        if la >= min_len and lb >= min_len:
+            c = max(-1.0, min(1.0, (ax * bx + ay * by) / (la * lb)))
+            if math.degrees(math.acos(c)) < max_deg:
+                flaws += 1
+    ring = list(pts) + [pts[0]]
+    for k in range(n):
+        ea = LineString([ring[k], ring[k + 1]])
+        if ea.length < 2.0:
+            continue
+        for m in range(k + 2, min(k + window, n)):
+            if {tuple(ring[k]), tuple(ring[k + 1])} & {tuple(ring[m]), tuple(ring[m + 1])}:
+                continue
+            eb = LineString([ring[m], ring[m + 1]])
+            if eb.length < 2.0 or ea.distance(eb) >= needle_tol:
+                continue
+            short, other = (ea, eb) if ea.length <= eb.length else (eb, ea)
+            if short.interpolate(0.5, normalized=True).distance(other) < needle_tol:
+                flaws += 1
+    return flaws
+
+
+def _shared_runs(pts, other_edge, fixed, eps):
+    """Stretches of the open ring `pts` that lie along `other_edge`, as lists of
+    vertex indices (wrapping allowed), split at every vertex near `fixed` (third
+    regions' outlines) so junctions never move. A whole ring along the other
+    outline comes back as one closed run, flagged True."""
+    import shapely as _sh
+    n = len(pts)
+    arr = _sh.points(pts)
+    on = _sh.dwithin(arr, other_edge, eps)
+    mids = _sh.points([((pts[i][0] + pts[(i + 1) % n][0]) / 2,
+                        (pts[i][1] + pts[(i + 1) % n][1]) / 2) for i in range(n)])
+    edge_ok = [bool(on[i] and on[(i + 1) % n]) for i in range(n)]
+    mid_on = _sh.dwithin(mids, other_edge, eps)
+    edge_ok = [e and bool(m) for e, m in zip(edge_ok, mid_on)]
+    pin = (_sh.dwithin(arr, fixed, eps) if fixed is not None and not fixed.is_empty
+           else [False] * n)
+    if all(edge_ok):
+        starts = [i for i in range(n) if pin[i]]
+        if not starts:
+            return [(list(range(n)) + [0], True)]
+        start = starts[0]
+        rot = list(range(start, n)) + list(range(start)) + [start]
+        runs, cur = [], [rot[0]]
+        for v in rot[1:]:
+            cur.append(v)
+            if pin[v]:
+                runs.append((cur, False))
+                cur = [v]
+        return runs
+    # walk from a vertex that ends a non-shared edge, so no run is cut by the wrap
+    s = next(i for i in range(n) if not edge_ok[i])
+    runs, cur = [], []
+    for step in range(1, n + 1):
+        e = (s + step) % n                 # edge e runs vertex e -> e+1
+        if edge_ok[e]:
+            if not cur:
+                cur = [e]
+            cur.append((e + 1) % n)
+            if pin[(e + 1) % n]:
+                runs.append((cur, False))
+                cur = [(e + 1) % n]
+        else:
+            if len(cur) >= 2:
+                runs.append((cur, False))
+            cur = []
+    if len(cur) >= 2:
+        runs.append((cur, False))
+    return [(r, c) for r, c in runs if len(r) >= 3]
+
+
+def _splice(pts, run, new_pts, closed):
+    """Open ring `pts` with the vertices `run` (in ring order) replaced by
+    `new_pts`, which runs from pts[run[0]] to pts[run[-1]]. Returns a closed ring."""
+    if closed:
+        ring = list(new_pts)
+        return ring if tuple(ring[0]) == tuple(ring[-1]) else ring + [ring[0]]
+    n = len(pts)
+    keep, k = [], (run[-1] + 1) % n
+    while k != run[0]:
+        keep.append(pts[k])
+        k = (k + 1) % n
+    ring = keep + list(new_pts)
+    return ring + [ring[0]]
+
+
+def _match_run(pts, old_line, start, end, closed, eps):
+    """The same stretch on the OTHER region's open ring `pts`: (run indices in
+    ring order, reversed?) or None. Every vertex of it must lie on `old_line`
+    and it must be about as long, so a near-miss elsewhere is never taken."""
+    import shapely as _sh
+    n = len(pts)
+    arr = _sh.points(pts)
+    on = _sh.dwithin(arr, old_line, eps)
+    if closed:
+        if all(on) and abs(LineString(list(pts) + [pts[0]]).length - old_line.length) \
+                <= 0.01 * old_line.length + 4 * eps:
+            return list(range(n)) + [0], False
+        return None
+    ds = _sh.distance(arr, Point(start))
+    de = _sh.distance(arr, Point(end))
+    i_s, i_e = int(ds.argmin()), int(de.argmin())
+    if ds[i_s] > eps or de[i_e] > eps or i_s == i_e:
+        return None
+    for rev in (False, True):
+        a, b = (i_s, i_e) if not rev else (i_e, i_s)
+        run, k = [a], a
+        while k != b:
+            k = (k + 1) % n
+            run.append(k)
+        if not all(on[v] for v in run):
+            continue
+        ln = LineString([pts[v] for v in run]).length
+        if abs(ln - old_line.length) <= 0.01 * old_line.length + 4 * eps:
+            return run, rev
+    return None
+
+
+def _rings_of(geom):
+    """[[exterior, hole, ...] per polygon part], each ring an open point list."""
+    out = []
+    for p in _polys(geom):
+        rs = []
+        for r in [p.exterior] + list(p.interiors):
+            cs = [(float(x), float(y)) for x, y in r.coords]
+            rs.append(cs[:-1] if len(cs) > 1 and cs[0] == cs[-1] else cs)
+        out.append(rs)
+    return out
+
+
+def _part_polygon(rings):
+    try:
+        q = Polygon(list(rings[0]) + [rings[0][0]],
+                    [list(h) + [h[0]] for h in rings[1:]])
+    except Exception:
+        return None
+    return q if q.is_valid and not q.is_empty else None
+
+
+def _resample_pair(out, idx, id_prop, a, b, tol):
+    """Re-point every stretch of border a and b share, in `out` (edited in
+    place). Returns (done, kept): [[old points, new points], ...] per stretch
+    changed, and a sentence per stretch left as it was."""
+    from shapely.geometry import MultiPolygon, box
+    done, kept = [], []
+    gb_body = _body(out, idx[b])
+    if _body(out, idx[a]).distance(gb_body) > _RS_EPS:
+        return done, kept
+    near = _body(out, idx[a]).buffer(_RS_EPS * 4).intersection(gb_body.buffer(_RS_EPS * 4))
+    thirds = [o for o in idx if o not in (a, b)]
+    fixed = unary_union([_body(out, idx[o]).boundary for o in thirds
+                         if _body(out, idx[o]).intersects(near)] or [Polygon()])
+
+    # a's rings, feature by feature; each stretch found on them is one job
+    for ka in idx[a]:
+        a_parts = _rings_of(_geom_at(out, ka))
+        for pi in range(len(a_parts)):
+            for ri in range(len(a_parts[pi])):
+                # Re-pointing one stretch rebuilds the ring, so the indices of
+                # the next stretch are stale: find the stretches again after
+                # every edit and skip the ones already handled -- known by their
+                # end points, which never move.
+                handled = set()
+                while True:
+                    b_edge = _body(out, idx[b]).boundary
+                    pts_a = a_parts[pi][ri]
+                    todo = None
+                    for run, closed in _shared_runs(pts_a, b_edge, fixed, _RS_EPS):
+                        key = ("loop",) if closed else (
+                            tuple(round(c, 6) for c in pts_a[run[0]]),
+                            tuple(round(c, 6) for c in pts_a[run[-1]]))
+                        if key not in handled:
+                            todo = (run, closed, key)
+                            break
+                    if todo is None:
+                        break
+                    run, closed, key = todo
+                    handled.add(key)
+                    old = [pts_a[v] for v in run]
+                    old_line = LineString(old)
+                    res = _resample_stretch(out, idx, a, b, ka, a_parts, pi, ri,
+                                            run, closed, old, old_line, tol)
+                    if res is None:
+                        kept.append(f"{a} | {b}: a {old_line.length:,.0f} px stretch "
+                                    "was left as it was -- re-pointing it would have "
+                                    "moved a neighbour's ground or spiked it")
+                    elif not res.get("noop"):
+                        a_parts = res["a_parts"]
+                        done.append([len(old), res["n_new"]])
+    return done, kept
+
+
+def _resample_stretch(out, idx, a, b, ka, a_parts, pi, ri, run, closed, old, old_line, tol):
+    """One stretch: try `tol`, then finer, keeping the first spacing whose result
+    passes every check; write both regions into `out`. None if none passed."""
+    from shapely.geometry import MultiPolygon, box
+    # the other side of this stretch
+    b_hit = None
+    for kb in idx[b]:
+        b_parts = _rings_of(_geom_at(out, kb))
+        for pj, rings in enumerate(b_parts):
+            for rj, pts_b in enumerate(rings):
+                m = _match_run(pts_b, old_line, old[0], old[-1], closed, _RS_EPS)
+                if m is not None:
+                    b_hit = (kb, b_parts, pj, rj, m)
+                    break
+            if b_hit:
+                break
+        if b_hit:
+            break
+    if b_hit is None:
+        return None
+    kb, b_parts, pj, rj, (run_b, rev) = b_hit
+    pts_a, pts_b = a_parts[pi][ri], b_parts[pj][rj]
+
+    old_pa = _part_polygon(a_parts[pi])
+    old_pb = _part_polygon(b_parts[pj])
+    if old_pa is None or old_pb is None:
+        return None
+    flaws_a = _ring_flaws(list(pts_a) + [pts_a[0]])
+    flaws_b = _ring_flaws(list(pts_b) + [pts_b[0]])
+    spacing = float(tol)
+    for _ in range(_RS_TRIES):
+        new = _even_points(old, spacing)
+        if len(new) == len(old) and all(
+                abs(p[0] - q[0]) < 1e-9 and abs(p[1] - q[1]) < 1e-9 for p, q in zip(new, old)):
+            return {"noop": True}
+        local = box(*old_line.bounds).buffer(spacing + 4 * _RS_EPS)
+        # each side keeps its OWN end points: they sit on third regions' outlines
+        if closed:
+            new_a, new_b = new, (new[::-1] if rev else new)
+        else:
+            new_a = [old[0]] + new[1:-1] + [old[-1]]
+            nb = [pts_b[run_b[0]]] + (new[::-1] if rev else new)[1:-1] + [pts_b[run_b[-1]]]
+            new_b = nb
+        ring_a = _splice(pts_a, run, new_a, closed)
+        ring_b = _splice(pts_b, run_b, new_b, closed)
+        pa_rings = list(a_parts[pi]); pa_rings[ri] = ring_a[:-1]
+        pb_rings = list(b_parts[pj]); pb_rings[rj] = ring_b[:-1]
+        npa, npb = _part_polygon(pa_rings), _part_polygon(pb_rings)
+        ok = npa is not None and npb is not None
+        if ok:
+            u_old = unary_union([old_pa.intersection(local), old_pb.intersection(local)])
+            u_new = unary_union([npa.intersection(local), npb.intersection(local)])
+            ok = u_old.symmetric_difference(u_new).area <= 1.0
+        if ok:
+            ok = (npa.intersection(npb).area
+                  <= old_pa.intersection(old_pb).area + 0.5)
+        if ok:
+            ok = (_ring_flaws(ring_a) <= flaws_a and _ring_flaws(ring_b) <= flaws_b)
+        if ok:
+            a_new_parts = list(a_parts); a_new_parts[pi] = pa_rings
+            b_new_parts = list(b_parts); b_new_parts[pj] = pb_rings
+
+            def _geom(parts):
+                polys = [_part_polygon(r) for r in parts]
+                polys = [p for p in polys if p is not None]
+                return polys[0] if len(polys) == 1 else MultiPolygon(polys)
+
+            out[ka]["geometry"] = mapping(_geom(a_new_parts))
+            out[kb]["geometry"] = mapping(_geom(b_new_parts))
+            return {"a_parts": a_new_parts, "n_new": len(new)}
+        spacing /= 2.0
+        if spacing < 2.0:
+            break
+    return None
+
+
 def resample_regions(features, id_prop, names, tol=20.0, precision=1.0):
     """Even out the points along the SHARED BORDER between two regions.
 
     Both regions' rings are edited directly with the same point list, so the
-    border stays exactly coincident and nothing else about either outline moves.
+    border stays exactly coincident and nothing else about either outline moves:
+    the pair's combined outline is checked unchanged, so no neighbour gains or
+    loses ground, and points where a third region touches the border stay put.
     `tol` is the spacing you want between points.
-    Returns {features, counts, arcs, tol}.
+    Returns {features, counts, arcs, tol, arcPoints, handles, kept}.
     """
     idx = _index_all(features, id_prop)
     sel = [str(n) for n in (names or []) if str(n) in idx]
@@ -3651,50 +4917,19 @@ def resample_regions(features, id_prop, names, tol=20.0, precision=1.0):
 
     arcs_before = _arcs_of(out)
     handles_before = sum(len(a) for a in arcs_before)
-    arcs_done = []
-    for i in range(len(sel)):
-        for j in range(i + 1, len(sel)):
-            a, b = sel[i], sel[j]
-            try:
-                arcs = border_between(out, id_prop, a, b, 4.0) or []
-            except Exception:
-                continue
-            for arc in arcs:
-                if len(arc) < 3:
-                    continue
-                arc = [(float(x), float(y)) for x, y in arc]
-                line = LineString(arc)
-                new_pts = _even_points(arc, tol)
-                eps = max(4.0, tol * 0.25)
-                edited = 0
-                for name in (a, b):
-                    # a name can carry several lobes; the arc lies on exactly one of
-                    # them, and _swap_ring_span leaves the others alone
-                    for k in idx[name]:
-                        parts, rebuilt, touched = _polys(_geom_at(out, k)), [], False
-                        for poly in parts:
-                            ring = _swap_ring_span(list(poly.exterior.coords), line, new_pts, eps)
-                            if ring is None:
-                                rebuilt.append(poly)
-                                continue
-                            try:
-                                cand = Polygon(ring, [list(r.coords) for r in poly.interiors])
-                                if not cand.is_valid:
-                                    cand = cand.buffer(0)
-                                if cand.is_empty or cand.area < poly.area * 0.80:
-                                    rebuilt.append(poly)
-                                else:
-                                    rebuilt.append(cand)
-                                    touched = True
-                                    edited += 1
-                            except Exception:
-                                rebuilt.append(poly)
-                        if touched and rebuilt:
-                            ng = unary_union(rebuilt).buffer(0) if len(rebuilt) > 1 else rebuilt[0]
-                            if not ng.is_empty:
-                                out[k]["geometry"] = mapping(ng)
-                if edited:
-                    arcs_done.append([len(arc), len(new_pts)])
+    arcs_done, kept = [], []
+    containers = section_containers(out, id_prop)
+    # Sorted, so the result never depends on which region was clicked first (it
+    # used to: 40 of 41 real pairs came out differently in the two orders).
+    order = sorted(sel)
+    for i in range(len(order)):
+        for j in range(i + 1, len(order)):
+            a, b = order[i], order[j]
+            if a in containers or b in containers:
+                continue                 # hemi's outline is not a border to space out
+            done, skipped = _resample_pair(out, idx, id_prop, a, b, tol)
+            arcs_done.extend(done)
+            kept.extend(skipped)
 
     counts = []
     for n in sel:
@@ -3707,7 +4942,7 @@ def resample_regions(features, id_prop, names, tol=20.0, precision=1.0):
         })
     arcs_after = _arcs_of(out)
     return {"features": out, "counts": counts, "arcs": arcs_done, "tol": tol,
-            "arcPoints": arcs_after,
+            "arcPoints": arcs_after, "kept": kept,
             "handles": {"before": handles_before,
                         "after": sum(len(a) for a in arcs_after)}}
 
@@ -3785,6 +5020,8 @@ def _swap_stretch(out, idx, nm, orig_pts, new_pts, swap_eps, max_drift):
             cand = _single_polygon(ring, [list(r.coords) for r in npoly.interiors])
             if cand is None or not _area_drift_ok(cand, npoly, max_drift):
                 continue
+            if _ring_flaws(list(cand.exterior.coords)) > _ring_flaws(list(npoly.exterior.coords)):
+                continue                  # no new spike or needle on the neighbour
             arr = _sh.points(list(cand.exterior.coords))
             along = _sh.line_locate_point(old_line, arr)
             inner = (along > swap_eps) & (along < old_line.length - swap_eps)
@@ -3859,6 +5096,57 @@ def resample_region(features, id_prop, name, tol=20.0, eps=0.5, max_drift=0.05):
     body_before = _body(features, idx[name])
     boundaries = _near_boundaries(features, idx, name, body_before, eps)
     nb_names = sorted(boundaries)
+    # Other regions' ground near this one. A free stretch is "free" only to
+    # within half a pixel, so at coarse spacing its chords swung across a
+    # neighbour lying a few px away (TH took 716 px2 that way at 600): each
+    # re-pointed free stretch must take none of it. Containers (hemi) wrap
+    # everything and do not count.
+    from shapely.geometry import box as _box
+    containers = section_containers(features, id_prop)
+    near_bodies = {o: g for o, g in ((o, _body(features, idx[o])) for o in idx
+                                     if o != name and o not in containers)
+                   if not g.is_empty and g.intersects(body_before.buffer(tol + 4))}
+    _others_cache = {}
+
+    def _others(partner):
+        """Every nearby region's ground except `partner`'s -- the one a shared
+        stretch legitimately trades ground with."""
+        if partner not in _others_cache:
+            _others_cache[partner] = unary_union(
+                [g for o, g in near_bodies.items() if o != partner] or [Polygon()])
+        return _others_cache[partner]
+
+    def _takes_ground(cand, poly, seg_a, seg_b, partner):
+        """px2 of another region's ground `cand` has that `poly` had not, near
+        the stretch that changed."""
+        local = _box(*LineString(list(seg_a) + list(seg_b)).bounds).buffer(2.0)
+        oth = _others(partner)
+        if not local.intersects(oth):
+            return 0.0
+        return (cand.intersection(local).difference(poly).intersection(oth).area)
+
+    def _safe_free(pieces, i, ring_of, holes, poly):
+        """Piece `i` re-pointed at the slider's spacing, or finer where that would
+        take a third region's ground; its original points if nothing works. A
+        shared piece may trade ground with its partner only -- the coast shared
+        with hemi took RSP's ground on ISO (1,670 px2 at 150) when it was not
+        checked."""
+        orig = pieces[i]["orig"]
+        partner = pieces[i]["with"]
+        spacing = tol
+        for _ in range(_RS_TRIES):
+            new = _even_points(orig, spacing)
+            pieces[i]["new"] = new
+            cand = _single_polygon(ring_of(i), holes)
+            # too coarse to make a polygon at all is the caller's to judge (it is
+            # left as it was and reported in `kept`); only taking a third
+            # region's ground is retried finer
+            if cand is None or _takes_ground(cand, poly, orig, new, partner) <= 0.5:
+                return
+            spacing /= 2.0
+            if spacing < 2.0:
+                break
+        pieces[i]["new"] = orig
 
     kept = []
     handles_before = handles_after = 0
@@ -3889,9 +5177,15 @@ def resample_region(features, id_prop, name, tol=20.0, eps=0.5, max_drift=0.05):
                 # as every other stretch -- even spacing, which ADDS points to a
                 # sparse outline as readily as it thins a dense one (the slider
                 # runs fine to coarse). _resample_line would only ever thin.
-                ring = [tuple(c) for c in _even_points(coords + [coords[0]], tol)]
+                closed = coords + [coords[0]]
+                isl = [{"orig": closed, "new": closed, "with": None}]
+                _safe_free(isl, 0, lambda i: [tuple(c) for c in isl[0]["new"]], holes, poly)
+                ring = [tuple(c) for c in isl[0]["new"]]
+                if ring[0] != ring[-1]:
+                    ring.append(ring[0])
                 cand = _single_polygon(ring, holes) if len(ring) >= 4 else None
-                if cand is None or not _area_drift_ok(cand, poly, max_drift):
+                if (cand is None or not _area_drift_ok(cand, poly, max_drift)
+                        or _ring_flaws(ring) > _ring_flaws(closed)):
                     kept.append(name)
                     rebuilt.append(poly)
                     handles_after += n
@@ -3938,9 +5232,21 @@ def resample_region(features, id_prop, name, tol=20.0, eps=0.5, max_drift=0.05):
                     ring.append(ring[0])
                 return ring
 
+            # every stretch tested on its own against third regions' ground (a
+            # shared one may trade ground with its partner, which gets the same
+            # points, and with nobody else)
+            for fi, pc in enumerate(pieces):
+                # pieces left as they are (links, junction runs) carry new IS orig
+                if pc["new"] is not pc["orig"] and len(pc["orig"]) >= 3:
+                    _safe_free(pieces, fi,
+                               lambda i: ring_from([j == i for j in range(len(pieces))]),
+                               holes, poly)
+
             use = [True] * len(pieces)
+            flaws0 = _ring_flaws(coords + [coords[0]])
             cand = _single_polygon(ring_from(use), holes)
-            if cand is None or not _area_drift_ok(cand, poly, max_drift):
+            if (cand is None or not _area_drift_ok(cand, poly, max_drift)
+                    or _ring_flaws(ring_from(use)) > flaws0):
                 kept.append(name)
                 rebuilt.append(poly)
                 handles_after += n
@@ -3959,7 +5265,8 @@ def resample_region(features, id_prop, name, tol=20.0, eps=0.5, max_drift=0.05):
                     undo.append(rec)
             ring = ring_from(use)
             cand = _single_polygon(ring, holes)
-            if cand is None or not _area_drift_ok(cand, poly, max_drift):
+            if (cand is None or not _area_drift_ok(cand, poly, max_drift)
+                    or _ring_flaws(ring) > flaws0):
                 for kk, geom in reversed(undo):          # leave everyone as they were
                     out[kk]["geometry"] = geom
                 kept.append(name)
@@ -4026,16 +5333,46 @@ def delete_point(features, id_prop, name, point, respace=True, eps=0.5,
     target = Point(float(point[0]), float(point[1]))
     swap_eps = eps * 1.5
 
-    best = None                      # (distance, feature k, part pi, vertex v)
+    # The outline AND its holes: a hole point could not be deleted at all -- the
+    # click was refused, or one near an outline point deleted that one instead.
+    best = None                      # (distance, feature k, part pi, vertex v, ring ri)
     for k in idx[name]:
         for pi, poly in enumerate(_polys(_geom_at(features, k))):
-            for v, c in enumerate(list(poly.exterior.coords)[:-1]):
-                d = target.distance(Point(c))
-                if best is None or d < best[0]:
-                    best = (d, k, pi, v)
+            rings = [poly.exterior] + list(poly.interiors)
+            for ri, ring in enumerate(rings):
+                for v, c in enumerate(list(ring.coords)[:-1]):
+                    d = target.distance(Point(c))
+                    if best is None or d < best[0]:
+                        best = (d, k, pi, v, ri)
     if best is None or best[0] > grab:
         raise ValueError(f"no point of {name}'s outline is there")
-    _, k, pi, v = best
+    _, k, pi, v, ri = best
+
+    if ri > 0:
+        parts = _polys(_geom_at(features, k))
+        poly = parts[pi]
+        hole = [tuple(c) for c in list(poly.interiors[ri - 1].coords)[:-1]]
+        if len(hole) <= 3:
+            raise ValueError(f"that hole in {name} needs at least 3 points, so that one stays")
+        body = _body(features, idx[name])
+        bnds = _near_boundaries(features, idx, name, body, eps)
+        lab = _point_labels([hole[v]], bnds, eps)[0] if bnds else ()
+        if lab:
+            raise ValueError(f"that hole point is on {' and '.join(lab)}'s border -- "
+                             "delete it from that border in Edit shared borders")
+        loop = hole[v + 1:] + hole[:v]
+        loop = loop + [loop[0]]
+        ring_new = _even_count(loop, len(loop)) if respace else loop
+        holes = [list(r.coords) for r in poly.interiors]
+        holes[ri - 1] = ring_new
+        cand = _single_polygon(list(poly.exterior.coords), holes)
+        if cand is None:
+            raise ValueError(f"deleting that point would break {name}'s hole -- nothing was changed")
+        parts = parts[:pi] + [cand] + parts[pi + 1:]
+        out = json.loads(json.dumps(features))
+        out[k]["geometry"] = mapping(parts[0] if len(parts) == 1 else MultiPolygon(parts))
+        return {"features": out, "removedFrom": [name], "respaced": bool(respace),
+                "stretch": "hole"}
 
     parts = _polys(_geom_at(features, k))
     poly = parts[pi]
@@ -4178,7 +5515,7 @@ def _new_feature(features, id_prop, name, geom):
 
 
 def add_region(features, id_prop, points, name=None, carve=True, min_area=25.0,
-               overlap=None):
+               overlap=None, containers=None):
     """Add a brand-new region from a drawn outline.
 
     `overlap` is the annotator's answer to "on top, underneath, or both?" when
@@ -4225,12 +5562,23 @@ def add_region(features, id_prop, points, name=None, carve=True, min_area=25.0,
     elif overlap in ("bottom", "both"):
         carve = False
 
+    # The whole-section outline is a container: a new region inside the section
+    # sits inside it like every other region does. Carving it ("on top") punched
+    # a hole in hemi on every draw inside the section, and holding it against the
+    # outline ("underneath") left nothing of any region drawn inside it.
+    # `containers` comes from a caller that holds regions out first: with only
+    # hemi and one region left, hemi no longer "wraps two others" here and was
+    # carved like a peer -- so the caller decides from the WHOLE file.
+    wrap = section_containers(features, id_prop) if containers is None else set(containers)
+
     # "underneath": the new region cedes the contested ground rather than
     # taking it, so everything already on the map is left untouched.
     if overlap == "bottom":
         held = []
         for f in features:
             if (f.get("geometry") or {}).get("type") not in ("Polygon", "MultiPolygon"):
+                continue
+            if str((f.get("properties") or {}).get(id_prop)) in wrap:
                 continue
             try:
                 other = shape(f["geometry"])
@@ -4257,6 +5605,9 @@ def add_region(features, id_prop, points, name=None, carve=True, min_area=25.0,
         for k, f in enumerate(out):
             if (f.get("geometry") or {}).get("type") not in ("Polygon", "MultiPolygon"):
                 continue
+            label = str((f.get("properties") or {}).get(id_prop))
+            if label in wrap:
+                continue                      # never carve the section outline
             try:
                 other = shape(f["geometry"])
             except Exception:
@@ -4267,7 +5618,6 @@ def add_region(features, id_prop, points, name=None, carve=True, min_area=25.0,
                 continue
             if _safe_intersection(other, g).area <= 0:
                 continue
-            label = str((f.get("properties") or {}).get(id_prop))
             trimmed = _safe_difference(other, g)
             if trimmed.is_empty or trimmed.area < min_area:
                 raise ValueError(f"that outline would erase {label} -- draw a smaller region")
@@ -4300,7 +5650,7 @@ def add_region(features, id_prop, points, name=None, carve=True, min_area=25.0,
             "placedUnder": placed_under}
 
 
-def overlap_report(features, id_prop, points, min_area=25.0):
+def overlap_report(features, id_prop, points, min_area=25.0, containers=None):
     """What an about-to-be-drawn outline lands on, so the annotator can be asked
     "on top, underneath, or overlap?" BEFORE any geometry changes.
 
@@ -4323,9 +5673,16 @@ def overlap_report(features, id_prop, points, min_area=25.0):
     # most of a file's regions are nowhere near the outline. Envelopes that only
     # touch still go through -- `inter <= min_area` is what actually filters.
     g_env = g.envelope
+    # The section outline is never a peer: every outline inside the section is
+    # "inside hemi", so listing it made the prompt appear for every draw and
+    # always pre-select Overlap, even for a slight overlap with one neighbour.
+    # (`containers`: see add_region.)
+    wrap = section_containers(features, id_prop) if containers is None else set(containers)
     hits = []
     for f in features:
         if (f.get("geometry") or {}).get("type") not in ("Polygon", "MultiPolygon"):
+            continue
+        if str((f.get("properties") or {}).get(id_prop)) in wrap:
             continue
         try:
             other = shape(f["geometry"])
@@ -4428,15 +5785,34 @@ def fill_gap_with_region(features, id_prop, point, name=None, tol=40.0, grab=Non
     """Turn the empty void under `point` into a NEW region, rather than handing it
     to the neighbours the way dissolve_gap does.
 
-    The gap geometry is used exactly as found -- its boundary already comes from
-    the surrounding regions' outlines, so the new region abuts them with no fresh
-    hairline gap. Returns {features, name, area, kind, gap}.
+    The gap geometry is used as found -- its boundary already comes from the
+    surrounding regions' outlines, so the new region abuts them with no fresh
+    hairline gap -- minus the needles, sharp tips and hairline slivers a void
+    between outlines tends to have (3 of 4 real gaps gave a new region with one;
+    Xenium Explorer refuses a needle). Returns {features, name, area, kind, gap}.
     """
     gap, kind, geoms, names = find_gap(features, id_prop, point, tol=tol, grab=grab)
-    if gap.area <= 0:
-        raise ValueError("that gap has no area")
+    if gap.area < _MIN_GAP_AREA:
+        raise ValueError("that gap is smaller than a pixel -- nothing to make a region of. "
+                         "Clean up stray lines removes hairlines like this.")
+    zone = gap.buffer(1.0)
+    around = unary_union([g for g in geoms.values() if g.intersects(zone)] or [Polygon()])
+    shape_ = _trim_spikes(despike(gap), zone, around)
+    shape_ = _safe_difference(shape_, around) if not around.is_empty else shape_
+    parts = [p for p in _polys(shape_) if not _hairline(p)]
+    if not parts:
+        raise ValueError("that gap is a hairline too thin to be a region -- "
+                         "Clean up stray lines removes it")
+    region = parts[0] if len(parts) == 1 else unary_union(parts)
+    # A sliver whose sharp point cannot be cut without cutting it away (the real
+    # CP/dft/VL.1 gap is a 3-point triangle 108 px long, 2 px wide) would be a
+    # region that IS a spike. It is not refused silently: Dissolve hands it to
+    # the neighbours cleanly.
+    if any(_ring_flaws(list(p.exterior.coords)) for p in _polys(region)):
+        raise ValueError("that gap is a sliver with a needle-sharp point -- too thin to "
+                         "be a region of its own. Dissolve hands it to its neighbours instead.")
     nm = _unique_name({str(v) for v in names.values()}, name or "New region")
     out = json.loads(json.dumps(features))
-    out.append(_new_feature(features, id_prop, nm, gap))
-    return {"features": out, "name": nm, "area": float(gap.area),
+    out.append(_new_feature(features, id_prop, nm, region))
+    return {"features": out, "name": nm, "area": float(region.area),
             "kind": kind, "gap": mapping(gap)}

@@ -57,6 +57,7 @@ class Pyramid:
         self._level_keys: list = []  # group member keys, full-res -> coarsest
         self.lo = 0.0
         self.hi = 65535.0
+        self.dmax = 65535.0
         self._compute_contrast()
 
     # -- lazy zarr view of the whole pyramid (imagecodecs decodes touched tiles) --
@@ -137,16 +138,38 @@ class Pyramid:
         if nz.size:
             self.lo = float(np.percentile(nz, 1.0))
             self.hi = float(np.percentile(nz, 99.8))
+        if data.size:
+            self.dmax = float(data.max())
+        # The slider's ceiling comes from a finer level: the coarsest averages
+        # the brightest specks away (5193 there vs 9310 a few levels down on
+        # DNMT3A), which capped how far the morphology window could open. A
+        # level of at most 2048 px is a handful of tiles, read once at open.
+        fine = next((i for i, s in enumerate(self.level_shapes)
+                     if max(s[self.yc], s[self.xc]) <= 2048), lvl)
+        if fine != lvl:
+            try:
+                a2 = self._arr(fine)
+                with self._lock:
+                    d2 = np.asarray(a2[plane] if self.zc is not None else a2[:])
+                if d2.size:
+                    self.dmax = max(self.dmax, float(d2.max()))
+            except Exception:
+                pass                     # keep the coarse figure; never fail an open
         if self.hi <= self.lo:
             self.hi = self.lo + 1.0
+        if self.dmax <= self.hi:        # slider head-room above the default window
+            self.dmax = self.hi + 1.0
 
     def _to_uint8(self, win: np.ndarray) -> np.ndarray:
         f = (win.astype(np.float32) - self.lo) / (self.hi - self.lo)
         return (np.clip(f, 0.0, 1.0) * 255.0).astype(np.uint8)
 
-    def tile_u8(self, level: int, tx: int, ty: int, plane: Optional[int] = None,
-                orient=None) -> Optional[np.ndarray]:
-        """One tile as a padded tile x tile uint8 array, in DISPLAY orientation."""
+    def _tile_raw(self, level: int, tx: int, ty: int, plane: Optional[int] = None,
+                  orient=None) -> Optional[np.ndarray]:
+        """One tile as a padded tile x tile RAW array (native dtype), in DISPLAY
+        orientation. The 8-bit PNG tiles and the raw-uint16 tiles share this; only
+        the windowing (server bake vs GPU) differs after it. Rotation is scale-
+        free, so this works per level with that level's dims."""
         if level < 0 or level >= self.nlevels:
             return None
         shp = self.level_shapes[level]
@@ -159,34 +182,53 @@ class Pyramid:
             if y0 >= H or x0 >= W or y0 < 0 or x0 < 0:
                 return None
             y1, x1 = min(y0 + T, H), min(x0 + T, W)
-            u8 = self._to_uint8(self._read_window(level, p, y0, y1, x0, x1))
-            if u8.shape != (T, T):          # pad partial edge tiles (black = outside)
-                out = np.zeros((T, T), np.uint8)
-                out[: u8.shape[0], : u8.shape[1]] = u8
-                u8 = out
-            return u8
+            win = self._read_window(level, p, y0, y1, x0, x1)
+            if win.shape != (T, T):          # pad partial edge tiles (0 = outside)
+                out = np.zeros((T, T), win.dtype)
+                out[: win.shape[0], : win.shape[1]] = win
+                win = out
+            return win
 
         # Rotated/flipped: read the source rectangle that feeds this displayed
         # tile, transform it, and paste it at the offset the transform puts it.
-        # Rotation is scale-free, so this works per level with that level's dims.
-        win = ORI.source_window(tx, ty, T, orient, W, H)
-        if win is None:
+        w = ORI.source_window(tx, ty, T, orient, W, H)
+        if w is None:
             return None
-        x0, y0, x1, y1 = win
-        u8 = ORI.transform_image(
-            self._to_uint8(self._read_window(level, p, y0, y1, x0, x1)), orient)
+        x0, y0, x1, y1 = w
+        src = ORI.transform_image(self._read_window(level, p, y0, y1, x0, x1), orient)
         # Where the transformed rectangle lands in display space.
         cx = [ORI.fwd(x, y, orient, W, H) for x in (x0, x1) for y in (y0, y1)]
         dx0 = int(round(min(c[0] for c in cx))) - tx * T
         dy0 = int(round(min(c[1] for c in cx))) - ty * T
-        out = np.zeros((T, T), np.uint8)
+        out = np.zeros((T, T), src.dtype)
         sy0, sx0 = max(0, -dy0), max(0, -dx0)
         dy, dx = max(0, dy0), max(0, dx0)
-        h = min(u8.shape[0] - sy0, T - dy)
-        w = min(u8.shape[1] - sx0, T - dx)
-        if h > 0 and w > 0:
-            out[dy:dy + h, dx:dx + w] = u8[sy0:sy0 + h, sx0:sx0 + w]
+        h = min(src.shape[0] - sy0, T - dy)
+        wd = min(src.shape[1] - sx0, T - dx)
+        if h > 0 and wd > 0:
+            out[dy:dy + h, dx:dx + wd] = src[sy0:sy0 + h, sx0:sx0 + wd]
         return out
+
+    def tile_u8(self, level: int, tx: int, ty: int, plane: Optional[int] = None,
+                orient=None) -> Optional[np.ndarray]:
+        """One tile as a padded tile x tile uint8 array, in DISPLAY orientation,
+        with the global contrast baked in. Used by the 8-bit PNG route."""
+        raw = self._tile_raw(level, tx, ty, plane, orient)
+        return None if raw is None else self._to_uint8(raw)
+
+    def tile_raw_bytes(self, level: int, tx: int, ty: int, plane: Optional[int] = None,
+                       orient=None) -> Optional[bytes]:
+        """One tile as raw little-endian uint16 bytes (tile x tile), for the
+        browser to window on the GPU -- no contrast baked in, so a brightness/
+        contrast slider move fetches nothing. Mirrors the stains raw route."""
+        raw = self._tile_raw(level, tx, ty, plane, orient)
+        if raw is None:
+            return None
+        if raw.dtype != np.uint16:
+            # a bare cast would wrap signed values and truncate floats; Xenium
+            # morphology is uint16, so this only guards other inputs
+            raw = np.clip(raw, 0, 65535)
+        return np.ascontiguousarray(raw.astype("<u2", copy=False)).tobytes()
 
     def tile_png(self, level: int, tx: int, ty: int,
                  plane: Optional[int] = None, orient=None) -> Optional[bytes]:
@@ -223,5 +265,5 @@ class Pyramid:
             "axes": self.axes,
             "dtype": self.dtype,
             "levelShapes": [list(s) for s in self.level_shapes],
-            "contrast": {"lo": self.lo, "hi": self.hi},
+            "contrast": {"lo": self.lo, "hi": self.hi, "dataMax": self.dmax},
         }

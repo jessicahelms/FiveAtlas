@@ -11,6 +11,60 @@ The first `### ` title of a section is also what the app's update banner
 shows ("FiveAtlas 1.3.2 is out — Faster on laptops"), so lead with the change
 people will care about most and keep that title short.
 
+## v1.4.0
+
+### Faster, smoother viewing
+
+- Dragging points and borders no longer makes the whole app lag: the
+  sidebars stay still while you work instead of redrawing on every frame.
+- DAPI now has live **min**, **max** and **γ** sliders that change the picture
+  as you drag, and every stain has a **γ** (contrast) slider too.
+- Sharp when you stop, light when you move: the picture draws at full screen
+  resolution when still and eases off while you pan or zoom. Zoomed in past
+  the scan's own detail, pixels stay crisp instead of blurring.
+- Zooming in fills in faster.
+
+### A layout that's easier to use
+
+- **Layers, Stains and Genes** have their own sidebar on the right, so you no
+  longer scroll up and down to reach them. **Hide »** tucks it away.
+- Click any section's title bar to open or close it.
+- **Faces** and **Borders** are one button each; the face / border / use
+  buttons are bigger, with their labels right above them.
+- Find your way faster: a filter box for regions, double-click a region to
+  zoom to it, **Home** to see the whole section, hold **H** to peek at the
+  image with every region hidden, and sliders for face opacity and outline
+  width.
+- **Ctrl+S** saves; **Reset** asks first and can be undone; switching
+  datasets with unsaved edits asks first.
+- The damage, SmartSheet and annotation-notes tools are tucked away. Turn
+  them on in **Settings → Show damage & notes tools** if you use them.
+
+### Fixing borders only changes what you fixed
+
+- **Share borders**, **Fix a gap**, **Merge**, **Snap to**, resampling points
+  and dragging a border now change only the place you worked on. Before,
+  they could hand a region's own ground to its neighbour, push into a third
+  region, or grow past hemi.
+- **Share borders** asks where the seam goes: down the middle, or onto one
+  region's own edge. **Fill all pixels in the gap** now starts ticked.
+- You no longer switch hemi off to fix gaps or share borders. Merging with
+  hemi asks first, and **Fold into hemi** hands a region's ground to hemi.
+- A new drawing leaves switched-off regions whole.
+
+### Your files are safer
+
+- Loading a file can no longer damage the dataset you already have, and
+  nothing loads that you did not tick.
+- Rotated files come in turned the way you are viewing.
+- **Export** asks which coordinates to write, with **After rotation** first.
+
+### Proportional editing with a touchpad
+
+- Set the ring's size before you grab a point: the **Radius** slider,
+  **[** and **]**, or **Alt + scroll**. The ring shows where you are while
+  you resize.
+
 ## v1.3.3
 
 ### Updates install themselves

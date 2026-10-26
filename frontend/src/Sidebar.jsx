@@ -1,6 +1,8 @@
-import { Fragment, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import { parseName, nextNumber, formatName } from './damage';
 import { displayVersion } from './version';
+import { withStableHandlers, sameFeatureProperties } from './stableProps';
+import FoldTitle from './FoldTitle';
 
 // Snap reach runs on a LOG scale. Linear, a range wide enough to bridge a torn
 // section would give the 5-50 px end -- where most borders actually are -- about
@@ -30,26 +32,28 @@ function displayName(feature, idProp) {
   return value == null ? '' : String(value);
 }
 
-export default function Sidebar({
+function Sidebar({
   info, fc, selected, onSelectName, onRegionMenu, onDeleteSelected, pointMsg,
   regionResample, onRegionResampleTol, onApplyRegionResample, onCancelRegionResample,
   loadAsk, onAnswerLoad, onLoadDamage,
   overlapAsk, onAnswerOverlap, onToggleTranslate,
   mode, onToggleModify, onToggleBorder, onToggleSplit, onToggleDissolve, onToggleDraw,
   borderPicks, borderMsg, borderShared, onClearBorder, onShareBorders, onMerge,
+  mergeAsk, onFoldIntoContainer, onCancelMergeAsk, onShareAgain,
   snapTol, onSnapTol, reachGap, fillAll, onFillAll,
   splitMsg, drawMsg, drawKind, onDrawKind, designations, damageAsk, onAnswerDamage,
   resample, resampleTol, onResampleTol, onApplyResample, onCancelResample,
   gapFind, gapMsg, onDissolve, onFillGap, onClearGap,
   selectedName,
-  moved, canSnap, onSnap, onSave, onReset,
+  moved, onSave, onReset,
   onUndo, onRedo, canUndo, canRedo,
-  propEdit, propRadius, onPropEditChange,
+  propEdit, propRadius, onPropEditChange, onPropRadius,
   geomReport, onRepair, onDismissReport, onForceExport,
   onRestoreOriginal, orientation, onOrientation,
   onAnswerReportDamage,
   regionsOff, onToggleRegionOff, outlinePreview, onOutline, onDismissOutline,
   bordersOff, onToggleBorderOff, fillsOff, onToggleFillOff, onAllFaces,
+  onAllBorders, onShowAll, onZoomTo,
   onToggleClean, cleanFound, cleanMsg, onApplyClean, onCancelClean,
   cellsReport, cellSep, cellsAll, onLoadCells, onDismissCells, onCellSep,
   onCellsAll, onRegionDamage,
@@ -61,6 +65,15 @@ export default function Sidebar({
 }) {
   const [confirmRestore, setConfirmRestore] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  // Region list filter, and keeping the selected row in view: the list holds up
+  // to ~190 rows in a short box, and picking a region on the map left its row
+  // scrolled out of sight.
+  const [regionQuery, setRegionQuery] = useState('');
+  const listRef = useRef(null);
+  useEffect(() => {
+    const el = listRef.current && listRef.current.querySelector('li.sel');
+    if (el && el.scrollIntoView) el.scrollIntoView({ block: 'nearest' });
+  }, [selected]);
   const ui = uiSettings || { zoom: 1, collapsed: new Set() };
   const isOpen = (key) => !(ui.collapsed && ui.collapsed.has(key));
   const toggleSec = (key) => {
@@ -69,12 +82,11 @@ export default function Sidebar({
     collapsed.has(key) ? collapsed.delete(key) : collapsed.add(key);
     onUiSettings({ ...ui, collapsed });
   };
-  // a folding section header: the arrow says which way it is
-  const SecTitle = ({ k, children }) => (
-    <div className="section-title fold" onClick={() => toggleSec(k)}
-      title={isOpen(k) ? 'collapse this section' : 'expand this section'}>
-      <span className="arr">{isOpen(k) ? '▾' : '▸'}</span> {children}
-    </div>
+  // a folding section header: the whole bar is the toggle
+  const SecTitle = ({ k, small, children }) => (
+    <FoldTitle open={isOpen(k)} onToggle={() => toggleSec(k)} small={small}>
+      {children}
+    </FoldTitle>
   );
   const [copiedCell, setCopiedCell] = useState(null);
   // Which coordinates an export writes is asked in a popup at the moment of
@@ -121,6 +133,12 @@ export default function Sidebar({
   const off = regionsOff || new Set();
   const bOff = bordersOff || new Set();
   const fOff = fillsOff || new Set();
+  const named = names.filter((n) => n !== '(unnamed)');
+  const allFacesOff = named.length > 0 && named.every((n) => fOff.has(n));
+  const allBordersOff = named.length > 0 && named.every((n) => bOff.has(n));
+  // Damage drawing, SmartSheet cells and annotation notes are off by default
+  // (damage is being phased out); Settings turns them back on.
+  const showDamage = !!(uiSettings && uiSettings.showDamage);
 
   return (
     <div className="pane">
@@ -176,7 +194,7 @@ export default function Sidebar({
             </>
           )}
           {loadAsk.fc && (() => {
-            const dmg = loadAsk.hasHemi
+            const dmg = showDamage && loadAsk.hasHemi
               && (loadAsk.damageInFile > 0 || loadAsk.damageBeside.length > 0);
             const mustAnswer = dmg && loadAsk.withDamage == null;
             const parts = [];
@@ -237,22 +255,49 @@ export default function Sidebar({
         {isOpen('regions') && (<>
         {/* faces all at once: the common move while gap-filling is "hide every
             face, keep every border", and 23 clicks is not a control */}
-        <div className="row">
-          <button className="btn sm" disabled={busy}
-            title="hide every region's face — borders stay; nothing else changes"
-            onClick={() => onAllFaces && onAllFaces(false)}>
-            Faces off
+        {/* Display only: operations see every region exactly as before. */}
+        <div className="row wrap">
+          {/* One button each: it says what a click will do. While any face (or
+              border) is showing, a click hides them all; once all are hidden
+              it brings them back. */}
+          <button className={allFacesOff ? 'btn sm on' : 'btn sm'}
+            title={allFacesOff
+              ? "show every region's face again"
+              : "hide every region's face — borders stay; nothing else changes"}
+            onClick={() => onAllFaces && onAllFaces(allFacesOff)}>
+            {allFacesOff ? 'Faces on' : 'Faces off'}
           </button>
-          <button className="btn sm" disabled={busy}
-            title="show every region's face again"
-            onClick={() => onAllFaces && onAllFaces(true)}>
-            Faces on
+          <button className={allBordersOff ? 'btn sm on' : 'btn sm'}
+            title={allBordersOff
+              ? "show every region's border again"
+              : "hide every region's border — faces stay; nothing else changes"}
+            onClick={() => onAllBorders && onAllBorders(allBordersOff)}>
+            {allBordersOff ? 'Borders on' : 'Borders off'}
+          </button>
+          <button className="btn sm"
+            title="every face, border and switched-off region back on"
+            onClick={() => onShowAll && onShowAll()}>
+            Show all
           </button>
         </div>
+        <div className="hint dim">
+          Hold <b>H</b> to peek at the image with every region hidden; <b>Home</b> fits
+          the whole section. Double-click a row to zoom to it; right-click for
+          Show only this.
+        </div>
+        <input
+          className="region-search"
+          type="search"
+          placeholder={`filter ${names.length} regions…`}
+          value={regionQuery}
+          onChange={(e) => setRegionQuery(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Escape') setRegionQuery(''); }}
+        />
         {off.size > 0 && (
           <div className="hint dim">
             {[...off].join(', ')} switched off — still in the file and exported,
-            but ignored by gap-finding and snapping, and hidden on the map.
+            but ignored by gap-finding and snapping, left whole by a new drawing,
+            and hidden on the map.
           </div>
         )}
         {selected.length > 0 && (
@@ -273,8 +318,22 @@ export default function Sidebar({
           Ctrl-click to add one, Shift-click to take a whole run — names here or
           regions on the map.
         </div>
-        <ul className="regions">
+        <ul className="regions" ref={listRef}>
+          {/* what the three buttons at the end of each row do. Inside the list,
+              so it shares the rows' width (and scrollbar) and stays over them. */}
+          <li className="legend dim" aria-hidden="true">
+            <span />
+            <span className="rowend">
+              <span className="mark" />
+              <span className="col" title="the face (fill)">face</span>
+              <span className="col" title="the outline">border</span>
+              <span className="col" title="switched off: left out of gap-finding and snapping">use</span>
+            </span>
+          </li>
           {names.map((nm, i) => {
+            if (regionQuery && !nm.toLowerCase().includes(regionQuery.trim().toLowerCase())) {
+              return null;
+            }
             const pi = picks.indexOf(nm);
             const parts = partCount[nm] || 1;
             const part = parts > 1 ? names.slice(0, i + 1).filter((n) => n === nm).length : 0;
@@ -295,6 +354,7 @@ export default function Sidebar({
                 onMouseDown={(e) => { if (e.shiftKey) e.preventDefault(); }}
                 onClick={(e) => onSelectName(nm,
                   { ctrl: e.ctrlKey || e.metaKey, shift: e.shiftKey }, i)}
+                onDoubleClick={() => onZoomTo && onZoomTo(nm)}
                 onContextMenu={(e) => {
                   if (!onRegionMenu) return;
                   e.preventDefault();
@@ -314,14 +374,16 @@ export default function Sidebar({
                   {fileCount > 1
                     ? <span className="dim"> · in {fileCount} files, one region</span>
                     : null}
-                  {damageOf(nm) ? <span className="dim"> · {labelOf[damageOf(nm)]}</span> : null}
+                  {showDamage && damageOf(nm) ? <span className="dim"> · {labelOf[damageOf(nm)]}</span> : null}
                 </span>
                 <span className="rowend">
-                  {pi >= 0 ? pickTag(pi) : (moved.has(nm) ? '●' : '')}
+                  {/* the row's colour already says it is picked; the slot keeps
+                      the buttons in their columns whether or not it is edited */}
+                  <span className="mark">{moved.has(nm) ? '●' : ''}</span>
                   {/* display-only: face and border. Operations see the region
                       exactly as before -- unlike the eye. */}
                   <button
-                    className="eye" disabled={busy}
+                    className="eye"
                     title={fOff.has(nm)
                       ? 'face hidden — click to fill it in again'
                       : 'hide the face: keep the border, see the imagery through it'}
@@ -331,7 +393,7 @@ export default function Sidebar({
                     }}
                   >{fOff.has(nm) ? '▢' : '▩'}</button>
                   <button
-                    className="eye" disabled={busy}
+                    className="eye"
                     title={bOff.has(nm)
                       ? 'border hidden — click to draw it again'
                       : 'hide the border: keep the face, no outline'}
@@ -342,13 +404,14 @@ export default function Sidebar({
                   >{bOff.has(nm) ? '◌' : '◯'}</button>
                   {/* Switch a region off: it stays in the file, but the
                       operations that assume a clean partition stop seeing it.
-                      Without this, `hemi` covering everything means no gap can
-                      ever be found. */}
+                      (`hemi` no longer needs this: the backend sets the
+                      section container aside for gaps, snapping and overlap
+                      checks by itself.) */}
                   <button
-                    className="eye" disabled={busy}
+                    className="eye"
                     title={off.has(nm)
                       ? 'switched off — click to use it again'
-                      : 'switch off: hide it and leave it out of gap-finding and snapping'}
+                      : 'switch off: hide it, leave it out of gap-finding and snapping, and keep new drawings from cutting into it'}
                     onClick={(e) => {
                       e.stopPropagation();
                       onToggleRegionOff && onToggleRegionOff(nm);
@@ -456,7 +519,21 @@ export default function Sidebar({
               ))}
             </div>
             <div className="row">
-              {picks.length > 0 && <button className="btn sm" onClick={onClearBorder}>{borderShared ? 'Done / pick again' : 'Clear'}</button>}
+              {/* One label everywhere: the messages say "Clear picks" too. Not
+                  while busy -- an operation in flight still holds these picks. */}
+              {picks.length > 0 && (
+                <button className="btn sm" disabled={busy} onClick={onClearBorder}>Clear picks</button>
+              )}
+              {/* After a share the seam buttons give way to the drag-to-fine-tune
+                  border; this brings them back with the same picks (the reach
+                  slider stays visible throughout). */}
+              {picks.length >= 2 && borderShared && onShareAgain && (
+                <button className="btn sm" disabled={busy}
+                  title="show Middle / Snap / Merge again for these picks"
+                  onClick={() => onShareAgain()}>
+                  Share again
+                </button>
+              )}
             </div>
             {picks.length >= 2 && !borderShared && (
               <div className="prop">
@@ -467,7 +544,10 @@ export default function Sidebar({
                     onClick={() => onShareBorders(null)}>
                     Middle
                   </button>
-                  {picks.map((nm) => (
+                  {/* A nested pair is shared by joining the inner's border to the
+                      outer's outline; Snap to does not apply there and the
+                      backend ignored it -- so it is not offered. */}
+                  {!(reachGap && reachGap.nested) && picks.map((nm) => (
                     <button key={`snap-${nm}`} className="btn sm" disabled={busy}
                       title={`put the border on ${nm}'s edge: ${nm} is left exactly as `
                         + `it is and the other${picks.length > 2 ? 's are' : ' is'} brought up to it`}
@@ -476,11 +556,19 @@ export default function Sidebar({
                     </button>
                   ))}
                 </div>
-                <div className="hint dim">
-                  Middle moves both outlines to meet halfway. Snapping leaves the
-                  region you pick exactly as it is and brings the other onto its
-                  edge — for when one of the two outlines is the one you trust.
-                </div>
+                {reachGap && reachGap.nested ? (
+                  <div className="hint dim">
+                    <b>{reachGap.nested.inner}</b> sits inside <b>{reachGap.nested.outer}</b>:
+                    sharing joins {reachGap.nested.inner}'s border to {reachGap.nested.outer}'s
+                    outline where they neighbour. Snap to and Fill all don't apply to a pair like this.
+                  </div>
+                ) : (
+                  <div className="hint dim">
+                    Middle moves both outlines to meet halfway. Snapping leaves the
+                    region you pick exactly as it is and brings the other onto its
+                    edge — for when one of the two outlines is the one you trust.
+                  </div>
+                )}
               </div>
             )}
             {picks.length >= 2 && !borderShared && (
@@ -488,7 +576,28 @@ export default function Sidebar({
                 ⨝ Merge into one ({picks.length})
               </button>
             )}
-            {picks.length >= 2 && !borderShared && (
+            {mergeAsk && (
+              <div className="pts">
+                <div className="pts-head">Merge with {mergeAsk.container}?</div>
+                <div className="hint dim">
+                  <b>{mergeAsk.container}</b> is the outline around every region, so it isn’t
+                  merged as an equal. Folding removes the label of{' '}
+                  <b>{mergeAsk.regions.join(', ')}</b>; {mergeAsk.container} keeps covering
+                  that ground and keeps its own name, colour and notes.
+                </div>
+                <div className="row">
+                  <button className="btn sm primary" disabled={busy}
+                    onClick={() => onFoldIntoContainer && onFoldIntoContainer()}>
+                    Fold into {mergeAsk.container}
+                  </button>
+                  <button className="btn sm" disabled={busy}
+                    onClick={() => onCancelMergeAsk && onCancelMergeAsk()}>
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+            {picks.length >= 2 && (
               <div className="prop">
                 <div className="pts-head">Snap reach</div>
                 <div className="rng">
@@ -507,19 +616,30 @@ export default function Sidebar({
                   <span className="v">{snapTol * 2} px across</span>
                 </div>
                 {/* The measured gap between the picks (backend gap_between): its
-                    width at its widest, and whether the current reach closes it.
-                    The yellow circle on the map sits at that widest point. */}
-                {reachGap && reachGap.kind === 'gap' && (
-                  <div className="prop-readout">
-                    <span>this gap is</span>
-                    <span className="v">
-                      {Math.round(reachGap.width)} px across
-                      {snapTol * 2 >= reachGap.width
-                        ? ' — this reach closes it ✓'
-                        : ` — needs reach ${Math.ceil(reachGap.width / 2)}`}
-                    </span>
-                  </div>
-                )}
+                    width at its widest, and the reach that actually closes it --
+                    measured by the backend with the same close Share borders
+                    uses. Half the width was wrong for 21 of 22 real gaps: the
+                    widest point is usually pinned by a third region or the
+                    section edge, and an open bay needs far more. */}
+                {reachGap && reachGap.kind === 'gap' && (() => {
+                  const need = reachGap.reach !== undefined ? reachGap.reach : reachGap.width / 2;
+                  return (
+                    <div className="prop-readout">
+                      <span>this gap is</span>
+                      <span className="v">
+                        {Math.round(reachGap.width)} px across
+                        {/* in the slider's own units -- it reads "bridges gaps
+                            up to N px across", and a bare radius here read as
+                            "300 > 96 but still not enough" */}
+                        {need == null
+                          ? ' — no reach closes it'
+                          : (snapTol >= need
+                            ? ' — this reach closes it ✓'
+                            : ` — set the slider to bridge ${Math.ceil(need) * 2} px or more`)}
+                      </span>
+                    </div>
+                  );
+                })()}
                 {reachGap && reachGap.kind === 'apart' && (
                   <div className="prop-readout">
                     <span>picks are</span>
@@ -530,10 +650,10 @@ export default function Sidebar({
                     close of radius r bridges a gap up to 2r wide. At reach 40 a
                     79 px gap closes and an 81 px one does not. */}
                 <div className="hint dim">
-                  The circle on the map is that wide, at the narrowest point
-                  between your picks — a gap that fits inside it closes, a wider
-                  one is left alone. A region standing in the gap is never taken,
-                  however wide the reach — what happens beside it is the box below.
+                  The circle on the map is the reach, drawn on the gap between your
+                  picks at its widest point. A region standing in the gap is never
+                  taken, however wide the reach — what happens beside it is the
+                  box below.
                 </div>
                 {/* Merge takes the same number but uses it differently: it
                     closes by HALF the reach and then keeps only corridors
@@ -549,11 +669,9 @@ export default function Sidebar({
                 </div>
                 {/* What to do with the strips BESIDE a region that stands in
                     the gap. Its own ground is never taken either way. */}
-                <label className="chk" title={
-                  'Off: a gap pixel is filled only if its straight line to both '
-                  + 'regions is clear, so the strips beside a region standing in '
-                  + 'the gap stay empty. On: every free pixel in the gap is '
-                  + 'filled. A region in the gap is never taken either way.'}>
+                {!(reachGap && reachGap.nested) && (<>
+                <label className="chk"
+                  title="a region standing in the gap is never taken either way">
                   <input type="checkbox" checked={!!fillAll} disabled={busy}
                     onChange={(e) => onFillAll && onFillAll(e.target.checked)} />
                   <span>Fill all pixels in the gap</span>
@@ -564,6 +682,7 @@ export default function Sidebar({
                     : 'Only ground with nothing in between is filled; the strips beside a region standing in the gap are left alone.'}
                   {' '}Applies to Share borders and Merge.
                 </div>
+                </>)}
               </div>
             )}
             {picks.length >= 2 && borderShared && (
@@ -598,6 +717,13 @@ export default function Sidebar({
                         </li>
                       ))}
                     </ul>
+                    {(resample.kept || []).length > 0 && (
+                      <div className="hint dim" title={resample.kept.join('\n')}>
+                        {resample.kept.length === 1 ? 'One stretch' : `${resample.kept.length} stretches`}
+                        {' '}of this border kept {resample.kept.length === 1 ? 'its' : 'their'} old
+                        points — at this spacing they would have cut into a neighbour.
+                      </div>
+                    )}
                     <div className="row">
                       <button className="btn sm primary" onClick={onApplyResample} disabled={busy}>Apply</button>
                       <button className="btn sm" onClick={onCancelResample} disabled={busy}>Cancel</button>
@@ -607,7 +733,8 @@ export default function Sidebar({
                 <div className="hint dim">
                   The handles on the border update as you drag the slider — Apply
                   keeps them, Cancel puts the old ones back. Only the shared border
-                  moves, so nothing opens up against regions you didn't pick.
+                  moves, and points where another region touches it stay put, so
+                  nothing opens up against — or pushes into — regions you didn't pick.
                 </div>
               </div>
             )}
@@ -635,12 +762,12 @@ export default function Sidebar({
         <button className={mode === 'draw' ? 'btn on' : 'btn'} onClick={onToggleDraw}>
           {mode === 'draw'
             ? (nextDamageName ? `✚ Drawing ${labelOf[drawKind] || drawKind}` : '✚ Drawing a new region')
-            : 'Add a new region or damage'}
+            : (showDamage ? 'Add a new region or damage' : 'Add a new region')}
         </button>
 
         {mode === 'draw' && (
           <div className="border-pick">
-            <label className="field">
+            {showDamage && <label className="field">
               <span>What are you drawing?</span>
               <select
                 value={drawKind || 'region'}
@@ -668,7 +795,7 @@ export default function Sidebar({
                   </optgroup>
                 )}
               </select>
-            </label>
+            </label>}
 
             {nextDamageName ? (
               <>
@@ -960,11 +1087,21 @@ export default function Sidebar({
             />
             <span>Proportional editing</span>
           </label>
-          <div className="prop-readout">
+          {/* log scale: 10 px to 8000 px in one slider, fine at the small end */}
+          <div className="rng">
             <span>Radius</span>
+            <input type="range" min={Math.log(10)} max={Math.log(8000)} step="0.01"
+              value={Math.log(Math.max(10, propRadius))}
+              disabled={busy || !propEdit}
+              onChange={(e) => onPropRadius && onPropRadius(Math.exp(parseFloat(e.target.value)))} />
             <span className="v">{Math.round(propRadius)} px</span>
           </div>
-          <div className="hint dim">Scroll the mouse wheel while dragging a point to resize it.</div>
+          <div className="hint dim">
+            Resize the ring with this slider, <b>[</b> and <b>]</b>, or Alt + scroll
+            over the map. The ring shows at the pointer while you resize, so you
+            can size it with a touchpad before you grab a point. With a mouse you
+            can also scroll while dragging.
+          </div>
         </div>
 
 
@@ -1046,10 +1183,8 @@ export default function Sidebar({
             else here only reads — and they are shared, so the panel always says
             the exact path, previews as a diff, and never creates a file by
             itself. */}
-        <div className="slabel fold" onClick={() => toggleSec('notes')}>
-          <span className="arr">{isOpen('notes') ? '▾' : '▸'}</span> Annotation notes
-        </div>
-        {isOpen('notes') && (<>
+        {showDamage && <SecTitle k="notes" small>Annotation notes</SecTitle>}
+        {showDamage && isOpen('notes') && (<>
         {!notesInfo ? (
           <div className="hint dim">looking in the dataset folder…</div>
         ) : (
@@ -1266,7 +1401,7 @@ export default function Sidebar({
         </>)}
       </div>
 
-      <div className="section">
+      {showDamage && <div className="section">
         {/* The sheet's Damage column is a MULTI-SELECT dropdown — one cell holds
             several chips — so what is worth copying is a cell per region, not a
             row. `Done` rides in the same cell; it is the annotator's tick, not a
@@ -1422,11 +1557,12 @@ export default function Sidebar({
           </div>
         )}
         </>)}
-      </div>
+      </div>}
 
       {snapInfo && (
         <div className="section">
-          <div className="section-title">Last operation</div>
+          <SecTitle k="lastop">Last operation</SecTitle>
+          {isOpen('lastop') && (<>
           {snapInfo.movers && snapInfo.movers.length > 0 && (
             <div className="mono">moved: {snapInfo.movers.join(', ')}</div>
           )}
@@ -1436,12 +1572,13 @@ export default function Sidebar({
             </ul>
           )}
           {snapInfo.saved && <div className="mono ok">{snapInfo.saved}</div>}
+          </>)}
         </div>
       )}
 
       <div className="row histrow">
         <button className={`btn${showSettings ? ' on' : ''}`}
-          title="settings: text size, and which tools the sidebar shows"
+          title="settings: text size, and whether the damage & notes tools show"
           onClick={() => setShowSettings((v) => !v)}>⚙ Settings</button>
       </div>
 
@@ -1459,9 +1596,19 @@ export default function Sidebar({
               <option value="1.3">Extra large</option>
             </select>
           </label>
+          <label className="chk">
+            <input type="checkbox" checked={showDamage}
+              onChange={(e) => onUiSettings
+                && onUiSettings({ ...ui, showDamage: e.target.checked })} />
+            <span>Show damage &amp; notes tools</span>
+          </label>
           <div className="hint dim">
-            Sections fold with the little arrows beside their titles — collapse
-            what you are not using and the sidebar stays short.
+            Drawing damage, the SmartSheet damage cells and the annotation notes.
+            Off by default; your files keep any damage either way.
+          </div>
+          <div className="hint dim">
+            Click a section's title bar to close or open it — close what you
+            are not using and the sidebars stay short.
           </div>
           <button className="btn sm" onClick={() => setShowSettings(false)}>Done</button>
         </div>
@@ -1472,3 +1619,8 @@ export default function Sidebar({
     </div>
   );
 }
+
+// Memoised with stable handler proxies (stableProps.js): the sidebar only reads
+// names and properties from `fc`, so a vertex drag -- which moves geometry and
+// nothing else -- no longer re-renders the whole region list on every frame.
+export default withStableHandlers(Sidebar, { fc: sameFeatureProperties });

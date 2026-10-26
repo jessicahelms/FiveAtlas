@@ -16,7 +16,27 @@ const COMMIT_EDITS = new Set(['finishMovePosition', 'addPosition', 'removePositi
 
 const DEFAULT_LAYERS = {
   showDapi: true, showGenes: true, showRegions: true, geneOpacity: 1, stainOpacity: 1,
+  regionFill: 70,       // face alpha, 0-255 (was fixed at 70)
+  outlineWidth: 1,      // border width in screen px (was fixed at 1)
 };
+
+// [minx, miny, maxx, maxy] of every feature carrying this name, or null.
+function nameBounds(fc, nm, idProp) {
+  let b = null;
+  const grow = (c) => {
+    if (typeof c[0] === 'number') {
+      if (!b) b = [c[0], c[1], c[0], c[1]];
+      else { b[0] = Math.min(b[0], c[0]); b[1] = Math.min(b[1], c[1]);
+        b[2] = Math.max(b[2], c[0]); b[3] = Math.max(b[3], c[1]); }
+      return;
+    }
+    c.forEach(grow);
+  };
+  ((fc && fc.features) || []).forEach((f) => {
+    if (featureName(f, idProp) === nm && f.geometry) grow(f.geometry.coordinates);
+  });
+  return b;
+}
 
 const GENE_PALETTE = [
   [255, 64, 64], [80, 220, 80], [90, 130, 255], [255, 215, 60],
@@ -183,22 +203,11 @@ function featureByName(fc, name, idProp = 'name') {
   return fc && fc.features && fc.features.find((f) => featureName(f, idProp) === String(name));
 }
 
-function hasMovedGeometryDelta(before, after, moved, idProp = 'name') {
-  if (!before || !after || !moved || !moved.length) return false;
-  return moved.some((name) => {
-    const bf = featureByName(before, name, idProp);
-    const af = featureByName(after, name, idProp);
-    if (!bf || !af) return Boolean(bf || af);
-    return JSON.stringify(bf.geometry) !== JSON.stringify(af.geometry);
-  });
-}
-
-function findSnapBaseline(preferred, after, moved, history, idProp = 'name') {
-  if (hasMovedGeometryDelta(preferred, after, moved, idProp)) return preferred;
-  for (let i = (history || []).length - 2; i >= 0; i--) {
-    if (hasMovedGeometryDelta(history[i], after, moved, idProp)) return history[i];
-  }
-  return preferred;
+// The falloff ring as state, but only a NEW object when it actually moved or
+// resized: a drag re-set it every frame with the same centre and radius, which
+// rebuilt the ring layer for nothing.
+function sameRing(p, c, r) {
+  return !!p && p.radius === r && p.center[0] === c[0] && p.center[1] === c[1];
 }
 
 function renameFeatureProperties(feature, idProp, nextProps) {
@@ -324,6 +333,9 @@ function resampleGeom(geom, n) {
 ==== end disabled vertex-count control ==== */
 
 // ---- proportional editing ----
+const PROP_R_MIN = 10;          // px, the radius range every control clamps to
+const PROP_R_MAX = 8000;
+
 function smoothInfluence(t) {
   const x = 1 - t;
   return x * x * (3 - 2 * x);
@@ -376,6 +388,10 @@ function computeRing(base, o, delta, R) {
 export default function App() {
   const [datasets, setDatasets] = useState([]);
   const [dsId, setDsId] = useState(null);
+  // Morphology brightness/contrast window ({lo,hi} in raw uint16 units); null =
+  // the dataset's auto-levelled default. Re-seeded per dataset.
+  const [morphWin, setMorphWin] = useState(null);
+  useEffect(() => { setMorphWin(null); }, [dsId]);
   const dsIdLiveRef = useRef(null);          // what dsId is NOW, for async guards
   useEffect(() => { dsIdLiveRef.current = dsId; }, [dsId]);
   const pendingRegionsRef = useRef(null);    // {id, paths}: region files picked in the pre-load gate
@@ -386,6 +402,9 @@ export default function App() {
   const [fc, setFc] = useState(null);
   const [baseline, setBaseline] = useState(null);
   const idProp = (info && info.idProp) || 'name';
+  const idPropRef = useRef(idProp);    // for callbacks created once (undo/redo)
+  const [canvasWrapEl, setCanvasWrapEl] = useState(null);   // the map's element
+  idPropRef.current = idProp;
   const [selected, setSelected] = useState([]);
   const [mode, setMode] = useState('view');       // 'view' | 'modify' | 'border'
   const [moved, setMoved] = useState(() => new Set());
@@ -402,9 +421,9 @@ export default function App() {
   // dissolve: click a leftover void -> preview it, then hand it to its neighbours
   const [gapFind, setGapFind] = useState(null);   // { gap, area, kind, regions, fc }
   const [gapMsg, setGapMsg] = useState(null);
-  // Regions switched off. `hemi` is the whole-hemisphere outline and covers every
-  // other region, so with it in play nothing is ever outside a region and NO GAP
-  // can be found — and the geometry check reports 22 overlaps that are all correct.
+  // Regions switched off. (`hemi`, the whole-hemisphere outline, used to need
+  // this so gaps could be found; the backend now sets the section container
+  // aside on its own -- section_containers() in topology.py.)
   // Switching a region off leaves it in the file, untouched; it is only ignored
   // by the operations that assume a clean partition, and hidden on the map.
   // UI settings: sidebar scale and which tools are shown. Hiding is DISPLAY
@@ -414,15 +433,22 @@ export default function App() {
     try {
       const v = JSON.parse(localStorage.getItem('fiveatlas.settings') || '{}');
       return { zoom: Number(v.zoom) || 1,
-               collapsed: new Set(Array.isArray(v.collapsed) ? v.collapsed : []) };
-    } catch (e) { return { zoom: 1, collapsed: new Set() }; }
+               collapsed: new Set(Array.isArray(v.collapsed) ? v.collapsed : []),
+               // damage + annotation-notes tools: off unless asked for (damage
+               // annotation is being phased out; the backend is unchanged)
+               showDamage: v.showDamage === true };
+    } catch (e) { return { zoom: 1, collapsed: new Set(), showDamage: false }; }
   });
   const applyUiSettings = useCallback((next) => {
     setUiSettings(next);
     try {
       localStorage.setItem('fiveatlas.settings',
-        JSON.stringify({ zoom: next.zoom, collapsed: [...next.collapsed] }));
+        JSON.stringify({ zoom: next.zoom, collapsed: [...next.collapsed],
+                         showDamage: !!next.showDamage }));
     } catch (e) { /* ok */ }
+    // hiding the damage tools while a damage kind was picked would keep
+    // drawing damage with no visible selector
+    if (!next.showDamage) setDrawKind('region');
     // Folding the Edit section away while inside one of its modes would leave
     // the mode running with no visible way out -- fall back to view.
     const editModes = new Set(['modify', 'border', 'split', 'draw', 'dissolve', 'clean']);
@@ -437,6 +463,40 @@ export default function App() {
     } catch (e) { /* ok */ }
     return 340;
   });
+  // The imagery controls (layers, stains, genes) live in a second sidebar on
+  // the right, so they sit beside the region tools instead of below them. Its
+  // width and whether it is tucked away are remembered too.
+  const [paneRW, setPaneRW] = useState(() => {
+    try {
+      const v = parseInt(localStorage.getItem('fiveatlas.paneRW') || '', 10);
+      if (Number.isFinite(v)) return Math.max(220, Math.min(600, v));
+    } catch (e) { /* ok */ }
+    return 300;
+  });
+  const [paneROpen, setPaneROpen] = useState(() => {
+    try { return localStorage.getItem('fiveatlas.paneROpen') !== '0'; } catch (e) { return true; }
+  });
+  const showPaneR = useCallback((open) => {
+    setPaneROpen(open);
+    try { localStorage.setItem('fiveatlas.paneROpen', open ? '1' : '0'); } catch (e) { /* ok */ }
+  }, []);
+  // Drag a splitter: `dir` is +1 when dragging right widens the pane (the left
+  // one), -1 when dragging left does (the right one).
+  const dragPane = useCallback((e, start, set, key, lo, hi, dir) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const move = (ev) => set(Math.max(lo, Math.min(hi, start + dir * (ev.clientX - startX))));
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      set((w) => {
+        try { localStorage.setItem(key, String(w)); } catch (e2) { /* ok */ }
+        return w;
+      });
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  }, []);
   const [regionsOff, setRegionsOff] = useState(() => new Set());
   // Display-only per-region toggles. Unlike the eye (regionsOff), these change
   // NOTHING about operations -- a region with its face hidden still counts for
@@ -456,6 +516,33 @@ export default function App() {
     setFillsOff(new Set((fcRef.current && fcRef.current.features || [])
       .map((f) => featureName(f, idProp)).filter(Boolean)));
   }, [idProp]);
+  // ...and the same for every border, plus "everything back on" and "only this".
+  // All display-only: operations see every region exactly as before.
+  const setAllBorders = useCallback((show) => {
+    if (show) { setBordersOff(new Set()); return; }
+    setBordersOff(new Set((fcRef.current && fcRef.current.features || [])
+      .map((f) => featureName(f, idProp)).filter(Boolean)));
+  }, [idProp]);
+  const showAllRegions = useCallback(() => {
+    setFillsOff(new Set()); setBordersOff(new Set()); setRegionsOff(new Set());
+  }, []);
+  const soloRegion = useCallback((nm) => {
+    const others = (fcRef.current && fcRef.current.features || [])
+      .map((f) => featureName(f, idProp)).filter((n) => n && n !== nm);
+    setFillsOff(new Set(others)); setBordersOff(new Set(others));
+  }, [idProp]);
+  // Zoom the map to a region (or, with no name, the whole section): the viewer
+  // re-fits whenever `focus` changes.
+  const [focus, setFocus] = useState(null);
+  const zoomTo = useCallback((nm) => {
+    const b = nm ? nameBounds(fcRef.current, nm, idProp) : null;
+    if (nm && !b) return;
+    // a counter, not a timestamp: the viewer alternates on its parity, so two
+    // timestamps of the same parity made the second Home / Zoom to do nothing
+    setFocus((prev) => ({ bounds: b, seq: ((prev && prev.seq) || 0) + 1 }));
+  }, [idProp]);
+  // Hold H to peek at the imagery with every region hidden.
+  const [peek, setPeek] = useState(false);
   const regionsOffRef = useRef(regionsOff);
   regionsOffRef.current = regionsOff;
   const offList = useCallback(
@@ -488,22 +575,28 @@ export default function App() {
   // resample: thin the shared border after Share borders
   const [resampleTol, setResampleTol] = useState(150);
   const [snapTol, setSnapTol] = useState(40);       // px reach for Share borders / Merge gap bridging
-  // Off (the default): a gap pixel is filled only if its line to BOTH picks is
-  // clear, so the strips beside a region standing in the gap are left alone.
-  // On: every free pixel in the gap is filled. Applies to Share borders and
+  // On (the default): every free pixel in the gap is filled. Off: a gap pixel
+  // is filled only if its line to BOTH picks is clear, so the strips beside a
+  // region standing in the gap are left alone. Applies to Share borders and
   // Merge alike, so the two tools never answer the same question differently.
-  // Remembered per browser -- a working preference, not part of the file.
+  // Remembered per browser -- a working preference, not part of the file. The
+  // old key ('fa.fillAll') was written as '0' on every first load, so it says
+  // nothing about a choice; a new key lets everyone start on the new default.
   const [fillAll, setFillAll] = useState(() => {
-    try { return localStorage.getItem('fa.fillAll') === '1'; } catch (e) { return false; }
+    try { return localStorage.getItem('fa.fillAll.v2') !== '0'; } catch (e) { return true; }
   });
   useEffect(() => {
-    try { localStorage.setItem('fa.fillAll', fillAll ? '1' : '0'); } catch (e) { /* private window */ }
+    try { localStorage.setItem('fa.fillAll.v2', fillAll ? '1' : '0'); } catch (e) { /* private window */ }
   }, [fillAll]);
   const [resample, setResample] = useState(null);   // { counts, fc, tol }
   const resampleTimer = useRef(null);
+  const resampleSeq = useRef(0);     // drops a shared-border preview reply that was cancelled
   const resampleUndoRef = useRef(null);   // handles as they were before previewing
   const [snapInfo, setSnapInfo] = useState(null);
   const [busy, setBusy] = useState(false);
+  // for callbacks with fixed deps (undo/redo, keyboard): is an operation running?
+  const busyRef = useRef(false);
+  busyRef.current = busy;
   const [error, setError] = useState(null);
 
   // undo/redo: snapshots of fc. Refs are the source of truth; histTick re-renders.
@@ -526,6 +619,7 @@ export default function App() {
   // geometry check / blocked export
   const [geomReport, setGeomReport] = useState(null);   // {problems, counts, mode, title}
   const pedRef = useRef({ active: false });   // frozen base ring during a vertex drag
+  const vertexDragRef = useRef(false);        // a point (region or border) is held
   const fcRef = useRef(fc);
   fcRef.current = fc;
   const propRadiusRef = useRef(propRadius);
@@ -589,11 +683,27 @@ export default function App() {
   // path every change takes (point drags go through onEdit -> record, not
   // commit, so setting this only in commit left a dragged point saying "saved").
   const [dirty, setDirty] = useState(false);
+  // Which history step the file on disk holds, so undoing back to exactly what
+  // was saved reads "saved" again (it used to stay "unsaved" for good).
+  const savedIdxRef = useRef(0);
+  // { idx, moved }: the history step a Reset was pressed on and the edited
+  // markers it cleared, so undoing the Reset can restore them
+  const resetMovedRef = useRef(null);
   const record = useCallback((nextFc) => {
     setDirty(true);
+    // the steps after this one are about to be replaced; if the saved step was
+    // among them, no step in the new history matches the file any more
+    if (savedIdxRef.current > histIdxRef.current) savedIdxRef.current = -1;
+    // likewise a Reset step (at idx + 1) that is about to be replaced
+    const rs = resetMovedRef.current;
+    if (rs && rs.idx + 1 > histIdxRef.current) resetMovedRef.current = null;
     const base = historyRef.current.slice(0, histIdxRef.current + 1);
     base.push(nextFc);
-    while (base.length > 200) base.shift();
+    while (base.length > 200) {
+      base.shift();
+      savedIdxRef.current -= 1;          // indexes shift with the oldest step gone
+      if (resetMovedRef.current) resetMovedRef.current.idx -= 1;
+    }
     historyRef.current = base;
     histIdxRef.current = base.length - 1;
     setHistTick((t) => t + 1);
@@ -611,6 +721,26 @@ export default function App() {
   const [regionResample, setRegionResample] = useState(null);
   const regionResampleRef = useRef(null);
   const regionResampleTimer = useRef(null);
+  // bumped by every new request AND every cancel: a reply that is no longer the
+  // newest is dropped (Cancel within the 300 ms debounce used to bring the
+  // preview back, and leaving Edit points left one on the map)
+  const regionResampleSeq = useRef(0);
+  // Drop a single-region resample preview: no pending timer, no late reply, and
+  // (restore) the map put back to the outline the preview was built on. Returns
+  // that outline, or null if there was no preview. Save and Reset use it too: a
+  // mid-preview Save wrote the unapproved preview to disk, and Reset left one
+  // for "leave Edit points" to cancel -- putting back the edits Reset threw away.
+  const dropRegionPreview = useCallback((restore) => {
+    if (regionResampleTimer.current) clearTimeout(regionResampleTimer.current);
+    regionResampleTimer.current = null;
+    regionResampleSeq.current += 1;
+    const rr = regionResampleRef.current;
+    regionResampleRef.current = null;
+    setRegionResample(null);
+    if (!rr || !rr.baseFc) return null;
+    if (restore) { fcRef.current = rr.baseFc; setFc(rr.baseFc); }
+    return rr.baseFc;
+  }, []);
   // Load regions file: read, then ask add / replace (and about damage) first.
   const [loadAsk, setLoadAsk] = useState(null);
   const commit = useCallback((nextFc) => {
@@ -621,25 +751,59 @@ export default function App() {
     setSaveResult(null);                 // and it is a different file now
     historyRef.current = [fc0];
     histIdxRef.current = 0;
+    savedIdxRef.current = 0;
+    resetMovedRef.current = null;
     setHistTick((t) => t + 1);
   }, []);
+  // Undo/redo moves the map under everything that was built against it. A gap,
+  // clean or resample preview computed on the old map re-applied it on Apply,
+  // silently reverting the undo; the shared-border arc and its "Joined ✓" or
+  // "Folded ✓" message no longer described the map. Clear them all. The picks
+  // stay, and with the share state reset, Share and Merge are one click away.
+  const afterHistoryMove = () => {
+    setDirty(histIdxRef.current !== savedIdxRef.current);
+    setBorderArc(null); setBorderSegments([]); setBorderShared(false); setBorderMsg(null);
+    setGapFind(null); setCleanFound(null); setResample(null);
+    // ...including a resample preview still waiting on its timer or in flight:
+    // it holds the pre-undo map and would land after this, undoing the undo.
+    resampleSeq.current += 1;
+    if (resampleTimer.current) { clearTimeout(resampleTimer.current); resampleTimer.current = null; }
+    regionResampleRef.current = null; setRegionResample(null);
+    setMergeAsk(null);
+    // Picks naming a region the restored map no longer has (undoing a rename or
+    // an added region) are dropped -- they used to linger, pointing at nothing.
+    const cur = fcRef.current;
+    const ip = idPropRef.current;
+    const have = new Set(((cur && cur.features) || [])
+      .map((f) => String((f.properties || {})[ip])));
+    setBorderPicks((prev) => {
+      const kept = prev.filter((n) => have.has(String(n)));
+      return kept.length === prev.length ? prev : kept;
+    });
+    // Undoing a Reset brings its edits back, so bring back their ● markers too
+    // (redoing it clears them again). Reset is the one step that wipes them.
+    const rs = resetMovedRef.current;
+    if (rs && histIdxRef.current === rs.idx) setMoved(new Set(rs.moved));
+    else if (rs && histIdxRef.current === rs.idx + 1) setMoved(new Set());
+    setHistTick((t) => t + 1);
+  };
   const undo = useCallback(() => {
+    if (busyRef.current) return;         // an operation is about to land on this map
     if (histIdxRef.current <= 0) return;
     histIdxRef.current -= 1;
     const prevFc = historyRef.current[histIdxRef.current];
     fcRef.current = prevFc;
     setFc(prevFc);
-    setDirty(true);
-    setBorderArc(null); setHistTick((t) => t + 1);
+    afterHistoryMove();
   }, []);
   const redo = useCallback(() => {
+    if (busyRef.current) return;
     if (histIdxRef.current >= historyRef.current.length - 1) return;
     histIdxRef.current += 1;
     const nextFc = historyRef.current[histIdxRef.current];
     fcRef.current = nextFc;
     setFc(nextFc);
-    setDirty(true);
-    setBorderArc(null); setHistTick((t) => t + 1);
+    afterHistoryMove();
   }, []);
   const canUndo = histIdxRef.current > 0;
   const canRedo = histIdxRef.current < historyRef.current.length - 1;
@@ -860,10 +1024,13 @@ export default function App() {
         setResample(null); resampleUndoRef.current = null;
         setCellsReport(null); setDamageAsk(null); setOutlinePreview(null);
         setGeomReport(null); setRegionsOff(new Set());
+        // hidden faces and borders are keyed by NAME, so they carried over to a
+        // new slide with the same atlas names -- it opened with faces hidden
+        setBordersOff(new Set()); setFillsOff(new Set());
         if (offPref.has('morphology')) setLayers((l) => ({ ...l, showDapi: false }));
         if (!offPref.has('transcripts')) await loadGenesFor(dsId);
         if (!offPref.has('stains')) await loadStainsFor(dsId);
-      } catch (e) { if (!cancel) setError(String(e)); }
+      } catch (e) { if (!cancel) setError(apiDetail(e)); }
     })();
     return () => { cancel = true; };
   }, [dsId, loadGenesFor, loadStainsFor]);
@@ -966,7 +1133,7 @@ export default function App() {
       const res = await api.openDataset(path);
       setDatasets(await api.listDatasets());
       await stageDataset(res.id);
-    } catch (e) { setError(String(e)); } finally { setDsBusy(false); }
+    } catch (e) { setError(apiDetail(e)); } finally { setDsBusy(false); }
   }, [stageDataset]);
 
   const openFolder = useCallback(async () => {
@@ -978,7 +1145,7 @@ export default function App() {
         setDatasets(await api.listDatasets());
         await stageDataset(res.id);
       }
-    } catch (e) { setError(String(e)); } finally { setDsBusy(false); }
+    } catch (e) { setError(apiDetail(e)); } finally { setDsBusy(false); }
   }, [stageDataset]);
 
   // Proportional editing: the library moved ONE vertex; re-derive every vertex in
@@ -1002,7 +1169,10 @@ export default function App() {
       ped.origPos = ped.baseRing[br.vIdx].slice();
     }
     ped.lastDelta = [newPos[0] - ped.origPos[0], newPos[1] - ped.origPos[1]];
-    setPropRing({ center: ped.origPos.slice(), radius: Math.max(1, propRadius) });
+    {
+      const r = Math.max(1, propRadius);
+      setPropRing((p) => (sameRing(p, ped.origPos, r) ? p : { center: ped.origPos.slice(), radius: r }));
+    }
     const out = computeRing(ped.baseRing, ped.origPos, ped.lastDelta, Math.max(1, propRadius));
     const newGeom = setRing(feat.geometry, posIdx, out);
     const feats = updatedData.features.map((f, i) => (i === fi ? { ...f, geometry: newGeom } : f));
@@ -1026,14 +1196,18 @@ export default function App() {
     setFc(data);                              // live (every drag frame)
     if (MOVE_EDITS.has(editType)) {
       const idxs = (editContext && editContext.featureIndexes) || selected;
+      // Same Set back when nothing new was added: this runs on every drag frame,
+      // and a fresh Set each time re-ran everything keyed on `moved`.
       setMoved((prev) => {
-        const nn = new Set(prev);
+        let nn = null;
         idxs.forEach((i) => {
-          const f = data.features[i];
-          const nm = featureName(f, idProp);
-          if (nm) nn.add(nm);
+          const nm = featureName(data.features[i], idProp);
+          if (nm && !prev.has(nm)) {
+            if (!nn) nn = new Set(prev);
+            nn.add(nm);
+          }
         });
-        return nn;
+        return nn || prev;
       });
     }
     if (COMMIT_EDITS.has(editType)) record(data);   // one undo step per edit
@@ -1043,7 +1217,10 @@ export default function App() {
   const recomputeProportional = useCallback((radius) => {
     const ped = pedRef.current;
     if (!ped.active || !ped.baseRing || !ped.lastDelta) return;
-    setPropRing({ center: ped.origPos.slice(), radius: Math.max(1, radius) });
+    {
+      const r = Math.max(1, radius);
+      setPropRing((p) => (sameRing(p, ped.origPos, r) ? p : { center: ped.origPos.slice(), radius: r }));
+    }
     const out = computeRing(ped.baseRing, ped.origPos, ped.lastDelta, Math.max(1, radius));
     if (ped.kind === 'border') {   // reshape the shared-border arc live (regions rebuild on release)
       // pin the endpoints so the segment stays anchored to the two regions' outlines
@@ -1069,22 +1246,38 @@ export default function App() {
     setFc(nextFc);
   }, []);
 
-  // scroll wheel resizes the proportional radius WHILE a vertex is being dragged
-  // (otherwise the wheel zooms the map as usual)
+  // Every way of sizing the radius ends here: the sidebar slider, [ and ], the
+  // wheel while dragging, Alt + scroll. Mid-drag the follow-on points re-fit.
+  const resizeProp = useCallback((r) => {
+    const nr = Math.max(PROP_R_MIN, Math.min(PROP_R_MAX, Math.round(r)));
+    propRadiusRef.current = nr;
+    setPropRadius(nr);
+    recomputeProportional(nr);
+  }, [recomputeProportional]);
+
+  // The wheel resizes the proportional radius WHILE a vertex is being dragged,
+  // or with Alt held (otherwise it zooms the map as usual). Alt is for
+  // touchpads: dragging there holds the pad down, so scrolling at the same time
+  // is hard -- hover, Alt + two-finger scroll to size the ring, then drag.
+  // Sized by how far the wheel moved, not one step per event: a touchpad sends
+  // dozens of tiny events per swipe and stepping each one 10% sent the radius
+  // from 400 to the 8000 cap in a single flick. A mouse notch (100) is still 10%.
+  // Bound to the map element via a callback ref: opening a dataset remounts it,
+  // and a listener on the element found once stayed on the detached copy -- the
+  // wheel only came back after toggling Proportional editing off and on.
   useEffect(() => {
-    const el = document.querySelector('.canvas-wrap');
+    const el = canvasWrapEl;
     if (!el) return undefined;
     const onWheel = (e) => {
-      if (!propEdit || !pedRef.current.active) return;
+      if (!propEdit || !(pedRef.current.active || e.altKey)) return;
       e.preventDefault(); e.stopPropagation();
-      const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
-      const nr = Math.max(10, Math.min(8000, Math.round(propRadiusRef.current * factor)));
-      setPropRadius(nr);
-      recomputeProportional(nr);
+      const px = (e.deltaY || e.deltaX) * (e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? 400 : 1);
+      const factor = Math.min(1.5, Math.max(1 / 1.5, Math.exp(-px * Math.log(1.1) / 100)));
+      resizeProp(propRadiusRef.current * factor);
     };
     el.addEventListener('wheel', onWheel, { passive: false, capture: true });
     return () => el.removeEventListener('wheel', onWheel, { capture: true });
-  }, [propEdit, recomputeProportional]);
+  }, [propEdit, resizeProp, canvasWrapEl]);
 
   const setProportionalEditing = useCallback((enabled) => {
     setPropEdit(Boolean(enabled));
@@ -1104,6 +1297,7 @@ export default function App() {
       setBorderSegmentIndex(safeIndex);
       dragStartArcRef.current = stableBorderArcCoords(safeIndex);
     }
+    vertexDragRef.current = !!onVertex;
     if (!propEdit) return;
     const ped = pedRef.current;
     // A drag is starting, so whatever base is frozen is stale. Dropping it here
@@ -1113,12 +1307,18 @@ export default function App() {
     // editing dying until the checkbox was toggled off and on: toggling off is
     // the only other thing that clears `active`.
     ped.key = null; ped.bkey = null;
+    // ...and so is the ring it was frozen from. Kept, a radius change ([ ],
+    // the wheel) between this grab and the first move rebuilt the PREVIOUS
+    // drag's region from its old shape -- or, after an undo or delete shifted
+    // the indexes, wrote that shape over a different region.
+    ped.baseRing = null; ped.lastDelta = null;
     if (!onVertex) { ped.active = false; return; }
     ped.active = true;
     ped.kind = isBorder ? 'border' : 'region';
     ped.seg = isBorder ? Math.max(0, featureIndex || 0) : 0;
   }, [propEdit, stableBorderArcCoords]);
   const onReleaseDrag = useCallback(() => {
+    vertexDragRef.current = false;
     pedRef.current.active = false;
     setPropRing(null);      // the falloff circle only shows while a point is held
   }, []);
@@ -1150,6 +1350,7 @@ export default function App() {
   }, []);
 
   const onToggleModify = useCallback(() => {
+    if (busyRef.current) return;   // not while an edit is landing on the map
     setPointMsg(null);
     setMode((m) => (m === 'modify' ? 'view' : 'modify'));
     clearBorder(); clearSplit(); clearGap(); clearDraw(); clearClean();
@@ -1160,11 +1361,13 @@ export default function App() {
   // end up overlapping a neighbour, and that is what the stacking controls
   // and Share borders are for.
   const onToggleTranslate = useCallback(() => {
+    if (busyRef.current) return;   // not while an edit is landing on the map
     setMode((m) => (m === 'translate' ? 'view' : 'translate'));
     clearBorder(); clearSplit(); clearGap(); clearDraw(); clearClean();
   }, [clearBorder, clearSplit, clearGap, clearDraw, clearClean]);
 
   const onToggleBorder = useCallback(() => {
+    if (busyRef.current) return;   // not while an edit is landing on the map
     const entering = mode !== 'border';
     setMode(entering ? 'border' : 'view');
     clearBorder(); clearSplit(); clearGap(); clearDraw(); clearClean();
@@ -1183,21 +1386,25 @@ export default function App() {
   }, [mode, selected, idProp, clearBorder, clearSplit, clearGap, clearDraw, clearClean]);
 
   const onToggleSplit = useCallback(() => {
+    if (busyRef.current) return;   // not while an edit is landing on the map
     setMode((m) => (m === 'split' ? 'view' : 'split'));
     clearBorder(); clearSplit(); clearGap(); clearDraw(); clearClean();
   }, [clearBorder, clearSplit, clearGap, clearDraw, clearClean]);
 
   const onToggleDissolve = useCallback(() => {
+    if (busyRef.current) return;   // not while an edit is landing on the map
     setMode((m) => (m === 'dissolve' ? 'view' : 'dissolve'));
     setSelected([]); clearBorder(); clearSplit(); clearGap(); clearDraw(); clearClean();
   }, [clearBorder, clearSplit, clearGap, clearDraw, clearClean]);
 
   const onToggleDraw = useCallback(() => {
+    if (busyRef.current) return;   // not while an edit is landing on the map
     setMode((m) => (m === 'draw' ? 'view' : 'draw'));
     setSelected([]); clearBorder(); clearSplit(); clearGap(); clearDraw(); clearClean();
   }, [clearBorder, clearSplit, clearGap, clearDraw, clearClean]);
 
   const onToggleClean = useCallback(() => {
+    if (busyRef.current) return;   // not while an edit is landing on the map
     setMode((m) => (m === 'clean' ? 'view' : 'clean'));
     setSelected([]); clearBorder(); clearSplit(); clearGap(); clearDraw(); clearClean();
   }, [clearBorder, clearSplit, clearGap, clearDraw, clearClean]);
@@ -1206,10 +1413,11 @@ export default function App() {
   // -> fetch (and if needed bridge) their shared border as a draggable arc.
   const pickBorderRegion = useCallback(async (nm) => {
     if (!nm) return;
-    if (borderPicks.length === 2 && borderArcRef.current && borderPicks.includes(nm)) {
-      setBorderMsg('Shared border stays selected - drag it, or Clear to pick another pair.');
-      return;
-    }
+    // A share or merge in flight still holds the old picks and map, and commits
+    // its result over whatever changed meanwhile -- so picks wait for it.
+    if (busy) return;
+    // Clicking a picked region unpicks it, border showing or not: swapping one
+    // half of the pair used to mean Clear and picking both again.
     setBorderShared(false);              // changing the pick set -> back to build phase
     pendingBridgeRef.current = null;
     dragStartArcRef.current = null;
@@ -1259,7 +1467,7 @@ export default function App() {
         const gapNote = res && Number(res.gapPx) > 0 ? ` (${formatGapPx(res.gapPx)} tolerance gap)` : '';
         const segNote = arcs.length > 1 ? ` ${arcs.length} interrupted segments shown.` : '';
         setBorderMsg(`Shared border detected${gapNote} - drag it to edit; both regions rebuild on release.${segNote}`);
-      } catch (e) { setBorderMsg(String(e)); }
+      } catch (e) { setBorderMsg(apiDetail(e)); }
     } else if (next.length < 2) {
       setBorderSegments([]); setBorderSegmentIndex(0);
       setBorderMsg(next.length === 1
@@ -1269,7 +1477,7 @@ export default function App() {
       setBorderSegments([]); setBorderSegmentIndex(0);
       setBorderMsg(`${next.length} regions picked — “Share borders” tiles them all; unpick to 2 to drag one border.`);
     }
-  }, [borderPicks, dsId, fc, commit]);
+  }, [borderPicks, dsId, fc, commit, busy]);
 
   const applyMoveBorder = useCallback(async (coords, dragStart, segmentIndex = borderSegmentIndex) => {
     if (borderPicks.length !== 2 || !coords || coords.length < 2) return;
@@ -1277,7 +1485,7 @@ export default function App() {
     const startCoords = copyArcCoords(dragStart);
     if (startCoords && !arcChanged(startCoords, nextCoords)) {
       dragStartArcRef.current = null;
-      setBorderMsg('No border move detected - drag a point to edit, or Clear to pick another pair.');
+      setBorderMsg('No border move detected — drag a point to edit, or click a picked region to unpick it.');
       return;
     }
     const [a, b] = borderPicks;
@@ -1312,7 +1520,7 @@ export default function App() {
       }
       setMoved((prev) => { const n = new Set(prev); n.add(a); n.add(b); return n; });
       const segNote = segmentNote || (borderSegments.length > 1 ? ` ${borderSegments.length} interrupted segments shown.` : '');
-      setBorderMsg(`Border moved ✓.${segNote} Drag again, or Clear to pick another pair.`);
+      setBorderMsg(`Border moved ✓.${segNote} Drag again, or click a picked region to swap it.`);
     } catch (e) {
       setBorderMsg(`Couldn't move border: ${apiDetail(e)}`);
     } finally { setBusy(false); dragStartArcRef.current = null; }
@@ -1377,7 +1585,10 @@ export default function App() {
       }
       if (newPos && ped.kind === 'border' && ped.baseRing && ped.origPos) {
         ped.lastDelta = [newPos[0] - ped.origPos[0], newPos[1] - ped.origPos[1]];
-        setPropRing({ center: ped.origPos.slice(), radius: Math.max(1, propRadius) });
+        {
+          const r = Math.max(1, propRadius);
+          setPropRing((p) => (sameRing(p, ped.origPos, r) ? p : { center: ped.origPos.slice(), radius: r }));
+        }
         const out = computeRing(ped.baseRing, ped.origPos, ped.lastDelta, Math.max(1, propRadius));
         // pin the arc endpoints so the border stays anchored to the two regions' outlines
         out[0] = ped.baseRing[0].slice();
@@ -1415,7 +1626,9 @@ export default function App() {
     }
     let live = true;
     api.regionGap(dsId, borderPicks, fc)
-      .then((g) => { if (live) setGapInfo(g && g.kind ? g : null); })
+      // kept for a nested pair too (kind null when they touch): the sidebar
+      // hides Snap to / Fill all for it, which a nested share ignores
+      .then((g) => { if (live) setGapInfo(g && (g.kind || g.nested) ? g : null); })
       .catch(() => { if (live) setGapInfo(null); });
     return () => { live = false; };
     // NB: the reach (snapTol) is deliberately NOT a dependency. Where the gap is
@@ -1439,25 +1652,15 @@ export default function App() {
       const res = await api.partitionRegions(dsId, borderPicks, fc, snapTol, snap, fillAll);
       let newFc = asFc(res, fc);
 
-      // Sharing leaves a Voronoi-dense, unevenly spaced border, so even it out
-      // straight away rather than making the user reach for the slider. The
-      // slider is still there to go coarser or finer afterwards.
-      // (Not for a nested pair: their shared stretch lies ON the container's
-      // outline, and resampling it would move the outline itself. Not after a
-      // SNAP either, for exactly the same reason: the seam is the snapped
-      // region's own edge, there is no dense midline to even out, and
-      // re-pointing it would move the one outline the snap promised to leave
-      // alone.)
-      let repointed = null;
-      if (!res.nested && !snap) {
-        try {
-          const rs = await api.resampleRegions(dsId, borderPicks, newFc, resampleTol);
-          if (rs && rs.features && rs.handles) {
-            newFc = asFc(rs, newFc);
-            repointed = rs;
-          }
-        } catch (e) { /* keep the un-resampled result rather than failing the share */ }
-      }
+      // The share's own result is committed as it is. It used to be evened out
+      // straight away with resample_regions (150 px), but that pass pushed the
+      // pair into a THIRD region on 74 of 82 real runs (both click orders, all
+      // 41 pairs) -- up to 131,980 px^2 of ISO on SSp + dft -- because its border
+      // arc runs ~25 px past the junction, and it depended on click order. The
+      // share itself passes every acceptance sweep (0 overlap, 0 needles, same
+      // answer either order). The points slider is still there to even the
+      // border out by hand.
+      const repointed = null;
 
       commit(newFc); setBaseline(newFc);
       setMoved((prev) => { const n = new Set(prev); borderPicks.forEach((x) => n.add(x)); return n; });
@@ -1491,7 +1694,16 @@ export default function App() {
           setBorderMsg(res.nested.sealed > 0 || cov > 0
             ? `Merged ${res.nested.inner}'s border onto ${res.nested.outer}'s outline where they neighbour — ${px} px² absorbed ✓${covNote}${arced ? ' Drag the outline to fine-tune.' : ''}`
             : (Number.isFinite(gap) && gap > 1
-              ? `${res.nested.inner} sits ${Math.round(gap)} px inside ${res.nested.outer}'s outline — beyond the ${snapTol} px snap reach. Raise “Snap reach” and Share borders again, or drag ${res.nested.inner}'s outline toward the edge.`
+              // An outline snap bridges up to the reach ACROSS (capped at 100
+              // px, topology.NESTED_BAND_MAX) -- said in the slider's own units
+              ? (Math.round(gap) > 100
+                ? `${res.nested.inner} sits ${Math.round(gap)} px inside ${res.nested.outer}'s outline — too wide for an outline snap (it bridges at most 100 px across). Drag ${res.nested.inner}'s outline toward the edge instead.`
+                // within the reach, yet nothing absorbed: the ground in between
+                // is another region's (HPF beside hemi: it is V3's), and raising
+                // the reach -- which this used to suggest -- cannot help
+                : gap <= Math.min(snapTol, 100)
+                ? `Nothing to merge between ${res.nested.inner} and ${res.nested.outer}'s outline: the ${Math.round(gap)} px between them belongs to another region. Drag ${res.nested.inner}'s outline instead if it should move.`
+                : `${res.nested.inner} sits ${Math.round(gap)} px inside ${res.nested.outer}'s outline — wider than this reach bridges along an outline (${Math.min(snapTol, 100)} px across). Raise “Snap reach” and press Share again, or drag ${res.nested.inner}'s outline toward the edge.`)
               : `No gap between ${res.nested.inner} and ${res.nested.outer}'s outline to merge — to reshape their border, drag ${res.nested.inner}'s outline instead.`));
         } else {
           setBorderMsg(arced
@@ -1521,12 +1733,15 @@ export default function App() {
       };
     }
     if (resampleTimer.current) clearTimeout(resampleTimer.current);
+    const seq = ++resampleSeq.current;
     resampleTimer.current = setTimeout(async () => {
-      if (borderPicks.length < 2 || !fcRef.current) return;
+      resampleTimer.current = null;
+      if (borderPicks.length < 2 || !fcRef.current || seq !== resampleSeq.current) return;
       const source = resample && resample.baseFc ? resample.baseFc : fcRef.current;
       setBusy(true);
       try {
         const res = await api.resampleRegions(dsId, borderPicks, source, tolValue);
+        if (seq !== resampleSeq.current) return;   // cancelled or superseded
         // Draw the previewed handles straight away -- the whole point is to see
         // the density change while dragging the slider, not after Apply.
         const arcs = normalizeBorderArcs(res.arcPoints);
@@ -1537,6 +1752,7 @@ export default function App() {
         // since -- the preview is only valid for the pair and dataset it was
         // built from.
         setResample({ counts: res.counts, tol: res.tol, handles: res.handles,
+                      kept: res.kept || [],
                       baseFc: source, dsId, picks: [...borderPicks],
                       fc: asFc(res, fc) });
       } catch (e) {
@@ -1546,6 +1762,11 @@ export default function App() {
   }, [dsId, borderPicks, resample]);
 
   const cancelResample = useCallback(() => {
+    // a preview still on its way (the 300 ms debounce, or the request) must not
+    // land after Cancel and bring the preview back
+    if (resampleTimer.current) clearTimeout(resampleTimer.current);
+    resampleTimer.current = null;
+    resampleSeq.current += 1;
     const undo = resampleUndoRef.current;
     if (undo) {
       if (undo.segments) setBorderSegments(undo.segments);
@@ -1581,14 +1802,34 @@ export default function App() {
       : 'Resampled.');
   }, [resample, borderPicks, commit, dsId]);
 
-  const doMerge = useCallback(async () => {
+  // Merging with the section outline is asked first: {container, regions}.
+  const [mergeAsk, setMergeAsk] = useState(null);
+  useEffect(() => { setMergeAsk(null); }, [borderPicks]);
+
+  const doMerge = useCallback(async (intoContainer) => {
     if (borderPicks.length < 2) return;
+    // wired straight to onClick the argument is the event: only a literal true
+    // is the confirmed "fold into the outline" answer
+    const into = intoContainer === true;
     setBusy(true); setError(null);
     try {
-      const res = await api.mergeRegions(dsId, borderPicks, fc, undefined, snapTol, fillAll);
+      const res = await api.mergeRegions(dsId, borderPicks, fc, undefined, snapTol, fillAll, into);
+      if (res && res.needsContainerChoice) {
+        setMergeAsk({ container: res.container, regions: res.regions || [] });
+        return;
+      }
+      setMergeAsk(null);
       const newFc = asFc(res, fc);
       commit(newFc); setBaseline(newFc);
+      // merged features are dropped, which shifts every index after them -- an
+      // old selection could then point at a different region (and "Delete
+      // selected" would delete it)
+      setSelected([]);
       setBorderPicks([]); setBorderArc(null);
+      if (res.folded) {
+        setBorderMsg(`Folded ${res.folded.join(', ')} into “${res.name}” ✓ — ${res.name} keeps covering that ground`);
+        return;
+      }
       // Say what actually happened to the border between them: dissolved, or
       // the pieces never touched and remain separate parts of one region.
       const sealed = res.sealed ? ' — hairline seam dissolved' : '';
@@ -1597,7 +1838,7 @@ export default function App() {
         : '';
       setBorderMsg(`Merged ${borderPicks.length} regions into “${res.name}” ✓${sealed}${still}`);
     } catch (e) {
-      setBorderMsg(`Merge failed: ${String(e).replace(/^Error:\s*/, '')}`);
+      setBorderMsg(`Merge failed: ${apiDetail(e)}`);
     } finally { setBusy(false); }
   }, [dsId, fc, borderPicks, commit, snapTol, fillAll]);
 
@@ -1634,6 +1875,7 @@ export default function App() {
 
   // Delete every selected region in ONE step (and one undo).
   const deleteSelectedRegions = useCallback(() => {
+    if (busyRef.current) return;
     const cur = fcRef.current;
     if (!cur || !cur.features || !selected.length) return;
     const drop = new Set(selected);
@@ -1694,13 +1936,14 @@ export default function App() {
       }
       return true;
     } catch (e) {
-      setError(String(e).replace(/^Error:\s*/, ''));
+      setError(apiDetail(e));
       return false;
     }
   }, [commit, idProp]);
 
   // ---- right-click a region (on the image or in the list) -> Rename / Delete ----
   const openRegionMenu = useCallback((m) => {
+    if (busyRef.current) return;   // a Share landing now would revert a rename/delete
     if (!m || m.index == null || m.index < 0) return;
     setRegionMenu(m);
     setMenuView('menu');
@@ -1745,6 +1988,7 @@ export default function App() {
   // Delete just drops the feature. The hole it leaves is a normal gap, so Fix a
   // gap will find it if you want the neighbours to take the ground back.
   const deleteRegion = useCallback((featureIndex) => {
+    if (busyRef.current) return;
     const cur = fcRef.current;
     if (!cur || !cur.features || !cur.features[featureIndex]) return;
     const nm = featureName(cur.features[featureIndex], idProp);
@@ -1822,7 +2066,7 @@ export default function App() {
       setSelected([]);
       setSplitMsg(`Split into “${res.names[0]}” and “${res.names[1]}” ✓ — draw again, or leave Split.`);
     } catch (e) {
-      setSplitMsg(`Split failed: ${String(e).replace(/^Error:\s*/, '')}`);
+      setSplitMsg(`Split failed: ${apiDetail(e)}`);
     } finally { setBusy(false); }
   }, [dsId, fc, selectedName, commit]);
 
@@ -1886,7 +2130,7 @@ export default function App() {
     });
     const who = (gapFind.regions || []).join(' + ');
     setGapFind(null);
-    setGapMsg(`Gap dissolved into ${who} ✓ — click another gap, or leave Dissolve.`);
+    setGapMsg(`Gap dissolved into ${who} ✓ — click another gap, or press Esc to leave Fix a gap.`);
   }, [gapFind, commit]);
 
   // Draw mode: trace an outline, and it becomes a new region. Any region the
@@ -1899,7 +2143,7 @@ export default function App() {
     setDrawMsg(dmgTag ? 'adding damage…' : 'creating…');
     try {
       const res = await api.addRegion(dsId, fc, coords,
-        { damage: dmgTag, overlap, ask: !overlap });
+        { damage: dmgTag, overlap, ask: !overlap, exclude: offList() });
       // It landed on ground someone already holds: ask first, change nothing.
       if (res.needsOverlapChoice) {
         setOverlapAsk({ coords, overlaps: res.overlaps || [], suggest: res.suggest, area: res.area });
@@ -1943,7 +2187,7 @@ export default function App() {
     } catch (e) {
       setDrawMsg(apiDetail(e));
     } finally { setBusy(false); }
-  }, [dsId, fc, commit, drawKind]);
+  }, [dsId, fc, commit, drawKind, offList]);
 
   // The stacking answer: re-run the very same outline with the choice made.
   const answerOverlap = useCallback((choice) => {
@@ -2100,28 +2344,19 @@ export default function App() {
 
   const onLayerChange = useCallback((patch) => setLayers((l) => ({ ...l, ...patch })), []);
 
-  const doSnap = useCallback(async () => {
-    if (!fc || !baseline) return;
-    const movedList = [...moved];
-    const snapBaseline = findSnapBaseline(baseline, fc, movedList, historyRef.current, idProp);
-    if (!hasMovedGeometryDelta(snapBaseline, fc, movedList, idProp)) {
-      setSnapInfo({ movers: movedList, notes: ['No unsnapped geometry changes were detected.'] });
-      return;
-    }
-    setBusy(true); setError(null);
-    try {
-      const res = await api.snap(dsId, snapBaseline, fc, movedList, offList());
-      const clean = asFc(res, fc);
-      commit(clean); setBaseline(clean); setMoved(new Set());
-      setSnapInfo({ movers: res._movers, notes: res._notes });
-    } catch (e) { setError(String(e)); } finally { setBusy(false); }
-  }, [dsId, fc, baseline, moved, commit, idProp, offList]);
+  // (The Snap-neighbours button was removed earlier; its handler and the
+  // canSnap/snapBaseline memos that fed it -- a JSON comparison of the moved
+  // regions on every map change -- went with it on 2026-10-23.)
 
   const doSave = useCallback(async () => {
+    // never the unapproved preview: drop it, and save what it was built on
+    const base = dropRegionPreview(true);
+    const toSave = base || fcRef.current || fc;
     setBusy(true); setError(null);
     try {
-      const r = await api.saveRegions(dsId, fc);
+      const r = await api.saveRegions(dsId, toSave);
       setDirty(false);
+      savedIdxRef.current = histIdxRef.current;
       setSaveResult({ path: r.saved, version: r.version, versions: r.versions,
                       exported: r.exported, exportError: r.exportError });
       if (r.saveTarget !== undefined) setSaveTarget(r.saveTarget || null);
@@ -2132,17 +2367,19 @@ export default function App() {
           ? `saved to ${r.saved} — snapshot ${stamped} (${r.versions} kept, nothing overwritten)`
           : `saved to ${r.saved}`,
       }));
-    } catch (e) { setError(String(e)); } finally { setBusy(false); }
-  }, [dsId, fc]);
+    } catch (e) { setError(apiDetail(e)); } finally { setBusy(false); }
+  }, [dsId, fc, dropRegionPreview]);
 
   // Save as: pick the file (or accept a suggested one), and later Saves update it.
   // Outcomes are shown in the same panel under Save -- including the refusal
   // for an original file, which must be seen, not tucked into the sidebar.
   const doSaveAs = useCallback(async (path = null) => {
     if (!dsId || !fc) return;
+    const base = dropRegionPreview(true);
+    const toSave = base || fcRef.current || fc;
     setBusy(true); setError(null);
     try {
-      const r = await api.saveRegionsAs(dsId, fc, path);
+      const r = await api.saveRegionsAs(dsId, toSave, path);
       if (r.cancelled) {
         // the first Save of a dataset IS the choice of file: cancelling it
         // means nothing was written, and that must be said
@@ -2157,6 +2394,7 @@ export default function App() {
         return;
       }
       setDirty(false);
+      savedIdxRef.current = histIdxRef.current;
       setSaveResult({ path: r.saved, version: r.version, versions: r.versions,
                       exported: r.exported, exportError: r.exportError,
                       originalFrame: r.originalFrame });
@@ -2164,7 +2402,7 @@ export default function App() {
     } catch (e) {
       setSaveResult({ failed: true, message: apiDetail(e) });
     } finally { setBusy(false); }
-  }, [dsId, fc, saveTarget]);
+  }, [dsId, fc, saveTarget, dropRegionPreview]);
 
   // One Save button, the way Word works: the first Save of a dataset asks where
   // (the dialog starts beside the originals, already named), every Save after
@@ -2182,7 +2420,18 @@ export default function App() {
     const say = fromBorder ? setBorderMsg : setPointMsg;
     setBusy(true);
     try {
-      const res = await api.deletePoint(dsId, cur, region, [point[0], point[1]], true);
+      let res;
+      try {
+        res = await api.deletePoint(dsId, cur, region, [point[0], point[1]], true);
+      } catch (e1) {
+        // On a NESTED pair the border's handles are the INNER region's outline;
+        // picked outer-first, the delete went to the outer and was refused ("no
+        // point of ISO's outline is there"). Try the other pick.
+        const other = fromBorder && borderPicks.length === 2
+          ? borderPicks.find((n) => n !== region) : null;
+        if (!other || !/no point of/i.test(apiDetail(e1))) throw e1;
+        res = await api.deletePoint(dsId, cur, other, [point[0], point[1]], true);
+      }
       const next = asFc(res, cur);
       commit(next);
       setMoved((prev) => { const n = new Set(prev); (res.removedFrom || []).forEach((x) => n.add(x)); return n; });
@@ -2206,25 +2455,24 @@ export default function App() {
   }, [dsId, commit, borderPicks]);
 
   // ---- Resample points for ONE region (Edit points) ----------------------------
-  const cancelRegionResample = useCallback(() => {
-    const rr = regionResampleRef.current;
-    if (rr && rr.baseFc) { fcRef.current = rr.baseFc; setFc(rr.baseFc); }
-    regionResampleRef.current = null;
-    setRegionResample(null);
-  }, []);
+  const cancelRegionResample = useCallback(() => { dropRegionPreview(true); },
+    [dropRegionPreview]);
 
   const previewRegionResample = useCallback((tolValue) => {
     setResampleTol(tolValue);
     if (regionResampleTimer.current) clearTimeout(regionResampleTimer.current);
     const name = selectedName;
+    const seq = ++regionResampleSeq.current;
     regionResampleTimer.current = setTimeout(async () => {
-      if (!name || !dsId) return;
+      regionResampleTimer.current = null;
+      if (!name || !dsId || seq !== regionResampleSeq.current) return;
       const prev = regionResampleRef.current;
       // always from the outline as it was before any preview, never a preview
       const source = prev && prev.name === name && prev.dsId === dsId ? prev.baseFc : fcRef.current;
       setBusy(true);
       try {
         const res = await api.resampleRegions(dsId, [name], source, tolValue);
+        if (seq !== regionResampleSeq.current) return;   // cancelled or superseded
         const previewFc = asFc(res, source);
         const state = { name, dsId, tol: res.tol, counts: res.counts, handles: res.handles,
                         kept: res.kept || [], baseFc: source, fc: previewFc };
@@ -2254,11 +2502,13 @@ export default function App() {
       + (nb.length ? `, kept joined to ${nb.join(', ')}` : '') + '. Ctrl+Z undoes it.');
   }, [dsId, selectedName, commit, cancelRegionResample]);
 
-  // a preview never survives leaving Edit points or picking another region
+  // a preview never survives leaving Edit points or picking another region --
+  // nor does one still on its way (the 300 ms debounce, or the request itself)
   useEffect(() => {
     const rr = regionResampleRef.current;
     if (rr && (mode !== 'modify' || rr.name !== selectedName)) cancelRegionResample();
-  }, [mode, selectedName, cancelRegionResample]);
+    else if (mode !== 'modify') dropRegionPreview(false);   // a request still on its way
+  }, [mode, selectedName, cancelRegionResample, dropRegionPreview]);
 
   // ---- Load regions file: add or replace, and the hemi damage question ----------
   const answerLoadDamage = useCallback((yes) => {
@@ -2269,7 +2519,11 @@ export default function App() {
     const ask = loadAsk;
     if (!choice || !ask || !ask.fc) { setLoadAsk(null); return; }
     const aliases = designations && designations.aliases;
-    const damageQuestion = ask.hasHemi && (ask.damageInFile > 0 || ask.damageBeside.length > 0);
+    // With the damage tools hidden there is no question: the file loads exactly
+    // as it is (its own damage shapes kept), and no damage files beside it are
+    // pulled in.
+    const damageQuestion = uiSettings.showDamage && ask.hasHemi
+      && (ask.damageInFile > 0 || ask.damageBeside.length > 0);
     if (damageQuestion && ask.withDamage == null) return;          // must be answered
     const dropDamage = damageQuestion && ask.withDamage === false;
     let incoming = (ask.fc.features || []).filter(
@@ -2318,7 +2572,7 @@ export default function App() {
     setLoadAsk({ done: choice === 'replace'
       ? `The map now holds the ${incoming.length} regions from ${ask.name}${dmgNote}. Ctrl+Z brings back what was there; Save to keep it.`
       : `Added ${incoming.length} regions from ${ask.name}${dmgNote}${renamed ? ` (${renamed} renamed so no name is used twice)` : ''}. Ctrl+Z undoes it; Save to keep it.` });
-  }, [loadAsk, designations, idProp, commit, clearBorder]);
+  }, [loadAsk, designations, idProp, commit, clearBorder, uiSettings]);
 
   useEffect(() => {
     setSaveTarget(null);
@@ -2354,7 +2608,19 @@ export default function App() {
       const next = typeof change === 'function' ? change(now) : { ...now, ...change };
       const res = await api.setOrientation(dsId, next, fc);
       const newFc = asFc(res, fc);
-      commit(newFc); setBaseline(newFc);
+      // A rotation turns the IMAGE too, and Ctrl+Z only ever restored the
+      // regions: undoing one left the regions in the old frame over a rotated
+      // image (24,745 px off on the real set), and a Save then wrote that. So a
+      // rotation is a checkpoint: the history restarts here, and it is undone
+      // by rotating back. Unsaved edits stay unsaved.
+      const wasDirty = histIdxRef.current !== savedIdxRef.current;
+      fcRef.current = newFc; setFc(newFc); setBaseline(newFc);
+      historyRef.current = [newFc];
+      histIdxRef.current = 0;
+      savedIdxRef.current = wasDirty ? -1 : 0;
+      resetMovedRef.current = null;
+      setHistTick((t) => t + 1);
+      setDirty(wasDirty);
       setInfo((prev) => (prev ? { ...prev, width: res.width, height: res.height,
         orientation: res.orientation } : prev));
       // The gene and stain layers are placed from info fetched once when the
@@ -2379,7 +2645,8 @@ export default function App() {
       setSnapInfo({ saved: `view is now ${o.rot}°`
         + (o.flipH ? ' + flipped left/right' : '')
         + (o.flipV ? ' + flipped top/bottom' : '')
-        + ' — Export asks which frame to write' });
+        + ' — Export asks which frame to write. To undo it, rotate back'
+        + ' (Ctrl+Z stops at a rotation).' });
     } catch (e) {
       setError(apiDetail(e));
     } finally { setBusy(false); }
@@ -2560,15 +2827,29 @@ export default function App() {
     await loadCells(next);
   }, [answerDamage, loadCells]);
 
+  // Reset reloads the last save. It asks first and is now an ordinary edit, so
+  // Ctrl+Z brings the work back -- it used to wipe the undo history on one
+  // unconfirmed click, right next to Save.
   const doReset = useCallback(async () => {
+    if (dirty && !window.confirm('Reset throws away every edit since the last save '
+        + 'and reloads the saved regions.\n\nYou can still undo it with Ctrl+Z. Reset now?')) return;
+    // a resample preview goes first: left open, "leave Edit points" cancelled it
+    // AFTER this and put back the edits Reset had just thrown away
+    dropRegionPreview(false);
     setBusy(true); setError(null);
     try {
       const r = await api.getRegions(dsId);
-      setFc(r); setBaseline(r); initHistory(r);
+      commit(r); setBaseline(r);
+      // set after commit(): record() drops a stash whose Reset step it replaces
+      resetMovedRef.current = { idx: histIdxRef.current - 1, moved: [...moved] };
+      // the map is now exactly what is on disk
+      savedIdxRef.current = histIdxRef.current; setDirty(false);
       setMoved(new Set()); setSelected([]);
       setSnapInfo(null); setMode('view'); clearBorder();
-    } catch (e) { setError(String(e)); } finally { setBusy(false); }
-  }, [dsId, clearBorder, initHistory]);
+      clearGap(); clearClean(); clearSplit(); clearDraw();
+    } catch (e) { setError(apiDetail(e)); } finally { setBusy(false); }
+  }, [dsId, dirty, moved, commit, clearBorder, clearGap, clearClean, clearSplit, clearDraw,
+      dropRegionPreview]);
 
   // Load regions file: nothing changes when the file is picked. It is read, and
   // the annotator chooses Add or Replace -- it used to replace the map, the undo
@@ -2622,7 +2903,7 @@ export default function App() {
         setGeomReport({ problems: e.problems, counts: e.counts, mode: exportMode, frame,
                         title: 'Export blocked — fix these first' });
       } else {
-        setError(String(e));
+        setError(apiDetail(e));
       }
     } finally { setBusy(false); }
   }, [dsId, fc]);
@@ -2651,24 +2932,91 @@ export default function App() {
       setSnapInfo((s) => ({ ...(s || {}),
         saved: fixed.length ? `repaired ${fixed.length}: ${fixed.join(', ')}` : 'nothing needed repairing' }));
       if (fixed.length) setMoved((prev) => { const n = new Set(prev); fixed.forEach((x) => n.add(x)); return n; });
-    } catch (e) { setError(String(e)); } finally { setBusy(false); }
+    } catch (e) { setError(apiDetail(e)); } finally { setBusy(false); }
   }, [dsId, fc, commit]);
 
   // vertex-count control disabled (paused): pointCount removed
   const pointCount = null;
-  const movedList = useMemo(() => [...moved], [moved]);
-  const snapBaseline = useMemo(
-    () => findSnapBaseline(baseline, fc, movedList, historyRef.current, idProp),
-    [baseline, fc, movedList, histTick, idProp],
-  );
-  const canSnap = hasMovedGeometryDelta(snapBaseline, fc, movedList, idProp);
+  // Closing or reloading the tab with unsaved edits lost them without a word.
+  useEffect(() => {
+    if (!dirty) return undefined;
+    const warn = (e) => { e.preventDefault(); e.returnValue = ''; return ''; };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [dirty]);
+
+  // Opening another dataset replaces the map and the undo history.
+  const confirmDiscard = () => !dirty || window.confirm(
+    'You have edits that are not saved yet. Open another dataset anyway?\n\n'
+    + 'Those edits will be lost — press Cancel, then Save, to keep them.');
+
+  // Ctrl+S saves (it used to open the browser's own "Save page" dialog). Esc
+  // steps back one level: an open question or preview first, then the picks,
+  // then the mode, then the selection. The sketch tools (draw, split, clean)
+  // and the right-click menu handle Esc themselves.
+  useEffect(() => {
+    const onKey = (e) => {
+      const tag = (e.target && e.target.tagName) || '';
+      // [ and ] size the proportional ring -- also while a drag is held, and
+      // with the Proportional editing checkbox (or a slider) still focused
+      // from turning it on; only real text entry keeps the keys.
+      if (propEdit && (e.key === '[' || e.key === ']') && !e.ctrlKey && !e.metaKey && !e.altKey
+          && !(/TEXTAREA|SELECT/.test(tag) || (e.target && e.target.isContentEditable)
+               || (tag === 'INPUT' && !/^(checkbox|radio|range|button|color)$/.test(e.target.type)))) {
+        e.preventDefault();
+        resizeProp(propRadiusRef.current * (e.key === ']' ? 1.15 : 1 / 1.15));
+        return;
+      }
+      if (/INPUT|TEXTAREA|SELECT/.test(tag) || (e.target && e.target.isContentEditable)) return;
+      if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S')) {
+        e.preventDefault();
+        if (!busy && dsId && fc) doSavePrimary();
+        return;
+      }
+      if (e.key === 'Home' && !e.ctrlKey && !e.metaKey) { e.preventDefault(); zoomTo(null); return; }
+      if ((e.key === 'h' || e.key === 'H') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        // not mid-drag: peeking takes the editable layer off the map, the drag
+        // never finishes, and the move is left out of undo and "unsaved"
+        if (vertexDragRef.current) return;
+        setPeek(true);
+        return;
+      }
+      if (e.key !== 'Escape' || busy || regionMenu) return;
+      if (mode === 'draw' || mode === 'split' || mode === 'clean') return;
+      if (mergeAsk) { setMergeAsk(null); return; }
+      if (gapFind) { clearGap(); return; }
+      if (regionResampleRef.current) { cancelRegionResample(); return; }
+      if (resample) { cancelResample(); return; }
+      if (borderPicks.length) { clearBorder(); return; }
+      if (mode !== 'view') {
+        setMode('view'); clearBorder(); clearSplit(); clearGap(); clearDraw(); clearClean();
+        return;
+      }
+      if (selected.length) setSelected([]);
+    };
+    const onKeyUp = (e) => { if (e.key === 'h' || e.key === 'H') setPeek(false); };
+    const onBlur = () => setPeek(false);      // a key released outside the window
+    window.addEventListener('keydown', onKey);
+    window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', onBlur);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', onBlur);
+    };
+  }, [busy, dsId, fc, doSavePrimary, regionMenu, mode, mergeAsk, gapFind, resample, borderPicks,
+    selected, cancelRegionResample, cancelResample, clearBorder, clearSplit, clearGap,
+    clearDraw, clearClean, zoomTo, propEdit, resizeProp]);
 
   return (
     <div className="root">
       <DatasetBar
-        datasets={datasets} activeId={dsId} onSelect={stageDataset}
-        onOpenFolder={openFolder} onOpenPath={loadOpened} busy={dsBusy}
+        datasets={datasets} activeId={dsId}
+        onSelect={(id) => { if (confirmDiscard()) stageDataset(id); }}
+        onOpenFolder={() => { if (confirmDiscard()) openFolder(); }}
+        onOpenPath={(p) => { if (confirmDiscard()) loadOpened(p); }} busy={dsBusy}
         canSave={!!(dsId && fc)} dirty={dirty} busySave={busy}
+        working={busy} error={error} onDismissError={() => setError(null)}
         onSave={doSavePrimary} onReset={doReset}
         onSaveAs={doSaveAs} saveTarget={saveTarget}
         saveResult={saveResult} onDismissSave={() => setSaveResult(null)}
@@ -2837,6 +3185,9 @@ export default function App() {
                 borderPicks={borderPicks} borderMsg={borderMsg} borderShared={borderShared}
                 onClearBorder={clearBorder} onShareBorders={doShareBorders}
                 onMerge={doMerge} splitMsg={splitMsg}
+                onShareAgain={() => setBorderShared(false)}
+                mergeAsk={mergeAsk} onFoldIntoContainer={() => doMerge(true)}
+                onCancelMergeAsk={() => setMergeAsk(null)}
                 snapTol={snapTol} onSnapTol={setSnapTol} reachGap={gapInfo}
                 fillAll={fillAll} onFillAll={setFillAll}
                 resample={resample} resampleTol={resampleTol}
@@ -2847,10 +3198,10 @@ export default function App() {
                 damageAsk={damageAsk} onAnswerDamage={answerDamage}
                 onDissolve={applyDissolve} onFillGap={applyFillGap} onClearGap={clearGap}
                 selectedName={selectedName}
-                moved={moved} canSnap={canSnap} onSnap={doSnap} onSave={doSave} onReset={doReset}
+                moved={moved} onSave={doSave} onReset={doReset}
                 onUndo={undo} onRedo={redo} canUndo={canUndo} canRedo={canRedo}
                 propEdit={propEdit} propRadius={propRadius}
-                onPropEditChange={setProportionalEditing}
+                onPropEditChange={setProportionalEditing} onPropRadius={resizeProp}
                 geomReport={geomReport} onRepair={doRepair}
                 onDismissReport={() => setGeomReport(null)}
                 onForceExport={(m, frame) => doExport(m, { force: true, frame })}
@@ -2861,7 +3212,8 @@ export default function App() {
                 regionsOff={regionsOff} onToggleRegionOff={toggleRegionOff}
                 bordersOff={bordersOff} onToggleBorderOff={toggleBorderOff}
                 fillsOff={fillsOff} onToggleFillOff={toggleFillOff}
-                onAllFaces={setAllFaces}
+                onAllFaces={setAllFaces} onAllBorders={setAllBorders}
+                onShowAll={showAllRegions} onZoomTo={zoomTo}
                 outlinePreview={outlinePreview} onOutline={doOutline}
                 onDismissOutline={() => setOutlinePreview(null)}
                 cellsReport={cellsReport} cellSep={cellSep} cellsAll={cellsAll}
@@ -2881,41 +3233,13 @@ export default function App() {
                   && sources.sources.transcripts ? doExportAnnData : null}
                 snapInfo={snapInfo} busy={busy} error={error}
               />
-              <ChannelPanel
-                geneInfo={geneInfo} channels={channels} onChannelChange={onChannelChange}
-                geneList={geneInfo ? geneInfo.genes : null}
-                onAddGene={onAddGene} onRemoveGene={onRemoveGene}
-                stainInfo={stainInfo} stainChannels={stainChannels} onStainChange={onStainChange}
-                layers={layers} onLayerChange={onLayerChange}
-                geneMode={geneMode} onGeneMode={setGeneMode}
-                geneBin={geneBin} onGeneBin={setGeneBin}
-                genePalette={genePalette} onGenePalette={setGenePalette}
-              />
             </aside>
             <div
               className="splitter"
               title="drag to resize the sidebar"
-              onPointerDown={(e) => {
-                e.preventDefault();
-                const startX = e.clientX;
-                const start = paneW;
-                const move = (ev) => {
-                  const w = Math.max(260, Math.min(720, start + (ev.clientX - startX)));
-                  setPaneW(w);
-                };
-                const up = () => {
-                  window.removeEventListener('pointermove', move);
-                  window.removeEventListener('pointerup', up);
-                  setPaneW((w) => {
-                    try { localStorage.setItem('fiveatlas.paneW', String(w)); } catch (e2) { /* ok */ }
-                    return w;
-                  });
-                };
-                window.addEventListener('pointermove', move);
-                window.addEventListener('pointerup', up);
-              }}
+              onPointerDown={(e) => dragPane(e, paneW, setPaneW, 'fiveatlas.paneW', 260, 720, 1)}
             />
-            <div className="canvas-wrap">
+            <div className="canvas-wrap" ref={setCanvasWrapEl}>
               <Viewer
                 // Remount on an orientation change. A quarter turn swaps the
                 // canvas extent, and deck keeps both its tile cache and its
@@ -2936,16 +3260,47 @@ export default function App() {
                 cleanPreview={cleanFound && cleanFound.res.freed}
                 gapPreview={gapFind && gapFind.gap} onPickGap={onPickGap}
                 propRing={propRing} reachRing={reachRing} onRegionMenu={openRegionMenu}
+                propEdit={propEdit} propRadius={propRadius}
                 onDeletePoint={(region, point) => deletePointFrom(region, point, false)}
                 onDeleteBorderPoint={(point) => borderPicks.length === 2
                   && deletePointFrom(borderPicks[0], point, true)}
                 onGrabVertex={onGrabVertex} onReleaseDrag={onReleaseDrag}
                 geneBitmap={geneBitmap} geneBounds={geneBounds} geneMode={geneMode}
-                stainInfo={stainInfo} stainChannels={stainChannels}
+                stainInfo={stainInfo} stainChannels={stainChannels} morphWin={morphWin}
                 layers={layers} regionsOff={regionsOff}
                 bordersOff={bordersOff} fillsOff={fillsOff}
+                focus={focus} peek={peek}
               />
             </div>
+            {paneROpen ? (
+              <>
+                <div
+                  className="splitter right"
+                  title="drag to resize the imagery panel"
+                  onPointerDown={(e) => dragPane(e, paneRW, setPaneRW, 'fiveatlas.paneRW', 220, 600, -1)}
+                />
+                <aside className="sidebar right"
+                  style={{ flexBasis: paneRW, width: paneRW, zoom: uiSettings.zoom }}>
+                  <button className="pane-hide" title="hide this panel (the map gets the room)"
+                    onClick={() => showPaneR(false)}>Hide »</button>
+                  <ChannelPanel
+                    geneInfo={geneInfo} channels={channels} onChannelChange={onChannelChange}
+                    geneList={geneInfo ? geneInfo.genes : null}
+                    onAddGene={onAddGene} onRemoveGene={onRemoveGene}
+                    stainInfo={stainInfo} stainChannels={stainChannels} onStainChange={onStainChange}
+                    morphInfo={(info && info.contrast) || null} morphWin={morphWin} onMorphChange={setMorphWin}
+                    layers={layers} onLayerChange={onLayerChange}
+                    geneMode={geneMode} onGeneMode={setGeneMode}
+                    geneBin={geneBin} onGeneBin={setGeneBin}
+                    genePalette={genePalette} onGenePalette={setGenePalette}
+                    uiSettings={uiSettings} onUiSettings={applyUiSettings}
+                  />
+                </aside>
+              </>
+            ) : (
+              <button className="pane-tab" title="show the layers, stains and genes panel"
+                onClick={() => showPaneR(true)}>« Layers · stains · genes</button>
+            )}
           </>
         )}
       </div>
@@ -2963,22 +3318,24 @@ export default function App() {
                 This view is turned {turned}, so these are two different files.
               </div>
               <div className="row">
+                {/* After rotation is the default (the highlighted one, and what
+                    the backend writes when no frame is sent). */}
                 <button className="btn primary" disabled={busy}
-                  onClick={() => go('original')}>
-                  As imaged (0°)
-                </button>
-                <button className="btn" disabled={busy}
                   onClick={() => go('displayed')}>
                   After rotation ({turned})
                 </button>
+                <button className="btn" disabled={busy}
+                  onClick={() => go('original')}>
+                  As imaged (0°)
+                </button>
               </div>
               <div className="hint dim">
-                <b>As imaged</b> turns every edit back, so the file lines up with the
-                original image and with the cells these polygons get mapped onto —
-                which is what a finished polygon has to be.{' '}
                 <b>After rotation</b> writes exactly what is on screen, and lines up
                 only for someone who turns the slide the same way <i>before</i>
-                {' '}loading it. The filename says which.
+                {' '}loading it.{' '}
+                <b>As imaged</b> turns every edit back, so the file lines up with the
+                original image and with the cells these polygons get mapped onto.
+                {' '}The filename says which.
               </div>
               <div className="row">
                 <button className="btn sm" onClick={() => setExportAsk(null)}>Cancel</button>
@@ -2994,6 +3351,21 @@ export default function App() {
 
           {menuView === 'menu' && (
             <>
+              <button className="ctx-item"
+                title="fit the map to this region (double-clicking its row does the same)"
+                onClick={() => { zoomTo(regionMenu.name); closeRegionMenu(); }}>
+                Zoom to
+              </button>
+              <button className="ctx-item"
+                title="hide every other region's face and border — display only"
+                onClick={() => { soloRegion(regionMenu.name); closeRegionMenu(); }}>
+                Show only this
+              </button>
+              <button className="ctx-item"
+                title="every face, border and switched-off region back on"
+                onClick={() => { showAllRegions(); closeRegionMenu(); }}>
+                Show all
+              </button>
               <button className="ctx-item" onClick={() => setMenuView('rename')}>Rename</button>
               <button className="ctx-item" onClick={() => setMenuView('colour')}>Colour…</button>
               <button className="ctx-item"

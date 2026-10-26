@@ -5,6 +5,7 @@ import { displayVersion } from './version';
 export default function DatasetBar({
   datasets, activeId, onSelect, onOpenFolder, onOpenPath, busy,
   canSave, dirty, busySave, onSave, onReset, onUndo, onRedo, canUndo, canRedo,
+  working, error, onDismissError,
   saveResult, onDismissSave, onRevealSave, onSaveAs, saveTarget,
   version, installedVersion, canRestart, onRestart, restartState,
   updateReady, onApplyUpdate, updateApplyState,
@@ -43,9 +44,20 @@ export default function DatasetBar({
           scrolls away: undo, redo, and Save -- which used to be at the bottom of
           a long sidebar section called "Edit". */}
       <div className="dsbar-right">
-        <button className="btn sm" onClick={onUndo} disabled={!canUndo}
+        {/* "working…" and errors used to appear only at the very bottom of the
+            sidebar, usually scrolled out of view. Shown here, always in sight. */}
+        {working && <span className="dsbar-busy" role="status">working…</span>}
+        {error && (
+          <span className="dsbar-error" role="alert" title={error}>
+            ⚠ {error.length > 90 ? `${error.slice(0, 90)}…` : error}
+            {onDismissError && (
+              <button className="savetoast-x" onClick={onDismissError} title="dismiss">×</button>
+            )}
+          </span>
+        )}
+        <button className="btn sm" onClick={onUndo} disabled={!canUndo || working}
           title="Undo (Ctrl+Z)">↶</button>
-        <button className="btn sm" onClick={onRedo} disabled={!canRedo}
+        <button className="btn sm" onClick={onRedo} disabled={!canRedo || working}
           title="Redo (Ctrl+Shift+Z)">↷</button>
         {canSave && (
           <span className={dirty ? 'dsbar-dirty' : 'dsbar-clean'}
@@ -68,12 +80,12 @@ export default function DatasetBar({
         <button className={dirty ? 'btn sm primary' : 'btn sm'}
           onClick={onSave} disabled={!canSave || busySave}
           title={saveTarget
-            ? `write the regions to ${saveTarget}`
-            : 'save the regions -- the first time, you choose where'}>
+            ? `write the regions to ${saveTarget} (Ctrl+S)`
+            : 'save the regions -- the first time, you choose where (Ctrl+S)'}>
           Save
         </button>
         <button className="btn sm" onClick={onReset} disabled={!canSave || busySave}
-          title="throw away every edit since the last save and reload">
+          title="throw away every edit since the last save and reload (asks first; Ctrl+Z undoes it)">
           Reset
         </button>
         <SuggestionBox version={version} />

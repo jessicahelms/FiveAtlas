@@ -3,7 +3,6 @@ import {
   DeckGL,
   OrthographicView,
   COORDINATE_SYSTEM,
-  TileLayer,
   BitmapLayer,
   GeoJsonLayer,
 } from 'deck.gl';
@@ -17,8 +16,9 @@ import {
   DrawPolygonByDraggingMode,
 } from '@deck.gl-community/editable-layers';
 import { PointEditMode, existingPointProps } from './pointEditMode';
-import { fetchTile } from './tileFetch';
 import { stainTileLayer } from './stainLayer';
+import { morphTileLayer } from './morphLayer';
+import { subscribeMorphLive, getMorphLive } from './morphLive';
 import { subscribeStainLive, getStainLive } from './stainLive';
 
 // Edit points uses PointEditMode: a plain click on a point never deletes it,
@@ -73,7 +73,10 @@ function finishableMode(Base, minPoints) {
 }
 const FinishableLineMode = finishableMode(DrawLineStringMode, 2);
 const FinishablePolygonMode = finishableMode(DrawPolygonMode, 3);
-const DEFAULT_LAYERS = { showDapi: true, showGenes: true, showRegions: true, geneOpacity: 1, stainOpacity: 1 };
+const DEFAULT_LAYERS = {
+  showDapi: true, showGenes: true, showRegions: true, geneOpacity: 1, stainOpacity: 1,
+  regionFill: 70, outlineWidth: 1,
+};
 const PICK_COLORS = [[80, 230, 120], [90, 150, 255], [190, 120, 255]]; // A, B, extra
 
 function hashHue(s) {
@@ -143,47 +146,22 @@ function pickedFeatureIndex(info) {
   return 0;
 }
 
-// A pyramidal PNG-tile layer (used for both morphology and stain composites).
-function pyramidTileLayer({ id, levels, tileSize, width, height, opacity, urlFor, refetchKey }) {
-  const maxLevel = levels - 1;
-  return new TileLayer({
-    id,
-    tileSize,
-    minZoom: -maxLevel, // deck non-geo: full-res = 0, coarser = negative
-    maxZoom: 0,
-    extent: [0, 0, width, height],
-    opacity,
-    // deck defaults to 6 concurrent tile fetches; a few more fills a fresh pan
-    // faster and localhost soaks it up (the JP2 decode is the real limit).
-    maxRequests: 10,
-    // Each 1024 tile is a ~4 MB texture, and by default deck keeps as many as
-    // it likes. On a laptop's integrated GPU that memory is shared with the
-    // system, so cap it; tiles dropped here come back from the server cache.
-    maxCacheByteSize: TILE_CACHE_BYTES,
-    getTileData: ({ index, signal }) => {
-      const backendZ = maxLevel + index.z;
-      if (backendZ < 0 || backendZ > maxLevel) return Promise.resolve(null);
-      // retries a failed tile: deck would otherwise keep it blank for good
-      return fetchTile(urlFor(backendZ, index.x, index.y), { signal })
-        // deck sizes its tile cache from content.byteLength, which an
-        // ImageBitmap does not have -- without it the byte cap is NaN and
-        // never evicts anything. It lands on the GPU as RGBA.
-        .then((img) => (img ? { image: img, byteLength: img.width * img.height * 4 } : null));
+// A {center, radius} ring as a closed LineString feature, or null. Built once per
+// ring value (memoised by the caller) rather than on every render.
+function circleFeature(ring, segments) {
+  if (!ring || !ring.center || !(ring.radius > 0)) return null;
+  return {
+    type: 'Feature',
+    properties: {},
+    geometry: {
+      type: 'LineString',
+      coordinates: Array.from({ length: segments + 1 }, (_, i) => {
+        const a = (i / segments) * Math.PI * 2;
+        return [ring.center[0] + Math.cos(a) * ring.radius,
+                ring.center[1] + Math.sin(a) * ring.radius];
+      }),
     },
-    renderSubLayers: (props) => {
-      const bb = props.tile.boundingBox;
-      if (!props.data) return null;
-      return new BitmapLayer(props, {
-        data: null,
-        image: props.data.image,
-        bounds: [bb[0][0], bb[1][1], bb[1][0], bb[0][1]], // flipY [left,bottom,right,top]
-        // Smooth when zoomed out, crisp when zoomed in past native -- otherwise
-        // the GPU's bilinear magnification blurs full-res pixels into mush.
-        textureParameters: { minFilter: 'linear', magFilter: 'nearest' },
-      });
-    },
-    updateTriggers: { getTileData: [refetchKey] },
-  });
+  };
 }
 
 const EMPTY_SET = new Set();
@@ -202,6 +180,14 @@ const DEVICE_PIXELS_MOVING = 1;
 // One view for the life of the app: a new View every render makes deck diff it.
 const VIEWS = [new OrthographicView({ flipY: true, controller: true })];
 
+// The morphology is drawn grey. One array for the life of the app: deck compares
+// a layer's non-function props by identity, and a fresh [255,255,255] each render
+// made the tile layer throw away every cached tile's sublayer on every frame.
+const MORPH_TINT = [255, 255, 255];
+
+// How long the view must sit still before it is redrawn at full resolution.
+const SETTLE_MS = 200;
+
 export default function Viewer({
   info, dsId, fc, mode, idProp = 'name', selectedIndexes, onEdit, onClickFeature,
   borderPicks, borderArc, onBorderEdit,
@@ -211,9 +197,9 @@ export default function Viewer({
   cleanPoly, onCleanEdit, cleanPreview,
   gapPreview, onPickGap,
   propRing, reachRing, onRegionMenu, onDeletePoint, onDeleteBorderPoint,
-  onGrabVertex, onReleaseDrag,
-  geneBitmap, geneBounds, geneMode, stainInfo, stainChannels, layers, regionsOff,
-  bordersOff, fillsOff,
+  onGrabVertex, onReleaseDrag, propEdit, propRadius,
+  geneBitmap, geneBounds, geneMode, stainInfo, stainChannels, morphWin, layers, regionsOff,
+  bordersOff, fillsOff, focus, peek,
 }) {
   const L = layers || DEFAULT_LAYERS;
   const picks = borderPicks || [];
@@ -226,11 +212,22 @@ export default function Viewer({
   const fOffKey = [...fOff].sort().join('|');
   const deckRef = useRef(null);
   // Full resolution when still, 1x while the view is moving (see DEVICE_PIXELS_*
-  // above). `interacting` flips only at the edges of a gesture, so it costs two
-  // re-renders per pan, not one per frame.
+  // above). Every view change (pan, wheel, double-click, keyboard, transition
+  // frame) marks the view as moving and restarts a short settle timer, so the
+  // flag cannot get stuck: deck's interaction-state flags could, after a zoom
+  // clamped at min/max zoom never started the transition that clears them.
+  // `interacting` only flips at the edges, so this is two re-renders per gesture.
   const [interacting, setInteracting] = useState(false);
   const idleTimerRef = useRef(null);
   useEffect(() => () => { if (idleTimerRef.current) clearTimeout(idleTimerRef.current); }, []);
+  const markMoving = () => {
+    setInteracting(true);                         // React bails if already true
+    if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
+    idleTimerRef.current = setTimeout(() => {
+      idleTimerRef.current = null;
+      setInteracting(false);
+    }, SETTLE_MS);
+  };
 
   // One instance each, kept for the life of the component: a new mode object
   // would reset the click sequence mid-draw.
@@ -272,10 +269,27 @@ export default function Viewer({
   const stainSettings = useMemo(() => {
     const out = {};
     (stainChannels || []).forEach((c) => {
-      out[c.index] = { color: c.color, min: c.min, max: c.max, visible: c.visible, ...stainLive[c.index] };
+      out[c.index] = { color: c.color, min: c.min, max: c.max, gamma: c.gamma, visible: c.visible, ...stainLive[c.index] };
     });
     return out;
   }, [stainChannels, stainLive]);
+
+  // The morphology window (brightness/contrast/gamma) is a GPU uniform too, with
+  // the live mid-drag value kept out of App the same way the stains are. Falls
+  // back to the dataset's auto-levelled contrast until the user touches it.
+  const morphLive = useSyncExternalStore(subscribeMorphLive, getMorphLive);
+  const morphWindow = useMemo(() => {
+    const m = { ...(morphWin || {}), ...(morphLive || {}) };
+    const c = (info && info.contrast) || {};
+    const lo = Number(m.lo);
+    const hi = Number(m.hi);
+    const g = Number(m.gamma);
+    return [
+      Number.isFinite(lo) ? lo : (Number(c.lo) || 0),
+      Number.isFinite(hi) ? hi : (Number(c.hi) || 1),
+      Number.isFinite(g) ? g : 1,
+    ];
+  }, [morphWin, morphLive, info]);
 
   // Rotating changes what a tile CONTAINS but not its (z, x, y), so nothing else
   // would tell either cache to let go: the browser holds tiles for an hour under
@@ -287,14 +301,16 @@ export default function Viewer({
     return `${o.rot || 0}${o.flipH ? 'h' : ''}${o.flipV ? 'v' : ''}`;
   })();
 
-  const morph = pyramidTileLayer({
+  const morph = morphTileLayer({
     // the orientation is part of the layer identity: deck keeps a tile cache per
     // layer, and a same-id layer with a new extent goes on drawing the tiles it
     // already had -- which showed up as the old and new image both on screen
     id: `morphology-${oKey}`, refetchKey: `${dsId}|${oKey}`,
     levels: info.levels, tileSize: info.tileSize,
     width: info.width, height: info.height, opacity: 1,
-    urlFor: (z, x, y) => `/api/datasets/${dsId}/tiles/${z}/${x}/${y}.png?o=${oKey}`,
+    win: morphWindow, tint: MORPH_TINT,
+    urlFor: (z, x, y) => `/api/datasets/${dsId}/tiles/raw/${z}/${x}/${y}?o=${oKey}`,
+    cacheBytes: TILE_CACHE_BYTES,
   });
 
   const stains = (stainInfo && stainFetch.length)
@@ -326,6 +342,18 @@ export default function Viewer({
       })
     : null;
 
+  // colourKey so a colour change repaints -- deck caches these accessors. Kept as
+  // ONE object across renders: the editable layer nests these arrays inside its
+  // own triggers, and deck compares a nested trigger by identity, so fresh arrays
+  // every render recoloured every region on every pointer move of a drag.
+  const fillAlpha = Math.max(0, Math.min(255, Math.round(Number(L.regionFill ?? 70))));
+  const lineW = Math.max(0.5, Number(L.outlineWidth ?? 1));
+  const regionTriggers = useMemo(() => ({
+    getFillColor: [picksKey, colourKey, offKey, fOffKey, fillAlpha],
+    getLineColor: [selectedIndexes, picksKey, colourKey, offKey, bOffKey],
+    getLineWidth: [selectedIndexes, picksKey, lineW],
+  }), [picksKey, colourKey, offKey, fOffKey, bOffKey, selectedIndexes, fillAlpha, lineW]);
+
   const regions = new EditableGeoJsonLayer({
     id: 'regions',
     data: fc,
@@ -338,24 +366,26 @@ export default function Viewer({
     // layer -- indices have to keep matching `selected` -- it is just not drawn.
     getFillColor: (f) => {
       const nm = regionName(f, idProp);
-      if (nm && off.has(nm)) return [0, 0, 0, 0];
-      // a pick highlight still shows -- an operation you are mid-way through
-      // must stay legible even on a region whose face is hidden
+      // a pick highlight shows first -- an operation you are mid-way through must
+      // stay legible even on a region you switched off or whose face is hidden
+      // (picking a switched-off hemi by name used to show nothing at all)
       const pi = nm ? picks.indexOf(nm) : -1;
       if (pi >= 0) { const [r, g, b] = PICK_COLORS[Math.min(pi, 2)]; return [r, g, b, 80]; }
+      if (nm && off.has(nm)) return [0, 0, 0, 0];
       if (nm && fOff.has(nm)) return [0, 0, 0, 0];
       const [r, g, b] = regionRgb(f, idProp);
-      return [r, g, b, 70];
+      return [r, g, b, fillAlpha];
     },
     // The editable layer passes isSelected as the second argument -- it checks
     // its own short list of selected features, where fc.features.indexOf(f)
     // scanned every region for every region on each repaint.
     getLineColor: (f, isSelected) => {
       const nm = regionName(f, idProp);
-      if (nm && off.has(nm)) return [0, 0, 0, 0];
+      // picks and the selection show even when switched off or hidden
       const pi = nm ? picks.indexOf(nm) : -1;
       if (pi >= 0) { const [r, g, b] = PICK_COLORS[Math.min(pi, 2)]; return [r, g, b, 255]; }
       if (isSelected === true) return [255, 80, 80, 255];
+      if (nm && off.has(nm)) return [0, 0, 0, 0];
       if (nm && bOff.has(nm)) return [0, 0, 0, 0];
       const [r, g, b] = regionRgb(f, idProp);
       return [r, g, b, 230];      // outline matches the fill, so a colour reads
@@ -363,15 +393,10 @@ export default function Viewer({
     lineWidthUnits: 'pixels',
     getLineWidth: (f, isSelected) => {
       const nm = regionName(f, idProp);
-      if (nm && picks.indexOf(nm) >= 0) return 3;
-      return isSelected === true ? 3 : 1;
+      if (nm && picks.indexOf(nm) >= 0) return Math.max(3, lineW + 2);
+      return isSelected === true ? Math.max(3, lineW + 2) : lineW;
     },
-    updateTriggers: {
-      // colourKey so a colour change repaints -- deck caches these accessors
-      getFillColor: [picksKey, colourKey, offKey, fOffKey],
-      getLineColor: [selectedIndexes, picksKey, colourKey, offKey, bOffKey],
-      getLineWidth: [selectedIndexes, picksKey],
-    },
+    updateTriggers: regionTriggers,
     // draggable vertex handles (ModifyMode) -- pixel-sized + white-outlined so
     // they stay clearly visible at any zoom over the busy image
     editHandlePointRadiusScale: 1,
@@ -385,9 +410,11 @@ export default function Viewer({
     onEdit,
   });
 
-  const borderFeatureIndexes = borderArc && borderArc.features
-    ? borderArc.features.map((_, i) => i)
-    : [];
+  // stable across renders: a new array each time churned the border layer's own
+  // update triggers on every drag frame
+  const nBorderFeatures = (borderArc && borderArc.features) ? borderArc.features.length : 0;
+  const borderFeatureIndexes = useMemo(
+    () => Array.from({ length: nBorderFeatures }, (_, i) => i), [nBorderFeatures]);
 
   // Shared border segment(s) between the two picked regions, dragged in ModifyMode.
   // Editing one calls move-border, which rebuilds BOTH polygons to share the line.
@@ -512,22 +539,38 @@ export default function Viewer({
     : null;
 
   // Proportional editing: the falloff circle around the point being dragged, so
-  // the radius the scroll wheel is changing is actually visible.
-  const ringLayer = (propRing && propRing.center && propRing.radius > 0)
+  // the radius the scroll wheel is changing is actually visible. Resized with no
+  // point held (slider, [ ], Alt + scroll -- the touchpad way), it shows for a
+  // moment at the pointer, or mid-view when the pointer is off the map, so the
+  // size can be judged before grabbing. The pointer is kept in a ref: following
+  // it in state would re-render the map on every mouse move.
+  const hoverRef = useRef(null);
+  const [ringPreview, setRingPreview] = useState(null);
+  const previewTimer = useRef(null);
+  const lastRadius = useRef(propRadius);
+  useEffect(() => () => clearTimeout(previewTimer.current), []);
+  useEffect(() => {
+    const changed = lastRadius.current !== propRadius;
+    lastRadius.current = propRadius;
+    if (!changed || !propEdit || propRing || !(mode === 'modify' || mode === 'border')) return;
+    let center = hoverRef.current;
+    if (!center) {
+      const vp = deckRef.current && deckRef.current.deck
+        && deckRef.current.deck.getViewports()[0];
+      if (!vp) return;
+      center = vp.unproject([vp.width / 2, vp.height / 2]);
+    }
+    setRingPreview({ center: [center[0], center[1]], radius: propRadius });
+    clearTimeout(previewTimer.current);
+    previewTimer.current = setTimeout(() => setRingPreview(null), 1200);
+  }, [propRadius, propEdit, propRing, mode]);
+  useEffect(() => { if (propRing || !propEdit) setRingPreview(null); }, [propRing, propEdit]);
+  const propRingData = useMemo(() => circleFeature(propRing || ringPreview, 64),
+    [propRing, ringPreview]);
+  const ringLayer = propRingData
     ? new GeoJsonLayer({
         id: 'prop-ring',
-        data: {
-          type: 'Feature',
-          properties: {},
-          geometry: {
-            type: 'LineString',
-            coordinates: Array.from({ length: 65 }, (_, i) => {
-              const a = (i / 64) * Math.PI * 2;
-              return [propRing.center[0] + Math.cos(a) * propRing.radius,
-                      propRing.center[1] + Math.sin(a) * propRing.radius];
-            }),
-          },
-        },
+        data: propRingData,
         coordinateSystem: COORDINATE_SYSTEM.CARTESIAN,
         pickable: false,
         filled: false,
@@ -541,21 +584,11 @@ export default function Viewer({
   // Snap reach: the circle is as WIDE as the widest gap that reach will bridge
   // (a close of radius r closes a gap up to 2r across), sitting at the narrowest
   // point between the two picked regions.
-  const reachLayer = (reachRing && reachRing.center && reachRing.radius > 0)
+  const reachRingData = useMemo(() => circleFeature(reachRing, 96), [reachRing]);
+  const reachLayer = reachRingData
     ? new GeoJsonLayer({
         id: 'reach-ring',
-        data: {
-          type: 'Feature',
-          properties: {},
-          geometry: {
-            type: 'LineString',
-            coordinates: Array.from({ length: 97 }, (_, i) => {
-              const a = (i / 96) * Math.PI * 2;
-              return [reachRing.center[0] + Math.cos(a) * reachRing.radius,
-                      reachRing.center[1] + Math.sin(a) * reachRing.radius];
-            }),
-          },
-        },
+        data: reachRingData,
         coordinateSystem: COORDINATE_SYSTEM.CARTESIAN,
         pickable: false,
         filled: false,
@@ -570,8 +603,9 @@ export default function Viewer({
   if (L.showDapi) stack.push(morph);
   if (stains) stack.push(stains);
   if (L.showGenes && genes) stack.push(genes);
-  if (showEditableRegions) stack.push(regions);
-  if (borderLayer) stack.push(borderLayer);
+  // Holding H peeks at the imagery: regions and the border handle step aside.
+  if (showEditableRegions && !peek) stack.push(regions);
+  if (borderLayer && !peek) stack.push(borderLayer);
   if (splitLayer) stack.push(splitLayer);
   if (drawLayer) stack.push(drawLayer);
   if (cleanLayer) stack.push(cleanLayer);
@@ -586,17 +620,28 @@ export default function Viewer({
   // onClick doesn't fire. Whichever runs first claims the click.
   const downAtRef = useRef(null);
   const gapClickAtRef = useRef(0);
+  const downSeqRef = useRef(0);       // one count per press on the map
+  const gapClaimRef = useRef(-1);     // the press that already asked for a gap
+  // One press, one gap request. A 300 ms window was not enough: deck's onClick
+  // arrived ~318 ms after the host's, so every click asked the backend twice and
+  // whichever answer landed last won the preview. The time cap is only a fallback
+  // in case a press was ever missed by the host's pointerdown.
+  const gapAlreadyClaimed = () => gapClaimRef.current === downSeqRef.current
+    && Date.now() - gapClickAtRef.current < 1500;
   const takeGapClick = (coord) => {
     if (!coord || !onPickGap) return;
-    const now = Date.now();
-    if (now - gapClickAtRef.current < 300) return;   // the other handler already took it
-    gapClickAtRef.current = now;
+    if (gapAlreadyClaimed()) return;            // the other handler already took it
+    gapClaimRef.current = downSeqRef.current;
+    gapClickAtRef.current = Date.now();
     onPickGap([coord[0], coord[1]]);
   };
-  const handleHostPointerDown = (e) => { downAtRef.current = [e.clientX, e.clientY]; };
+  const handleHostPointerDown = (e) => {
+    downAtRef.current = [e.clientX, e.clientY];
+    downSeqRef.current += 1;
+  };
   const handleHostClick = (e) => {
     if (mode !== 'dissolve' || !onPickGap) return;
-    if (Date.now() - gapClickAtRef.current < 300) return;   // deck's onClick got it
+    if (gapAlreadyClaimed()) return;            // deck's onClick got it
     const down = downAtRef.current;
     if (down && Math.hypot(e.clientX - down[0], e.clientY - down[1]) > 5) return;  // that was a pan
     const deck = deckRef.current && deckRef.current.deck;
@@ -624,6 +669,30 @@ export default function Viewer({
   // button-2 press also stops the rubber-band line dead, which is the point --
   // you should not have to drag a trailing line anywhere to end the shape.
   const hostRef = useRef(null);
+
+  // Zoom to a region, or fit the section, on request. deck re-fits whenever
+  // initialViewState changes; the seq term makes a repeat request for the same
+  // region (after panning away) count as a change.
+  const [viewOverride, setViewOverride] = useState(null);
+  // The viewer is remounted for a new dataset or orientation, and the focus it
+  // mounts with is the LAST zoom -- in the old dataset's (or the unrotated)
+  // coordinates. Only a request made after mount moves the view.
+  const mountFocus = useRef(focus);
+  useEffect(() => {
+    if (!focus || focus === mountFocus.current) return;
+    const host = hostRef.current;
+    const vw = (host && host.clientWidth) || Math.max(window.innerWidth - 340, 300);
+    const vh = (host && host.clientHeight) || window.innerHeight;
+    const [x0, y0, x1, y1] = focus.bounds || [0, 0, info.width, info.height];
+    const w = Math.max(x1 - x0, 1);
+    const h = Math.max(y1 - y0, 1);
+    const zoom = Math.min(6, Math.log2(Math.min(vw / w, vh / h)) - 0.2);
+    setViewOverride({
+      target: [(x0 + x1) / 2, (y0 + y1) / 2, 0],
+      zoom: zoom + (focus.seq % 2) * 1e-9, minZoom: -8, maxZoom: 8,
+    });
+  }, [focus]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const ctxHandlerRef = useRef(null);
   const sketchModeRef = useRef(null);
   // clean mode is NOT here: it draws by dragging and finishes on release, so
@@ -729,22 +798,20 @@ export default function Viewer({
       ref={deckRef}
       views={VIEWS}
       useDevicePixels={interacting ? DEVICE_PIXELS_MOVING : DEVICE_PIXELS_IDLE}
-      initialViewState={initialViewState}
-      onInteractionStateChange={(s) => {
-        const moving = !!(s && (s.isDragging || s.isPanning || s.isZooming
-          || s.isRotating || s.inTransition));
-        if (moving) {
-          if (idleTimerRef.current) { clearTimeout(idleTimerRef.current); idleTimerRef.current = null; }
-          setInteracting(true);                 // React bails if already true
-        } else if (!idleTimerRef.current) {
-          // let the view settle before paying for the full-res redraw, so a
-          // flick-and-stop does not thrash the GPU with a framebuffer realloc
-          idleTimerRef.current = setTimeout(() => {
-            idleTimerRef.current = null;
-            setInteracting(false);
-          }, 200);
-        }
+      initialViewState={viewOverride || initialViewState}
+      // the region under the pointer, by name -- they were known by colour alone
+      getTooltip={({ object, layer }) => {
+        if (!object || !layer || !String(layer.id).startsWith('regions')) return null;
+        const g = object.geometry;
+        if (!g || (g.type !== 'Polygon' && g.type !== 'MultiPolygon')) return null;
+        const nm = regionName(object, idProp);
+        if (!nm) return null;
+        return { text: off.has(nm) ? `${nm} (switched off)` : nm };
       }}
+      // returns nothing, so deck keeps owning the view (initialViewState)
+      onViewStateChange={() => { markMoving(); }}
+      // where the pointer is on the map, for the proportional ring preview
+      onHover={(h) => { hoverRef.current = h && h.coordinate ? h.coordinate : null; }}
       layers={stack}
       getCursor={() => (mode === 'modify' || mode === 'border' || mode === 'split'
         || mode === 'dissolve' || mode === 'draw' || mode === 'clean' ? 'crosshair' : 'grab')}

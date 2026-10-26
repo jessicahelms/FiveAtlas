@@ -923,6 +923,48 @@ def tile(ds_id: str, z: int, x: int, y: int, plane: Optional[int] = None):
                     headers={"Cache-Control": "max-age=3600"})
 
 
+@app.get("/api/datasets/{ds_id}/tiles/raw/{z}/{x}/{y}")
+def tile_raw(ds_id: str, z: int, x: int, y: int, plane: Optional[int] = None):
+    """The morphology tile as raw little-endian uint16 (tile x tile), for the
+    browser to window (brightness/contrast) on the GPU. No contrast in the URL,
+    so a slider move fetches nothing -- the 16-bit counterpart of the .png route
+    above, mirroring /stains/raw. 503 (not 500) on a transient read error so the
+    viewer retries the tile instead of leaving a permanent gap.
+
+    Cached in tilecache exactly like the .png route (generation + orientation in
+    the key): unlike StainStack, Pyramid keeps no decoded tiles of its own, so
+    without this every browser-cache miss re-decoded JPEG2000 -- 0.1-0.5 s a tile
+    over a network drive."""
+    gen = tilecache.generation(ds_id)      # before the reader -- see _evict
+    try:
+        p = pyramid(ds_id)
+    except NoImagery:
+        return Response(status_code=204)
+    except KeyError:
+        raise HTTPException(404, "unknown dataset")
+    level = (p.nlevels - 1) - z
+    if level < 0 or level >= p.nlevels:
+        return Response(status_code=204)
+    o = ORI.get(ds_id)
+    key = (ds_id, gen, "morphraw", level, x, y, plane, _okey(o))
+    data = tilecache.get(key)
+    if data is None:
+        try:
+            data = p.tile_raw_bytes(level, x, y, plane, orient=o)
+        except KeyError:
+            raise HTTPException(404, "dataset closed while reading")
+        except Exception as e:
+            print(f"[tiles] {ds_id} raw z={z} x={x} y={y}: {type(e).__name__}: {e}",
+                  file=sys.stderr)
+            raise HTTPException(503, "reading the tile failed -- try again")
+        if data is None:
+            return Response(status_code=204)
+        tilecache.put(key, data)
+    return Response(content=data, media_type="application/octet-stream",
+                    headers={"Cache-Control": "max-age=3600",
+                             "X-Tile-Size": str(p.tile)})
+
+
 @app.get("/api/datasets/{ds_id}/overview.png")
 def overview(ds_id: str):
     try:
@@ -964,6 +1006,10 @@ def regions_restore_original(ds_id: str):
         raise HTTPException(404, "unknown dataset")
     try:
         res = geo.restore_original(ds_id)
+        # the dataset's own file is as imaged: bring it into the current rotation
+        # (and say so) before anyone sees it -- the working copy too
+        res["fc"] = _to_current_frame(ds_id, res["fc"])
+        geo.save_edited(ds_id, res["fc"])
     except FileNotFoundError as e:
         raise HTTPException(422, str(e))
     except Exception as e:
@@ -971,6 +1017,32 @@ def regions_restore_original(ds_id: str):
     return {**provenance.stamped(res["fc"].get("features", []), res["fc"],
                                  "restore-original", Path(res["source"]).name),
             "source": res["source"], "backup": res["backup"], "count": res["features"]}
+
+
+def _to_current_frame(ds_id: str, fc: dict) -> dict:
+    """`fc` moved from ITS frame into the dataset's current orientation, and
+    tagged with it. A region file says which frame it is in with `_orientation`;
+    one with no tag is as imaged (identity). Files read from disk, and the
+    dataset's own GeoJSON on Restore original, used to come in untransformed
+    while the image was rotated -- 24,745 px off on the real set -- and with no
+    tag, so every later rotate or export took them for already rotated."""
+    want = ORI.get(ds_id)
+    have = ORI.normalise(fc.get("_orientation") or {"rot": 0, "flipH": False, "flipV": False})
+    if have != want:
+        try:
+            p = pyramid(ds_id)
+            W0, H0 = p.info()["width"], p.info()["height"]
+        except Exception:
+            W0, H0 = _original_canvas(ds_id, fc, have)
+        feats = fc.get("features", [])
+        if not ORI.is_identity(have):
+            dw, dh = ORI.out_size(W0, H0, have)
+            feats = ORI.transform_features(feats, ORI.invert(have), dw, dh)
+        if not ORI.is_identity(want):
+            feats = ORI.transform_features(feats, want, W0, H0)
+        fc = {**fc, "features": feats}
+    fc["_orientation"] = want
+    return fc
 
 
 @app.get("/api/datasets/{ds_id}/orientation")
@@ -1041,8 +1113,12 @@ async def put_orientation(ds_id: str, request: Request):
                              + (" flipH" if want["flipH"] else "")
                              + (" flipV" if want["flipV"] else ""))
     out["_orientation"] = want
-    ORI.put(ds_id, want)
+    # Regions first, the dataset's orientation only once they are safely
+    # written: the other way round, a failed save left orientation.json at the
+    # new rotation with the regions still in the old frame -- 24,745 px off, and
+    # the natural retry then made it permanent.
     geo.save_edited(ds_id, out)
+    ORI.put(ds_id, want)
     w, h = ORI.out_size(W0, H0, want)
     return {**out, "orientation": want, "width": int(w), "height": int(h)}
 
@@ -1162,6 +1238,22 @@ def _hold_out(features, id_prop, names):
         nm = str((f.get("properties") or {}).get(id_prop))
         (held.append((i, f)) if nm in skip else kept.append(f))
     return kept, held
+
+
+def _gap_exclude(features, id_prop, names):
+    """What a gap route may hold out: the switched-off regions EXCEPT the section
+    outline (hemi). find_gap already sets the container aside and uses it as the
+    bound of a gap; holding it out as well removed that bound, and one click by
+    the tissue edge with hemi switched off handed 18.5 M px2 of background
+    outside the section to seven regions."""
+    skip = {str(n) for n in (names or [])}
+    if not skip:
+        return []
+    try:
+        wrap = topology.section_containers(features, id_prop)
+    except Exception:
+        wrap = set()
+    return sorted(skip - set(wrap))
 
 
 def _put_back(features, held):
@@ -1653,12 +1745,26 @@ async def regions_gap(ds_id: str, request: Request):
     # Take the FC from the body like the other geometry routes: the client's
     # copy may hold unsaved edits, and the gap has to reflect what is on screen.
     fc = body.get("fc") or geo.load_regions(ds_id)[0]
-    search = float(body.get("search", topology.GAP_SEARCH))
+    try:
+        search = float(body.get("search", topology.GAP_SEARCH))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "'search' must be a number")
     try:
         res = topology.gap_between(fc["features"], d["id_prop"], names, search=search)
     except Exception as e:
         raise HTTPException(500, f"gap failed: {e}")
-    return JSONResponse(res if res is not None else {"kind": None})
+    out = dict(res) if res is not None else {"kind": None}
+    # A nested pair (one inside the other) is shared by snap_to_container, which
+    # has no "Snap to X" or "Fill all": say so, so the client can hide them
+    # instead of offering buttons that do nothing.
+    try:
+        c = topology.containment(fc["features"], d["id_prop"], [str(n) for n in names][:2]) \
+            if len(names) == 2 else None
+    except Exception:
+        c = None
+    if c:
+        out["nested"] = {"inner": c.get("inner"), "outer": c.get("outer")}
+    return JSONResponse(out)
 
 
 @app.post("/api/datasets/{ds_id}/regions/move-border")
@@ -1836,6 +1942,23 @@ async def regions_merge(ds_id: str, request: Request):
     if not names or len(names) < 2:
         raise HTTPException(400, "need 'regions': at least two region names")
     fc = body.get("fc") or geo.load_regions(ds_id)[0]
+    # Merging with the section outline (hemi) is a CHOICE, never a plain merge:
+    # a plain merge lets the first pick win, so [TH, hemi] made TH the whole
+    # hemisphere and deleted hemi. Without `intoContainer` the client is asked;
+    # with it, the picks are folded into the outline and the outline is kept.
+    conts = topology.section_containers(fc["features"], d["id_prop"]) & {str(n) for n in names}
+    if conts:
+        cname = sorted(conts)[0]
+        rest = [str(n) for n in names if str(n) != cname]
+        if not body.get("intoContainer"):
+            return {"needsContainerChoice": True, "container": cname, "regions": rest}
+        try:
+            res = topology.fold_into_container(fc["features"], d["id_prop"], names)
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+        detail = f"{' + '.join(res['folded'])} folded into {res['name']}"
+        return {**provenance.stamped(res["features"], fc, "merge", detail, names),
+                "name": res["name"], "folded": res["folded"], "parts": 1, "sealed": 0.0}
     try:
         res = topology.merge_regions(fc["features"], d["id_prop"], names, body.get("name"),
                                      seam_tol=float(body.get("tol", 40.0)),
@@ -1895,7 +2018,8 @@ async def regions_dissolve_gap(ds_id: str, request: Request):
     tol = float(body.get("tol", 40.0))
     # Regions switched off in the sidebar -- usually the hemisphere outline, which
     # would otherwise mean there is no such thing as a gap.
-    kept, held = _hold_out(fc["features"], d["id_prop"], body.get("exclude"))
+    kept, held = _hold_out(fc["features"], d["id_prop"],
+                           _gap_exclude(fc["features"], d["id_prop"], body.get("exclude")))
     try:
         res = topology.dissolve_gap(kept, d["id_prop"], point, tol=tol)
     except ValueError as e:      # no gap there / click was inside a region
@@ -1978,6 +2102,7 @@ async def regions_load(ds_id: str, request: Request):
     # event loop and stop every other route answering.
     try:
         fc = await run_in_threadpool(geo.read_regions_file, ds_id, str(path))
+        fc = _to_current_frame(ds_id, fc)
     except Exception as e:
         raise HTTPException(400, f"load failed: {e}")
     # Stamped AFTER the load so the entry joins whatever trail the incoming file
@@ -2012,6 +2137,7 @@ async def regions_read_file(ds_id: str, request: Request):
     # this keeps any other slow read off the loop.
     try:
         fc = await run_in_threadpool(geo.read_regions_file, ds_id, str(path))
+        fc = _to_current_frame(ds_id, fc)
     except Exception as e:
         raise HTTPException(400, f"could not read {Path(str(path)).name}: {e}")
 
@@ -2031,7 +2157,7 @@ async def regions_read_file(ds_id: str, request: Request):
             if _same_file(q, here):
                 continue
             try:
-                sfc = geo.read_regions_file(ds_id, str(q))
+                sfc = _to_current_frame(ds_id, geo.read_regions_file(ds_id, str(q)))
             except Exception:
                 continue
             sf = sfc.get("features") or []
@@ -2048,10 +2174,10 @@ async def regions_load_multi(ds_id: str, request: Request):
     checklist's region rows. Each file goes through the same reader as a
     single load (space transform, healing).
 
-    Files picked together keep their regions SEPARATE: a name a previous file
-    already used is renamed rather than reused, because two regions sharing a
-    name are one multi-part region here and would be edited together. Body:
-    {paths:[...]}."""
+    Names are kept exactly as the files have them; each feature is tagged with
+    the file it came from so the sidebar can list the files apart. A name used
+    in more than one file is therefore one multi-part region here (edited
+    together) and is reported in `shared`. Body: {paths:[...]}."""
     try:
         d = ds.get_dataset(ds_id)
     except KeyError:
@@ -2069,6 +2195,7 @@ async def regions_load_multi(ds_id: str, request: Request):
     for path in paths:
         try:
             fc = await run_in_threadpool(geo.read_regions_file, ds_id, str(path))
+            fc = _to_current_frame(ds_id, fc)
         except Exception as e:
             raise HTTPException(400, f"load failed for {Path(str(path)).name}: {e}"
                                      " -- nothing was changed")
@@ -2134,13 +2261,27 @@ async def regions_add(ds_id: str, request: Request):
                                   for f in feats], tag))
         carve = False
 
+    # Switched-off regions are left untouched, as Fix a gap leaves them: they
+    # cede no ground and are not asked about. The section outline stays in --
+    # it is never carved, and it is what a draw inside the section sits in. The
+    # name is still made unique against every region, held out or not.
+    kept, held = _hold_out(feats, d["id_prop"],
+                           _gap_exclude(feats, d["id_prop"], body.get("exclude")))
+    # Which region is the section outline is decided from the WHOLE file: with
+    # all but hemi and one region switched off ("Show only this"), what is left
+    # no longer shows hemi wrapping two others, and the draw carved it.
+    wrap = topology.section_containers(feats, d["id_prop"])
+    if held:
+        name = topology._unique_name(
+            {str((f.get("properties") or {}).get(d["id_prop"])) for f in feats}, name)
+
     # The stacking question, asked BEFORE anything is committed: a client that
     # sends ask=true and has not yet chosen gets back what the outline would
     # land on, and nothing is changed. It then re-posts with `overlap`. Damage
     # never asks -- it sits inside its host by definition.
     if body.get("ask") and not overlap and not tag:
         try:
-            rep = topology.overlap_report(feats, d["id_prop"], points)
+            rep = topology.overlap_report(kept, d["id_prop"], points, containers=wrap)
         except ValueError as e:
             raise HTTPException(422, str(e))
         hits = rep["overlaps"]
@@ -2154,12 +2295,14 @@ async def regions_add(ds_id: str, request: Request):
                     "suggest": "both" if nested else "top"}
 
     try:
-        res = topology.add_region(feats, d["id_prop"], points,
-                                  name=name, carve=carve, overlap=overlap)
+        res = topology.add_region(kept, d["id_prop"], points,
+                                  name=name, carve=carve, overlap=overlap,
+                                  containers=wrap)
     except ValueError as e:
         raise HTTPException(422, str(e))
     except Exception as e:
         raise HTTPException(500, f"add-region failed: {e}")
+    res["features"] = _put_back(res["features"], held)
 
     # Where the shape landed, by the same rule the SmartSheet export uses -- so
     # what the sidebar says now is what the export says later. `candidates` is
@@ -2272,7 +2415,8 @@ async def regions_fill_gap(ds_id: str, request: Request):
     if not point or len(point) < 2:
         raise HTTPException(400, "need 'point': [x, y]")
     fc = body.get("fc") or geo.load_regions(ds_id)[0]
-    kept, held = _hold_out(fc["features"], d["id_prop"], body.get("exclude"))
+    kept, held = _hold_out(fc["features"], d["id_prop"],
+                           _gap_exclude(fc["features"], d["id_prop"], body.get("exclude")))
     try:
         res = topology.fill_gap_with_region(kept, d["id_prop"], point,
                                             name=body.get("name"),

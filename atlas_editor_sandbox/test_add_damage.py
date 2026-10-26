@@ -22,6 +22,7 @@ sys.path.insert(0, r"C:\Users\FIVE\source\repos\Jess\atlas_editor\backend")
 
 from shapely.geometry import box, shape     # noqa: E402
 import damage as D                          # noqa: E402
+import topology as T                        # noqa: E402
 
 BASE = os.environ.get("ATLAS_TEST_BASE", "http://127.0.0.1:8060")
 if ":8050" in BASE or ":8000" in BASE:
@@ -226,14 +227,23 @@ check("an unknown designation is refused, not guessed", code == 422, str(code))
 check("the refusal says what it did not recognise", "Isocortex" in str(body))
 
 code, plain = post(f"/api/datasets/{ds_id}/regions/add", {"fc": fc0, "points": square})
-# Carving is a geometry operation, so it takes ground from a container too — that
-# is right, and it is why the container guard belongs in assignment, not here.
+# Carving takes ground from every real region the new outline covers -- but never
+# from the whole-section outline (topology.section_containers). This used to say
+# carving a container "is right"; the 2026-10-23 audit found it punched a hole in
+# hemi on every draw inside the section, leaving the new region outside the one
+# outline that is meant to contain everything. hemi now keeps covering it.
+containers = T.section_containers(fc0["features"], id_prop)
 touching = sorted({(f["properties"] or {})[id_prop] for f in anat
-                   if geom_of(f).intersection(host_sq).area > 0})
-check("an ordinary region still carves everything it covers",
+                   if geom_of(f).intersection(host_sq).area > 0} - containers)
+check("an ordinary region carves every real region it covers, not the section outline",
       code == 200 and sorted(plain["ceded"]) == touching
       and area_of(plain, host_name, id_prop) < host_area0 - 1000,
       f"ceded={plain.get('ceded') if code == 200 else code}")
+if code == 200:
+    for cn in sorted(containers):
+        check(f"...and {cn} keeps its full area (no hole punched)",
+              abs(area_of(plain, cn, id_prop) - area_of(fc0, cn, id_prop)) < 1e-6,
+              f"{area_of(plain, cn, id_prop) - area_of(fc0, cn, id_prop):+.3f} px²")
 check("an ordinary region reports no designation",
       plain.get("damage") is None and plain.get("inside") == [])
 

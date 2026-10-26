@@ -73,6 +73,7 @@ float sampleRaw(usampler2D t, vec2 uv) {
 vec3 channel(usampler2D t, vec2 uv, vec4 color, vec4 range) {
   if (color.a <= 0.0) return vec3(0.0);       // off / empty slot: no texture reads
   float n = clamp((sampleRaw(t, uv) - range.x) / max(range.y - range.x, 1.0), 0.0, 1.0);
+  if (range.z > 0.0 && range.z != 1.0) n = pow(n, 1.0 / range.z);   // gamma (Xenium "contrast")
   return n * color.rgb * color.a;
 }
 
@@ -162,7 +163,9 @@ export class StainTileLayer extends BitmapLayer {
       const on = Boolean(tex && s && s.visible);
       const c = (s && s.color) || [0, 0, 0];
       uniforms[`color${k}`] = on ? [c[0] / 255, c[1] / 255, c[2] / 255, 1] : [0, 0, 0, 0];
-      uniforms[`range${k}`] = on ? [Number(s.min) || 0, Number(s.max) || 1, 0, 0] : [0, 1, 0, 0];
+      uniforms[`range${k}`] = on
+        ? [Number(s.min) || 0, Number(s.max) || 1, Number(s.gamma) || 1, 0]
+        : [0, 1, 1, 0];
       bindings[`stainTex${k}`] = tex || emptyTexture;
     });
     model.shaderInputs.setProps({

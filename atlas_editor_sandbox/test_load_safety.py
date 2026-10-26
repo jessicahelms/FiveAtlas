@@ -263,9 +263,18 @@ res = asyncio.run(A.regions_load_multi(ds2, Req({"paths": [str(two), str(one)]})
 got = json.loads(bytes(res.body).decode("utf-8"))
 check("several good files load", len(got.get("features") or []) == 2,
       f"{len(got.get('features') or [])} features")
-check("the first file's _orientation is carried across",
-      (got.get("_orientation") or {}).get("rot") == 180,
+# The file says it is rotated 180; the dataset is shown as imaged. It used to
+# keep its own tag with its coordinates unmoved -- so the regions sat 180 deg
+# off the image and every later rotate or export took them for already turned.
+# Now they are brought into the dataset's frame and tagged with THAT.
+check("a rotated file is brought into the dataset's frame and tagged with it",
+      (got.get("_orientation") or {}).get("rot") == 0,
       repr(got.get("_orientation")))
+two_src = json.loads(two.read_text(encoding="utf-8"))
+moved = [f for f in got["features"]
+         if f["properties"].get("name") == two_src["features"][0]["properties"].get("name")]
+check("...its coordinates really were turned",
+      bool(moved) and moved[0]["geometry"]["coordinates"] != two_src["features"][0]["geometry"]["coordinates"])
 check("and its provenance trail is not dropped",
       any((e.get("who") == "A Colleague") for e in (got.get("_provenance") or [])),
       repr([e.get("who") for e in (got.get("_provenance") or [])]))

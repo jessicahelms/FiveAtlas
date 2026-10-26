@@ -95,7 +95,8 @@ ITEMS = [
     "choose: Add to the map keeps what is already there and puts the new "
     "regions beside it (a name that is already used gets changed, so two "
     "regions never share one), and Replace the map swaps everything for the "
-    "file. If the file contains hemi, you are asked first whether to load the "
+    "file. If the damage tools are on (Settings) and the file contains hemi, "
+    "you are asked first whether to load the "
     "damage with it — Yes or No — which covers damage shapes inside that "
     "file and damage-only files (like separation.4.geojson) in the same folder. "
     "Ctrl+Z undoes the load, and nothing is written until you Save.",
@@ -114,9 +115,10 @@ ITEMS = [
     "alphaSMA/Vimentin…). Tick a channel to show it, pick its colour, and "
     "set its brightness with the min and max sliders — min is the level "
     "that reads as black, max the level that reads as full colour, so "
-    "narrowing the range brightens the faint staining in between. The image "
-    "updates when you pause dragging for a moment. Gene channels have the "
-    "same controls.",
+    "narrowing the range brightens the faint staining in between. The γ "
+    "(gamma) slider bends the curve in between: below 1 lifts the faint "
+    "staining further, above 1 darkens it. The image updates while you drag. "
+    "Gene channels have the same controls.",
 
     # -- transcript heat map ------------------------------------------------------------
     "Gene expression has two looks, switched at the top of the Genes panel. "
@@ -149,17 +151,23 @@ ITEMS = [
     # -- switch off --------------------------------------------------------------------
     "The eye beside each region in the list switches it off: it is hidden from "
     "the image and left out of gap-finding and Check geometry, but it stays in "
-    "the file and comes back exactly as it was. Switching off the outline "
-    "(“hemi”) is the easy way to hunt for gaps between the regions "
-    "inside it.",
+    "the file and comes back exactly as it was. You no longer need to switch "
+    "off the outline (“hemi”) to hunt for gaps: the app sets it aside "
+    "by itself for Fix a gap, Share borders and Check geometry.",
 
     # -- face / border toggles -----------------------------------------------------------
     "Beside the eye, every region also has a face toggle and a border toggle. "
     "These only change what you SEE — unlike the eye, the region still "
     "counts for gap-finding, snapping and Check geometry. Hide a face to see "
     "the imagery and the borders clean while you fill gaps; hide a border to "
-    "see a fill without its outline. The Faces off / Faces on buttons above "
-    "the list do every region at once.",
+    "see a fill without its outline. The Faces off / Faces on and Borders "
+    "off / Borders on buttons above the list do every region at once, and "
+    "Show all turns every face, border and switched-off region back on. Hold "
+    "H to peek at the bare image with every region hidden, and press Home to "
+    "fit the whole section. Type in the filter box to find a region; "
+    "double-click its row to zoom to it, or right-click it for Show only this. "
+    "Under Display, two sliders set how solid the region faces are and how "
+    "thick the outlines are drawn.",
 
     # -- edit points ---------------------------------------------------------------------
     "Edit points reshapes a region by hand. Select the region, press Edit "
@@ -207,9 +215,13 @@ ITEMS = [
     "Pick two or more regions and press Share borders to tidy up all the "
     "boundaries at once: small gaps get filled, overlaps get removed, and "
     "every pair ends up with one shared edge. The Snap reach slider sets how "
-    "wide a gap Share borders will bridge — if a gap is left, raise it and "
-    "press Share borders again; a second press is always safe. Merge into one "
-    "instead combines everything you picked into a single region.",
+    "wide a gap Share borders will bridge — while you pick, it tells you "
+    "how far it has to reach for the two regions you picked. If a gap is "
+    "left, raise it and press Share again; a second press is always safe. "
+    "Click a picked region again to unpick it. Merge into one instead "
+    "combines everything you picked into a single region. If “hemi” "
+    "is among the picks, Merge asks first: Fold into hemi removes the other "
+    "regions and gives their ground to the outline, or Cancel.",
 
     # -- merge -----------------------------------------------------------------------------
     "Merge into one truly dissolves the border between the regions you picked: "
@@ -243,7 +255,10 @@ ITEMS = [
     "shape, is not offered.)",
 
     # -- drawing damage ------------------------------------------------------------------
-    "The same button draws damage. Pick a damage type instead (Separation, "
+    "The damage tools (drawing damage, the damage cells and Annotation notes, "
+    "below) are hidden unless you tick Show damage &amp; notes tools in "
+    "Settings; your files keep their damage either way. With them on, the "
+    "same button draws damage. Pick a damage type instead (Separation, "
     "Large void, Bubble…) and trace the damaged area the same way. The "
     "shape names itself — separation.1, voidlarge.2 — with numbering "
     "running across the whole file. Unlike a region, a damage shape sits "
@@ -266,7 +281,9 @@ ITEMS = [
     "Fix a gap is for empty spaces left behind between regions. Click inside "
     "one and it will be outlined in red, then press Dissolve to hand it to "
     "the regions around it, or New region to turn it into a region of its "
-    "own.",
+    "own. Click another gap to carry on; Esc leaves Fix a gap. A hole inside "
+    "a single region, and the margin between the tissue and hemi's outline, "
+    "are not gaps and are refused.",
 
     # -- clean up stray lines --------------------------------------------------------------
     "Clean up stray lines removes the hairline slivers geometry operations "
@@ -297,7 +314,8 @@ ITEMS = [
     "“saved” means everything is. The first time you press Save on a "
     "dataset, it asks where to put the regions file — it opens in the "
     "dataset's own folder with a name already filled in, like "
-    "merged.regions_edited.geojson. Every Save after that updates the same "
+    "merged.regions_edited.geojson. Ctrl+S saves too. Every Save after that "
+    "updates the same "
     "file without asking: “Saving to (file)” shows which one, and "
     "(change) picks a different file. After each Save a panel under the button "
     "shows exactly where it went, with Open folder and Copy path buttons. It "
@@ -308,8 +326,10 @@ ITEMS = [
     "(%LOCALAPPDATA%\\FiveAtlas on Windows; ~/Library/Application "
     "Support/FiveAtlas on a Mac — in Finder press Shift+Cmd+G and paste "
     "that path), so you can always go back to an earlier one; the log file "
-    "lives there too. Reset, beside Save, throws away every edit since the "
-    "last save. Restore original GeoJSON (in Files &amp; export) takes you "
+    "lives there too. Reset, beside Save, asks first and then throws away "
+    "every edit since the last save (Ctrl+Z still brings them back). Closing "
+    "the window or opening another dataset with unsaved edits asks first "
+    "too. Restore original GeoJSON (in Files &amp; export) takes you "
     "back to the dataset’s own file — your current work is "
     "snapshotted first, so even that can be undone. Your original files are "
     "never changed.",
