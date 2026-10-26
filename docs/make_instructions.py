@@ -57,11 +57,16 @@ ITEMS = [
     "keep it open while you work and close it to stop.",
 
     # -- updating ----------------------------------------------------------------------
-    "Updating: when a newer FiveAtlas is out, a line at the top of the sidebar "
-    "says so and links to the download page, which has the Windows and the Mac "
-    "download on one page. Updating is always your choice — nothing downloads "
-    "itself. The version you are running is shown in the top-left corner of the "
-    "window. On Windows, unzip the new version and open its FiveAtlas.exe — it "
+    "Updating: from 1.3.3 on, FiveAtlas updates itself. When a newer version is "
+    "out it downloads in the background, and a bar at the top of the window "
+    "offers Restart to update — one click, and the new version opens in a new "
+    "tab. Not clicked? It switches the next time you open FiveAtlas. Nothing is "
+    "replaced while you work, and you are asked first if you have unsaved edits. "
+    "If an update can’t be installed, the line at the top of the sidebar "
+    "links to the download page instead, which has the Windows and the Mac "
+    "download on one page. The version you are running is shown in the top-left "
+    "corner of the window. To update by hand (or from a version older than "
+    "1.3.3): on Windows, unzip the new version and open its FiveAtlas.exe — it "
     "starts in its own tab even if the old one is still open; close the old "
     "black window when you are done with it. On a Mac, drag the new FiveAtlas "
     "into Applications, choose Replace, and run the Terminal line above once "
@@ -104,14 +109,17 @@ ITEMS = [
     "If you are ever unsure about how to use certain features, there are "
     "instructions that pop up after you click on a feature. The sidebar is in "
     "sections — What loaded, Regions, Edit regions, Files &amp; export and "
-    "more — and every section title has a little arrow: click it to fold "
-    "that section away and the sidebar stays short; click again to bring it "
-    "back. The sidebar can be made wider or narrower by dragging the thin strip "
-    "between it and the image. Settings (the gear button at the top of the "
+    "more — and clicking anywhere on a section’s title bar folds that "
+    "section away so the sidebar stays short; click again to bring it back. "
+    "Layers, Stains and Genes have their own sidebar on the right, so they are "
+    "always in reach; Hide » tucks it away and the tab at the right edge brings "
+    "it back. Either sidebar can be made wider or narrower by dragging the thin "
+    "strip between it and the image. Settings (the gear button at the top of the "
     "sidebar) makes the text and buttons bigger or smaller.",
 
     # -- stains and brightness -------------------------------------------------------
-    "The Stains panel lists every morphology_focus channel (DAPI, 18S, "
+    "The Stains panel (in the right-hand sidebar) lists every morphology_focus "
+    "channel (DAPI, 18S, "
     "alphaSMA/Vimentin…). Tick a channel to show it, pick its colour, and "
     "set its brightness with the min and max sliders — min is the level "
     "that reads as black, max the level that reads as full colour, so "
@@ -149,19 +157,20 @@ ITEMS = [
     "it behind everything else, so whatever it contains stays visible.",
 
     # -- switch off --------------------------------------------------------------------
-    "The eye beside each region in the list switches it off: it is hidden from "
-    "the image and left out of gap-finding and Check geometry, but it stays in "
+    "The use button beside each region in the list switches it off: it is hidden "
+    "from the image and left out of gap-finding and Check geometry, and a new "
+    "drawing does not cut into it, but it stays in "
     "the file and comes back exactly as it was. You no longer need to switch "
     "off the outline (“hemi”) to hunt for gaps: the app sets it aside "
     "by itself for Fix a gap, Share borders and Check geometry.",
 
     # -- face / border toggles -----------------------------------------------------------
-    "Beside the eye, every region also has a face toggle and a border toggle. "
-    "These only change what you SEE — unlike the eye, the region still "
+    "Beside it, every region also has a face toggle and a border toggle. "
+    "These only change what you SEE — unlike use, the region still "
     "counts for gap-finding, snapping and Check geometry. Hide a face to see "
     "the imagery and the borders clean while you fill gaps; hide a border to "
-    "see a fill without its outline. The Faces off / Faces on and Borders "
-    "off / Borders on buttons above the list do every region at once, and "
+    "see a fill without its outline. The Faces and Borders buttons above the "
+    "list do every region at once (each says what a click will do), and "
     "Show all turns every face, border and switched-off region back on. Hold "
     "H to peek at the bare image with every region hidden, and press Home to "
     "fit the whole section. Type in the filter box to find a region; "
@@ -179,7 +188,10 @@ ITEMS = [
     "shared border ends, is protected and the app says why. Tick Proportional "
     "editing (at the bottom of Edit regions) and the nearby points will follow "
     "the one you are dragging, and you can scroll your mouse wheel while "
-    "dragging to change how much of the outline comes with it.",
+    "dragging to change how much of the outline comes with it. On a touchpad, "
+    "set that size before you grab a point: drag the Radius slider, press [ "
+    "and ], or hold Alt and scroll over the image — the ring shows how far "
+    "it reaches.",
 
     "While you are in Edit points, the Resample points slider changes how many "
     "points the selected region's outline has. Drag it from fine to coarse and "
@@ -212,9 +224,14 @@ ITEMS = [
     "beyond it (rebuild “hemi” afterwards if you want the outline to "
     "catch up). Other regions' territory is never taken this way.",
 
-    "Pick two or more regions and press Share borders to tidy up all the "
-    "boundaries at once: small gaps get filled, overlaps get removed, and "
-    "every pair ends up with one shared edge. The Snap reach slider sets how "
+    "Pick two or more regions and choose where the shared border goes: Middle "
+    "moves both outlines to meet halfway, and Snap to (a region) leaves that "
+    "region exactly as it is and brings the other onto its edge. Either way "
+    "all the boundaries are tidied at once: small gaps get filled, overlaps get "
+    "removed, and every pair ends up with one shared edge. Fill all pixels in "
+    "the gap (ticked to start with) fills every free pixel; untick it to leave "
+    "empty the strips beside a region standing in the gap. The Snap reach "
+    "slider sets how "
     "wide a gap Share borders will bridge — while you pick, it tells you "
     "how far it has to reach for the two regions you picked. If a gap is "
     "left, raise it and press Share again; a second press is always safe. "
@@ -252,7 +269,8 @@ ITEMS = [
     "smaller one stays visible. Fit around: the new region is trimmed to the "
     "free ground, and nothing already there changes. Cancel throws the outline "
     "away. (A choice that would erase a region, or leave nothing of your "
-    "shape, is not offered.)",
+    "shape, is not offered.) A region you have switched off is left whole: "
+    "your outline overlaps it instead of cutting into it.",
 
     # -- drawing damage ------------------------------------------------------------------
     "The damage tools (drawing damage, the damage cells and Annotation notes, "
@@ -299,8 +317,8 @@ ITEMS = [
     "Orientation is for a slide that was imaged upside down or mirrored. "
     "Rotate or flip the whole thing — image and regions move together — "
     "and work the way round that makes sense. When you export, you choose "
-    "whether the file keeps the displayed orientation or is turned back to "
-    "the as-imaged one.",
+    "whether the file keeps the displayed orientation (After rotation, offered "
+    "first) or is turned back to the as-imaged one.",
 
     # (the buttons are described, not drawn: the PDF fonts have no curved-arrow
     # glyphs and would print black squares)
