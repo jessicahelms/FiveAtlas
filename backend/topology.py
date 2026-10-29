@@ -3509,10 +3509,31 @@ def split_region(features, id_prop, name, points, new_name=None, min_piece=100.0
     # Extending by the whole diagonal cut regions nobody drew across: a 300 px
     # stroke ending 8,958 px short of dft still cut it in two, and a stroke ending
     # in one arm of dft cut the other arm as well.
-    if not LineString(coords).intersects(G):
-        raise ValueError("that cut line doesn't touch the region — draw it across the region")
     minx, miny, maxx, maxy = G.bounds
     ext = max(((maxx - minx) ** 2 + (maxy - miny) ** 2) ** 0.5, 1000.0)
+    if not LineString(coords).intersects(G):
+        # A line drawn through the GAP between a region's separate pieces -- the
+        # natural way to say "separate that bit" -- crosses none of them, so
+        # there is nothing to cut; it divides the pieces instead. A stray
+        # triangle of Caudoputamen could not be split off at all before: a line
+        # across the triangle cut the triangle, and a line beside it was refused.
+        parts = _polys(G)
+        if len(parts) > 1:
+            (x0, y0), (x1, y1) = coords[0], coords[1]
+            (xa, ya), (xb, yb) = coords[-2], coords[-1]
+
+            def _far(px, py, qx, qy):        # carry the end on well past the region
+                dx, dy = qx - px, qy - py
+                n = (dx * dx + dy * dy) ** 0.5 or 1.0
+                return (qx + dx / n * ext, qy + dy / n * ext)
+            path = [_far(x1, y1, x0, y0)] + coords + [_far(xa, ya, xb, yb)]
+            left = [p for p in parts if _side_of_path(path, p.representative_point()) >= 0]
+            right = [p for p in parts if _side_of_path(path, p.representative_point()) < 0]
+            if left and right:
+                return _split_result(features, idx, id_prop, name, new_name,
+                                     unary_union(left), unary_union(right))
+        raise ValueError("that cut line doesn't touch the region — draw it across the "
+                         "region, or between its separate pieces")
     edge = G.boundary
 
     def _ext(end, prev):
@@ -3550,6 +3571,11 @@ def split_region(features, id_prop, name, points, new_name=None, min_piece=100.0
     if small < float(min_piece):
         raise ValueError(f"that cut only shaves a {small:.0f} px² sliver off the edge — "
                          "draw it further across the region")
+    return _split_result(features, idx, id_prop, name, new_name, gA, gB)
+
+
+def _split_result(features, idx, id_prop, name, new_name, gA, gB):
+    """The feature list with region `name` replaced by gA (keeps the name) and gB."""
     # The LARGER piece keeps the name, whichever way the stroke was drawn: the
     # drawing direction decided before, and HY's main body came out as "HY 2"
     # (over 40 cuts the smaller piece kept the name half the time).
@@ -3575,6 +3601,39 @@ def split_region(features, id_prop, name, points, new_name=None, min_piece=100.0
     return {"features": out, "names": [name, nameB],
             "areas": [float(gA.area), float(gB.area)],
             "parts": [len(_polys(gA)), len(_polys(gB))]}
+
+
+def delete_part(features, id_prop, name, point, tol=20.0):
+    """Delete ONE separate piece of a region -- the piece under `point` (or the
+    nearest one within `tol` px) -- and keep the rest of the region.
+
+    For the stray island a region carries after registration (a triangle of
+    Caudoputamen off on its own): Delete removes the whole region, Split could
+    not separate a piece that was already apart, and "Clean up stray lines" only
+    takes hairline-thin pieces. The ground it covered is left empty; Dissolve
+    can hand it to the neighbours if it should be filled.
+    Returns {features, removed_area, parts_left}."""
+    idx = _index(features, id_prop)
+    name = str(name)
+    if name not in idx:
+        raise ValueError(f"region not found: {name!r}")
+    _guard_duplicate_names(features, id_prop, [name], "editing")
+    G = shape(features[idx[name]]["geometry"])
+    if not G.is_valid:
+        G = G.buffer(0)
+    parts = _polys(G)
+    if len(parts) < 2:
+        raise ValueError(f"{name} is a single piece — use Delete to remove the whole region")
+    P = Point(float(point[0]), float(point[1]))
+    dist = [p.distance(P) for p in parts]
+    k = min(range(len(parts)), key=lambda i: dist[i])
+    if dist[k] > float(tol):
+        raise ValueError(f"no piece of {name} there — right-click on the piece itself")
+    keep = [p for i, p in enumerate(parts) if i != k]
+    f = json.loads(json.dumps(features[idx[name]]))
+    f["geometry"] = mapping(unary_union(keep))
+    out = [f if i == idx[name] else json.loads(json.dumps(g)) for i, g in enumerate(features)]
+    return {"features": out, "removed_area": float(parts[k].area), "parts_left": len(keep)}
 
 
 # ---- geometry validation ------------------------------------------------------

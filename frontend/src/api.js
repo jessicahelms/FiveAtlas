@@ -121,6 +121,17 @@ export async function mergeRegions(ds, regions, fc, name, tol = 40, fillAll = fa
 }
 
 // Cut one region into two along a drawn line. Returns updated FC + the two names.
+// Delete the one separate piece of `region` under `point`, keeping the rest.
+export async function deleteRegionPart(ds, region, fc, point) {
+  const r = await fetch(`${API}/datasets/${ds}/regions/delete-part`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ region, fc, point }),
+  });
+  if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+  return r.json(); // { type, features, removedArea, partsLeft }
+}
+
 export async function splitRegion(ds, region, fc, points, name) {
   const r = await fetch(`${API}/datasets/${ds}/regions/split`, {
     method: 'POST',

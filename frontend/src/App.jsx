@@ -2005,6 +2005,26 @@ export default function App() {
     setSnapInfo((s) => ({ ...(s || {}), saved: `deleted “${nm}” — Ctrl+Z undoes it` }));
   }, [commit, idProp]);
 
+  // Delete only the separate piece that was right-clicked -- the stray island a
+  // region can carry after registration -- and keep the rest of the region.
+  const deleteRegionPart = useCallback(async (menu) => {
+    if (busyRef.current || !menu || !menu.coord) return;
+    const cur = fcRef.current;
+    const nm = menu.name;
+    setBusy(true); setError(null);
+    try {
+      const res = await api.deleteRegionPart(dsId, nm, cur, menu.coord);
+      const newFc = asFc(res, cur);
+      commit(newFc); setBaseline(newFc);
+      setMoved((prev) => { const n = new Set(prev); n.add(nm); return n; });
+      setSnapInfo((s) => ({ ...(s || {}),
+        saved: `deleted a ${Math.round(res.removedArea).toLocaleString()} px² piece of “${nm}” `
+          + '— Ctrl+Z undoes it' }));
+    } catch (e) {
+      setError(apiDetail(e));
+    } finally { setBusy(false); }
+  }, [dsId, commit]);
+
   // Draw order IS feature order, in the file itself, so this survives a save
   // and tells the next person what sits over what. Every part of a multi-part
   // region moves together -- they are one region.
@@ -3378,6 +3398,20 @@ export default function App() {
                 onClick={() => { restack(regionMenu.index, 'back'); closeRegionMenu(); }}>
                 Send to back
               </button>
+              {(() => {
+                // only for a region in several separate pieces, right-clicked on the map
+                const g = fc && fc.features && fc.features[regionMenu.index]
+                  && fc.features[regionMenu.index].geometry;
+                const pieces = g && g.type === 'MultiPolygon' ? g.coordinates.length : 1;
+                return regionMenu.coord && pieces > 1 ? (
+                  <button className="ctx-item danger"
+                    title={`remove just the piece you right-clicked; the other ${pieces - 1} `
+                      + `piece${pieces > 2 ? 's stay' : ' stays'} — Ctrl+Z undoes it`}
+                    onClick={() => { deleteRegionPart(regionMenu); closeRegionMenu(); }}>
+                    Delete this piece
+                  </button>
+                ) : null;
+              })()}
               <button className="ctx-item danger" onClick={() => setMenuView('delete')}>Delete</button>
             </>
           )}

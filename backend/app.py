@@ -2000,6 +2000,31 @@ async def regions_split(ds_id: str, request: Request):
             "areas": res.get("areas"), "parts": res.get("parts")}
 
 
+@app.post("/api/datasets/{ds_id}/regions/delete-part")
+async def regions_delete_part(ds_id: str, request: Request):
+    """Delete the one separate piece of a region under a right-click, keeping the
+    rest of the region. Body: {region, point:[x, y], fc?}."""
+    try:
+        d = ds.get_dataset(ds_id)
+    except KeyError:
+        raise HTTPException(404, "unknown dataset")
+    body = await request.json()
+    region, point = body.get("region"), body.get("point")
+    if not region or not point or len(point) < 2:
+        raise HTTPException(400, "need 'region' and 'point'")
+    fc = body.get("fc") or geo.load_regions(ds_id)[0]
+    try:
+        res = topology.delete_part(fc["features"], d["id_prop"], region, point)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"delete piece failed: {e}")
+    return {**provenance.stamped(res["features"], fc, "delete piece",
+                                 f"{region}: removed a {res['removed_area']:,.0f} px² piece",
+                                 [region]),
+            "removedArea": res["removed_area"], "partsLeft": res["parts_left"]}
+
+
 @app.post("/api/datasets/{ds_id}/regions/dissolve-gap")
 async def regions_dissolve_gap(ds_id: str, request: Request):
     """Delete the leftover void under a clicked point -- the region(s) around it

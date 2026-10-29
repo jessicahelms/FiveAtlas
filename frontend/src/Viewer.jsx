@@ -787,6 +787,9 @@ export default function Viewer({
       name: regionName(hit.object, idProp),
       x: e.clientX,
       y: e.clientY,
+      // where on the map, so the menu can offer "Delete this piece" for the
+      // separate piece of a region that was right-clicked
+      coord: hit.coordinate ? [hit.coordinate[0], hit.coordinate[1]] : null,
     });
   };
   ctxHandlerRef.current = handleContextMenu;   // always the latest closure
