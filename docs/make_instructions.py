@@ -205,7 +205,11 @@ ITEMS = [
     "you see “points on (region): before → after” as you go, then "
     "press Apply to keep them or Cancel to put the old ones back. Every "
     "neighbour's side of a shared border is re-pointed with it, so no border "
-    "opens up.",
+    "opens up. Choose Fewest points above the slider to go much lower: only "
+    "the points the shape needs are kept (corners stay, straight runs lose "
+    "theirs), none of the remaining points moves, and the slider sets how far "
+    "the outline may move at most — from exact to 150 px. The same choice is "
+    "there for a shared border's Resample points.",
 
     # -- move region -----------------------------------------------------------------------
     "Move region drags a whole region to a new place without changing its "

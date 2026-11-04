@@ -1880,13 +1880,15 @@ async def regions_resample(ds_id: str, request: Request):
     if not names:
         raise HTTPException(400, "need 'regions': one region, or two whose border to resample")
     fc = body.get("fc") or geo.load_regions(ds_id)[0]
+    # "even" spacing (the default), or "shape": the fewest points within tol px
+    method = str(body.get("method") or "even")
     try:
         if len(names) == 1:
             res = topology.resample_region(fc["features"], d["id_prop"], str(names[0]),
-                                           tol=float(body.get("tol", 20.0)))
+                                           tol=float(body.get("tol", 20.0)), method=method)
         else:
             res = topology.resample_regions(fc["features"], d["id_prop"], names,
-                                            tol=float(body.get("tol", 20.0)))
+                                            tol=float(body.get("tol", 20.0)), method=method)
     except ValueError as e:
         raise HTTPException(422, str(e))
     except Exception as e:

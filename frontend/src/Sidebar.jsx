@@ -26,6 +26,36 @@ function sliderToReach(pos) {
   return Math.min(REACH_MAX, Math.round(v / 100) * 100);
 }
 
+// The Resample points control, in Edit points and in Edit shared borders. Even
+// spacing: the slider is the gap between points. Fewest points: it is how far
+// the outline may move, and only the points the shape needs are kept -- so it
+// can go far lower than even spacing without cutting corners.
+function ResampleSlider({ method, tol, onMethod, onTol, busy }) {
+  const shape = method === 'shape';
+  return (
+    <>
+      <div className="row">
+        <button className={shape ? 'btn sm' : 'btn sm on'} disabled={busy}
+          title="points the same distance apart all the way round"
+          onClick={() => onMethod && onMethod('even')}>Even spacing</button>
+        <button className={shape ? 'btn sm on' : 'btn sm'} disabled={busy}
+          title="keep only the points the shape needs: corners stay, straight runs lose theirs"
+          onClick={() => onMethod && onMethod('shape')}>Fewest points</button>
+      </div>
+      <div className="rng">
+        <span>{shape ? 'exact' : 'fine'}</span>
+        <input type="range" min={shape ? 1 : 20} max={shape ? 150 : 600} step={shape ? 1 : 10}
+          value={tol} onChange={(e) => onTol && onTol(Number(e.target.value))} disabled={busy} />
+        <span>{shape ? 'fewest' : 'coarse'}</span>
+      </div>
+      <div className="prop-readout">
+        <span>{shape ? 'outline moves at most' : 'spacing'}</span>
+        <span className="v">{tol} px</span>
+      </div>
+    </>
+  );
+}
+
 function displayName(feature, idProp) {
   const props = (feature && feature.properties) || {};
   const value = props[idProp] ?? props.name;
@@ -43,6 +73,7 @@ function Sidebar({
   snapTol, onSnapTol, reachGap, fillAll, onFillAll,
   splitMsg, splitAsk, onSplitPick, onSplitCancel, drawMsg, drawKind, onDrawKind, designations, damageAsk, onAnswerDamage,
   resample, resampleTol, onResampleTol, onApplyResample, onCancelResample,
+  resampleMethod, onResampleMethod,
   gapFind, gapMsg, onDissolve, onFillGap, onClearGap,
   selectedName,
   moved, onSave, onReset,
@@ -450,17 +481,9 @@ function Sidebar({
         {mode === 'modify' && selectedName && (
           <div className="prop">
             <div className="pts-head">Resample points</div>
-            <div className="rng">
-              <span>fine</span>
-              <input type="range" min="20" max="600" step="10" value={resampleTol}
-                onChange={(e) => onRegionResampleTol && onRegionResampleTol(Number(e.target.value))}
-                disabled={busy} />
-              <span>coarse</span>
-            </div>
-            <div className="prop-readout">
-              <span>spacing</span>
-              <span className="v">{resampleTol} px</span>
-            </div>
+            <ResampleSlider method={resampleMethod} tol={resampleTol} busy={busy}
+              onMethod={(m) => onResampleMethod && onResampleMethod(m, 'region')}
+              onTol={onRegionResampleTol} />
             {regionResample && regionResample.handles && (
               <>
                 <div className="pts-head">
@@ -688,20 +711,9 @@ function Sidebar({
             {picks.length >= 2 && borderShared && (
               <div className="prop">
                 <div className="pts-head">Resample points</div>
-                <div className="rng">
-                  <span>fine</span>
-                  <input
-                    type="range" min="20" max="600" step="10"
-                    value={resampleTol}
-                    onChange={(e) => onResampleTol && onResampleTol(Number(e.target.value))}
-                    disabled={busy}
-                  />
-                  <span>coarse</span>
-                </div>
-                <div className="prop-readout">
-                  <span>spacing</span>
-                  <span className="v">{resampleTol} px</span>
-                </div>
+                <ResampleSlider method={resampleMethod} tol={resampleTol} busy={busy}
+                  onMethod={(m) => onResampleMethod && onResampleMethod(m, 'border')}
+                  onTol={onResampleTol} />
                 {resample && resample.counts && (
                   <>
                     {resample.handles && (

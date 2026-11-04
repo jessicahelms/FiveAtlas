@@ -95,11 +95,13 @@ export async function partitionRegions(ds, regions, fc, tol = 40, snapTo = null,
 
 // Thin the shared border between the picked regions. Returns the updated FC plus
 // before/after vertex counts, so the client can show the effect before keeping it.
-export async function resampleRegions(ds, regions, fc, tol = 150) {
+// method 'even': points `tol` px apart; 'shape': the fewest points that keep the
+// outline within `tol` px of where it was.
+export async function resampleRegions(ds, regions, fc, tol = 150, method = 'even') {
   const r = await fetch(`${API}/datasets/${ds}/regions/resample`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ regions, fc, tol }),
+    body: JSON.stringify({ regions, fc, tol, method }),
   });
   if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
   return r.json(); // { type, features, counts, tol }

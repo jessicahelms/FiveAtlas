@@ -25,6 +25,15 @@ people will care about most and keep that title short.
   keeps the name. Before, that line was refused with "the cut line doesn't
   touch the region".
 
+### Far fewer points, same shape
+
+- **Resample points** has a new **Fewest points** choice: it keeps only the
+  points the shape needs — corners stay, straight runs lose theirs — and the
+  slider sets how far the outline may move, up to 150 px. On a real section,
+  80 px takes CP from 141 points to 38 and TH from 132 to 40; even spacing's
+  coarsest setting left 50 and 123 and moved corners by about 200 px.
+  Borders with neighbours stay joined.
+
 ### Split finds the region by itself
 
 - No need to pick the region in the list before each cut: just draw the

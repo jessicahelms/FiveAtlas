@@ -611,6 +611,13 @@ export default function App() {
   const [damageAsk, setDamageAsk] = useState(null);   // {name, candidates, dominant}
   // resample: thin the shared border after Share borders
   const [resampleTol, setResampleTol] = useState(150);
+  // 'even': the slider is the spacing between points. 'shape' (Fewest points):
+  // it is how far the outline may move, and only the points the shape needs
+  // are kept -- even spacing at its coarsest still left 45-130 points a region
+  // and moved corners by ~200 px on the real files. A ref too, for the
+  // debounced previews.
+  const [resampleMethod, setResampleMethod] = useState('even');
+  const resampleMethodRef = useRef('even');
   const [snapTol, setSnapTol] = useState(40);       // px reach for Share borders / Merge gap bridging
   // On (the default): every free pixel in the gap is filled. Off: a gap pixel
   // is filled only if its line to BOTH picks is clear, so the strips beside a
@@ -1761,7 +1768,7 @@ export default function App() {
   // Preview a resample: the backend returns both the counts and the resulting FC,
   // so Apply commits what was already computed. Debounced -- the slider fires a
   // lot and each call is real geometry work.
-  const previewResample = useCallback((tolValue) => {
+  const previewResample = useCallback((tolValue, method = resampleMethodRef.current) => {
     setResampleTol(tolValue);
     // remember the handles as they are now, so Cancel can put them back
     if (!resampleUndoRef.current) {
@@ -1777,7 +1784,7 @@ export default function App() {
       const source = resample && resample.baseFc ? resample.baseFc : fcRef.current;
       setBusy(true);
       try {
-        const res = await api.resampleRegions(dsId, borderPicks, source, tolValue);
+        const res = await api.resampleRegions(dsId, borderPicks, source, tolValue, method);
         if (seq !== resampleSeq.current) return;   // cancelled or superseded
         // Draw the previewed handles straight away -- the whole point is to see
         // the density change while dragging the slider, not after Apply.
@@ -2548,7 +2555,7 @@ export default function App() {
   const cancelRegionResample = useCallback(() => { dropRegionPreview(true); },
     [dropRegionPreview]);
 
-  const previewRegionResample = useCallback((tolValue) => {
+  const previewRegionResample = useCallback((tolValue, method = resampleMethodRef.current) => {
     setResampleTol(tolValue);
     if (regionResampleTimer.current) clearTimeout(regionResampleTimer.current);
     const name = selectedName;
@@ -2561,7 +2568,7 @@ export default function App() {
       const source = prev && prev.name === name && prev.dsId === dsId ? prev.baseFc : fcRef.current;
       setBusy(true);
       try {
-        const res = await api.resampleRegions(dsId, [name], source, tolValue);
+        const res = await api.resampleRegions(dsId, [name], source, tolValue, method);
         if (seq !== regionResampleSeq.current) return;   // cancelled or superseded
         const previewFc = asFc(res, source);
         const state = { name, dsId, tol: res.tol, counts: res.counts, handles: res.handles,
@@ -2574,6 +2581,18 @@ export default function App() {
       } finally { setBusy(false); }
     }, 300);
   }, [dsId, selectedName]);
+
+  // Even spacing <-> Fewest points: the slider means something else in each, so
+  // it starts again at that method's default and the preview is redrawn at once.
+  const RESAMPLE_START = { even: 150, shape: 20 };
+  const chooseResampleMethod = useCallback((method, which) => {
+    resampleMethodRef.current = method;
+    setResampleMethod(method);
+    const t = RESAMPLE_START[method] || 150;
+    if (which === 'region') previewRegionResample(t, method);
+    else previewResample(t, method);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [previewRegionResample, previewResample]);
 
   const applyRegionResample = useCallback(() => {
     const rr = regionResampleRef.current;
@@ -3284,6 +3303,7 @@ export default function App() {
                 snapTol={snapTol} onSnapTol={setSnapTol} reachGap={gapInfo}
                 fillAll={fillAll} onFillAll={setFillAll}
                 resample={resample} resampleTol={resampleTol}
+                resampleMethod={resampleMethod} onResampleMethod={chooseResampleMethod}
                 onResampleTol={previewResample} onApplyResample={applyResample}
                 onCancelResample={cancelResample}
                 gapFind={gapFind} gapMsg={gapMsg} drawMsg={drawMsg}

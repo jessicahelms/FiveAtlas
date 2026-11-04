@@ -4649,6 +4649,32 @@ def _even_points(arc, spacing):
     return out
 
 
+def _shape_points(arc, dev):
+    """`arc` with only the points its shape needs: Douglas-Peucker, so no stretch
+    moves more than `dev` px from where it was, and the points that remain are
+    the arc's OWN points -- none is moved. Both ends kept exactly.
+
+    For "Fewest points". Even spacing spends as many points on a straight run as
+    on a corner, and at its coarsest (600 px) still left 45-130 points per
+    region on the real files while cutting their corners; this puts the points
+    where the outline bends and drops the rest."""
+    if len(arc) <= 2:
+        return [tuple(p) for p in arc]
+    out = [tuple(p) for p in LineString(arc).simplify(float(dev), preserve_topology=False).coords]
+    out[0] = tuple(arc[0])
+    out[-1] = tuple(arc[-1])
+    return out
+
+
+RESAMPLE_METHODS = ("even", "shape")
+
+
+def _point_arc(arc, tol, method):
+    """Re-point a stretch for Resample points: even spacing `tol` ("even"), or the
+    fewest points within `tol` px of it ("shape")."""
+    return _shape_points(arc, tol) if method == "shape" else _even_points(arc, tol)
+
+
 def _swap_ring_span(ring, arc_line, new_pts, eps):
     """Replace the stretch of `ring` that runs along `arc_line` with `new_pts`.
 
@@ -4867,7 +4893,7 @@ def _part_polygon(rings):
     return q if q.is_valid and not q.is_empty else None
 
 
-def _resample_pair(out, idx, id_prop, a, b, tol):
+def _resample_pair(out, idx, id_prop, a, b, tol, method="even"):
     """Re-point every stretch of border a and b share, in `out` (edited in
     place). Returns (done, kept): [[old points, new points], ...] per stretch
     changed, and a sentence per stretch left as it was."""
@@ -4909,7 +4935,7 @@ def _resample_pair(out, idx, id_prop, a, b, tol):
                     old = [pts_a[v] for v in run]
                     old_line = LineString(old)
                     res = _resample_stretch(out, idx, a, b, ka, a_parts, pi, ri,
-                                            run, closed, old, old_line, tol)
+                                            run, closed, old, old_line, tol, method)
                     if res is None:
                         kept.append(f"{a} | {b}: a {old_line.length:,.0f} px stretch "
                                     "was left as it was -- re-pointing it would have "
@@ -4920,7 +4946,8 @@ def _resample_pair(out, idx, id_prop, a, b, tol):
     return done, kept
 
 
-def _resample_stretch(out, idx, a, b, ka, a_parts, pi, ri, run, closed, old, old_line, tol):
+def _resample_stretch(out, idx, a, b, ka, a_parts, pi, ri, run, closed, old, old_line, tol,
+                      method="even"):
     """One stretch: try `tol`, then finer, keeping the first spacing whose result
     passes every check; write both regions into `out`. None if none passed."""
     from shapely.geometry import MultiPolygon, box
@@ -4951,7 +4978,7 @@ def _resample_stretch(out, idx, a, b, ka, a_parts, pi, ri, run, closed, old, old
     flaws_b = _ring_flaws(list(pts_b) + [pts_b[0]])
     spacing = float(tol)
     for _ in range(_RS_TRIES):
-        new = _even_points(old, spacing)
+        new = _point_arc(old, spacing, method)
         if len(new) == len(old) and all(
                 abs(p[0] - q[0]) < 1e-9 and abs(p[1] - q[1]) < 1e-9 for p, q in zip(new, old)):
             return {"noop": True}
@@ -4996,14 +5023,15 @@ def _resample_stretch(out, idx, a, b, ka, a_parts, pi, ri, run, closed, old, old
     return None
 
 
-def resample_regions(features, id_prop, names, tol=20.0, precision=1.0):
+def resample_regions(features, id_prop, names, tol=20.0, precision=1.0, method="even"):
     """Even out the points along the SHARED BORDER between two regions.
 
     Both regions' rings are edited directly with the same point list, so the
     border stays exactly coincident and nothing else about either outline moves:
     the pair's combined outline is checked unchanged, so no neighbour gains or
     loses ground, and points where a third region touches the border stay put.
-    `tol` is the spacing you want between points.
+    `tol` is the spacing you want between points -- or, with method="shape",
+    how far the border may move for the fewest points (_shape_points).
     Returns {features, counts, arcs, tol, arcPoints, handles, kept}.
     """
     idx = _index_all(features, id_prop)
@@ -5013,6 +5041,8 @@ def resample_regions(features, id_prop, names, tol=20.0, precision=1.0):
     tol = float(tol)
     if tol <= 0:
         raise ValueError("resample spacing must be greater than zero")
+    if method not in RESAMPLE_METHODS:
+        raise ValueError(f"unknown resample method {method!r}")
 
     out = json.loads(json.dumps(features))
     before = {n: _body(features, idx[n]) for n in sel}
@@ -5046,7 +5076,7 @@ def resample_regions(features, id_prop, names, tol=20.0, precision=1.0):
             a, b = order[i], order[j]
             if a in containers or b in containers:
                 continue                 # hemi's outline is not a border to space out
-            done, skipped = _resample_pair(out, idx, id_prop, a, b, tol)
+            done, skipped = _resample_pair(out, idx, id_prop, a, b, tol, method)
             arcs_done.extend(done)
             kept.extend(skipped)
 
@@ -5165,7 +5195,8 @@ def _even_count(pts, count):
     return _even_points(pts, line.length / (count - 1))
 
 
-def resample_region(features, id_prop, name, tol=20.0, eps=0.5, max_drift=0.05):
+def resample_region(features, id_prop, name, tol=20.0, eps=0.5, max_drift=0.05,
+                    method="even"):
     """Even out the points around ONE region's whole outline without breaking
     any of its borders -- Resample points in Edit points.
 
@@ -5196,6 +5227,9 @@ def resample_region(features, id_prop, name, tol=20.0, eps=0.5, max_drift=0.05):
     valid polygon, is left exactly as it was (and reported in `kept`) -- and its
     neighbours are not touched either. Holes are not resampled.
 
+    method="shape" keeps the fewest points within `tol` px instead of spacing
+    them evenly (_shape_points); every check above applies the same.
+
     Returns {features, counts, tol, handles, kept}: the same shape as
     resample_regions, with `handles` counting this region's own points and
     `counts` listing every region that changed.
@@ -5209,6 +5243,8 @@ def resample_region(features, id_prop, name, tol=20.0, eps=0.5, max_drift=0.05):
     tol = float(tol)
     if tol <= 0:
         raise ValueError("resample spacing must be greater than zero")
+    if method not in RESAMPLE_METHODS:
+        raise ValueError(f"unknown resample method {method!r}")
     swap_eps = eps * 1.5
 
     out = json.loads(json.dumps(features))
@@ -5254,7 +5290,7 @@ def resample_region(features, id_prop, name, tol=20.0, eps=0.5, max_drift=0.05):
         partner = pieces[i]["with"]
         spacing = tol
         for _ in range(_RS_TRIES):
-            new = _even_points(orig, spacing)
+            new = _point_arc(orig, spacing, method)
             pieces[i]["new"] = new
             cand = _single_polygon(ring_of(i), holes)
             # too coarse to make a polygon at all is the caller's to judge (it is
@@ -5331,12 +5367,13 @@ def resample_region(features, id_prop, name, tol=20.0, eps=0.5, max_drift=0.05):
                 nxt = groups[(gi + 1) % m]
                 if not g["label"]:
                     seg = [groups[gi - 1]["pts"][-1]] + g["pts"] + [nxt["pts"][0]]
-                    pieces.append({"orig": seg, "new": _even_points(seg, tol), "with": None})
+                    pieces.append({"orig": seg, "new": _point_arc(seg, tol, method),
+                                   "with": None})
                     continue
                 seg = g["pts"]
                 shared = g["label"][0] if len(g["label"]) == 1 and len(seg) >= 3 else None
                 pieces.append({"orig": seg,
-                               "new": _even_points(seg, tol) if shared else seg,
+                               "new": _point_arc(seg, tol, method) if shared else seg,
                                "with": shared})
                 if nxt["label"]:
                     link = [seg[-1], nxt["pts"][0]]
