@@ -29,14 +29,22 @@ people will care about most and keep that title short.
 
 - Open **Edit points** on a region and its points are **tidied
   automatically**: fewer points, none bunched together, the outline barely
-  moves, borders with neighbours stay joined and no gap opens. The box says
-  what changed — "Tidied TH: 127 → 51 points" — with an **Undo** button
-  (Ctrl+Z works too). On a real section TH went from 132 points (40 of them
-  bunched) to 53 (2), CP from 141 to 59. The same happens to a border right
-  after **Share borders**.
+  moves, borders with neighbours stay joined and no gap opens. Points still
+  sitting right next to another are then deleted just as right-click
+  **Delete point** would — from both regions on a shared border — except
+  where regions meet. A note over the map says what changed ("Tidied: TH
+  127 → 51 points") with **Undo** (Ctrl+Z works too).
+- It also happens by itself right after **Share borders**, **Merge**, **Fix a
+  gap**, **Clean up stray lines**, **Build the outline** and drawing a new
+  region — the steps that used to leave dense points behind — as its own
+  Undo step. Never in the middle of a drag.
+- On a real section TH went from 132 points (40 of them bunched) to 53 (2),
+  CP from 141 to 60 (none), and after Share borders dft from 305 to 91.
+  Regions drawn inside another (Caudoputamen_672 inside CP) work too, and
+  tidying never pushes a region out of the one it sits in.
 - Points that still sit right next to another are shown **orange**. **Tidy**
-  runs it again by hand; untick **Tidy automatically** under **Adjust…** if
-  you'd rather press it yourself.
+  in the box runs it by hand; untick **Tidy automatically** under
+  **Adjust…** if you'd rather press it yourself.
 - It works on regions drawn inside another one too (Caudoputamen_672 inside
   CP, a field inside HPF) — before, those were left exactly as dense as
   they were.

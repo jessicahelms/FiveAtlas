@@ -2013,6 +2013,62 @@ async def regions_split(ds_id: str, request: Request):
             "areas": res.get("areas"), "parts": res.get("parts")}
 
 
+@app.post("/api/datasets/{ds_id}/regions/tidy")
+async def regions_tidy(ds_id: str, request: Request):
+    """Tidy points on one or more regions -- what happens by itself when Edit
+    points opens and after Share borders, Merge, Fix a gap, Clean up, Build the
+    outline and drawing a region: the gentlest Fewest points setting (outline
+    moves <= TIDY_MOVE), then every point still bunched up is deleted the way
+    right-click Delete point does, each kept only if no gap, overlap or drift
+    rule breaks. Body: {regions, fc?} -> the FC plus a summary per region:
+    {region, changed, before, after, bunchedBefore, bunchedAfter, stuck}."""
+    try:
+        d = ds.get_dataset(ds_id)
+    except KeyError:
+        raise HTTPException(404, "unknown dataset")
+    body = await request.json()
+    names = [str(n) for n in (body.get("regions") or [])]
+    if not names:
+        raise HTTPException(400, "need 'regions'")
+    fc = body.get("fc") or geo.load_regions(ds_id)[0]
+    idp = d["id_prop"]
+    feats = fc["features"]
+    present = {str((f.get("properties") or {}).get(idp)) for f in feats}
+    summary = []
+    try:
+        for nm in names:
+            if nm not in present:
+                continue
+            before = topology.point_count(feats, idp, nm)
+            b0 = topology.bunched_count(feats, idp, nm)
+            if b0 == 0 and not body.get("always"):
+                summary.append({"region": nm, "changed": False, "before": before,
+                                "after": before, "bunchedBefore": 0, "bunchedAfter": 0,
+                                "stuck": 0})
+                continue
+            f1, pick = topology.tidy_region(feats, idp, nm)
+            fin = topology.tidy_finish(f1, idp, nm, respace=False, original=feats,
+                                       merge_fixed=True)
+            after = topology.point_count(fin["features"], idp, nm)
+            changed = pick is not None or fin["deleted"] or fin["merged"]
+            if changed:
+                feats = fin["features"]
+            summary.append({"region": nm, "changed": bool(changed), "before": before,
+                            "after": after if changed else before, "bunchedBefore": b0,
+                            "bunchedAfter": topology.bunched_count(feats, idp, nm),
+                            "stuck": len(fin["stuck"])})
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"tidy failed: {e}")
+    done = [s["region"] for s in summary if s["changed"]]
+    return {**provenance.stamped(feats, fc, "tidy",
+                                 ", ".join(f"{s['region']} {s['before']} -> {s['after']}"
+                                           for s in summary if s["changed"]) or "nothing to tidy",
+                                 done),
+            "summary": summary}
+
+
 @app.post("/api/datasets/{ds_id}/regions/resample-options")
 async def regions_resample_options(ds_id: str, request: Request):
     """Every number of points Resample points can give -- one region's outline,

@@ -200,6 +200,22 @@ function featureName(feature, idProp = 'name') {
   return value == null ? '' : String(value);
 }
 
+// Names of the regions whose outline differs between two FCs (new ones too).
+function changedRegionNames(a, b, idProp) {
+  const geo = (fc) => {
+    const m = new Map();
+    for (const f of (fc && fc.features) || []) {
+      const n = featureName(f, idProp);
+      m.set(n, (m.get(n) || '') + JSON.stringify(f.geometry));
+    }
+    return m;
+  };
+  const A = geo(a);
+  const out = [];
+  for (const [n, g] of geo(b)) if (n && A.get(n) !== g) out.push(n);
+  return out;
+}
+
 function featureByName(fc, name, idProp = 'name') {
   return fc && fc.features && fc.features.find((f) => featureName(f, idProp) === String(name));
 }
@@ -629,6 +645,8 @@ export default function App() {
   // scopes ("region:HPF", "border:A|B") already tidied automatically this session
   // -- once each, so an Undo is not undone again a moment later
   const autoTidied = useRef(new Set());
+  // set once autoTidyAfter exists (below): the operations above it call it through this
+  const autoTidyAfterRef = useRef(() => {});
   const [snapTol, setSnapTol] = useState(40);       // px reach for Share borders / Merge gap bridging
   // On (the default): every free pixel in the gap is filled. Off: a gap pixel
   // is filled only if its line to BOTH picks is clear, so the strips beside a
@@ -1717,7 +1735,9 @@ export default function App() {
       // border out by hand.
       const repointed = null;
 
+      const prevForTidy = fcRef.current;
       commit(newFc); setBaseline(newFc);
+      autoTidyAfterRef.current(prevForTidy, newFc, 'Share borders');   // tidy what it changed
       setMoved((prev) => { const n = new Set(prev); borderPicks.forEach((x) => n.add(x)); return n; });
       setBorderShared(true);          // done sharing -> hide Share/Merge (fine-tune phase)
       if (borderPicks.length === 2) {
@@ -1893,7 +1913,9 @@ export default function App() {
       }
       setMergeAsk(null);
       const newFc = asFc(res, fc);
+      const prevForTidy = fcRef.current;
       commit(newFc); setBaseline(newFc);
+      autoTidyAfterRef.current(prevForTidy, newFc, 'Merge');   // tidy what it changed
       // merged features are dropped, which shifts every index after them -- an
       // old selection could then point at a different region (and "Delete
       // selected" would delete it)
@@ -2237,7 +2259,9 @@ export default function App() {
     try {
       const res = await api.fillGap(dsId, fc, gapFind.point, { exclude: offList() });
       const newFc = asFc(res, fc);
+      const prevForTidy = fcRef.current;
       commit(newFc); setBaseline(newFc);
+      autoTidyAfterRef.current(prevForTidy, newFc, 'Fill the gap');   // tidy what it changed
       setMoved((prev) => { const n = new Set(prev); n.add(res.name); return n; });
       setGapFind(null);
       setGapMsg(`Gap became “${res.name}” ✓ — right-click it to rename.`);
@@ -2248,7 +2272,9 @@ export default function App() {
 
   const applyDissolve = useCallback(() => {
     if (!gapFind || !gapFind.fc) return;
+    const prevForTidy = fcRef.current;
     commit(gapFind.fc); setBaseline(gapFind.fc);
+    autoTidyAfterRef.current(prevForTidy, gapFind.fc, 'Fix a gap');   // tidy what it changed
     setMoved((prev) => {
       const n = new Set(prev);
       (gapFind.regions || []).forEach((x) => n.add(x));
@@ -2279,7 +2305,9 @@ export default function App() {
       }
       setOverlapAsk(null);
       const newFc = asFc(res, fc);
+      const prevForTidy = fcRef.current;
       commit(newFc); setBaseline(newFc);
+      autoTidyAfterRef.current(prevForTidy, newFc, 'drawing');   // tidy what it changed
       setMoved((prev) => {
         const n = new Set(prev);
         n.add(res.name);
@@ -2395,7 +2423,9 @@ export default function App() {
   const applyClean = useCallback(() => {
     if (!cleanFound) return;
     const { res, next } = cleanFound;
+    const prevForTidy = fcRef.current;
     commit(next); setBaseline(next);
+    autoTidyAfterRef.current(prevForTidy, next, 'Clean up');   // tidy what it changed
     setMoved((prev) => {
       const n = new Set(prev);
       res.removed.forEach((r) => n.add(r.region));
@@ -2694,28 +2724,61 @@ export default function App() {
     loadResampleOptions(which, method, true);
   }, [loadResampleOptions]);
 
-  // Tidy points: one click to the fewest points that move the outline no more
-  // than api.TIDY_MOVE (and never deform it). The counts are usually worked out
-  // already, in the background, so the preview shows at once.
-  const tidyResample = useCallback((which) => {
-    resampleMethodRef.current = 'shape';
-    setResampleMethod('shape');
-    const scope = which === 'region' ? regionScope : borderScope;
-    const o = resampleOpts;
-    if (o && !o.loading && o.scope === scope && o.dsId === dsId && o.method === 'shape') {
-      const safe = (o.options || []).filter((x) => !x.deform);
-      if (!safe.length) {
-        const msg = 'Already tidy: no point can go without breaking a border or opening a gap.';
-        if (which === 'region') setPointMsg(msg); else setBorderMsg(msg);
-        return;
+  // Tidy points, one click or by itself: the server tidies the regions (the
+  // gentlest Fewest points setting, outline moves <= 40 px) and then deletes
+  // every point still bunched up the way right-click Delete point does -- from
+  // both regions on a shared border, never a junction or the end of a shared
+  // border, each kept only if no gap, overlap or drift rule breaks. The result
+  // is kept as ONE undo step and the notice says what changed, with Undo.
+  // Never applied to an outline edited while it was on its way.
+  const [tidyNotice, setTidyNotice] = useState(null);   // {text, working?}
+  const tidySeq = useRef(0);
+  const runTidy = useCallback(async (names, baseFc, label, always = false) => {
+    const list = [...new Set((names || []).filter(Boolean))];
+    if (!list.length || !dsId || !baseFc) return null;
+    const seq = ++tidySeq.current;
+    setTidyNotice({ working: true, text: `Tidying ${list.length === 1 ? list[0] : `${list.length} regions`}…` });
+    try {
+      const res = await api.tidyRegions(dsId, list, baseFc, always);
+      if (seq !== tidySeq.current) return null;
+      if (fcRef.current !== baseFc) { setTidyNotice(null); return null; }   // edited since
+      const done = (res.summary || []).filter((x) => x.changed);
+      if (!done.length) {
+        setTidyNotice(always ? { text: 'Already tidy — no point can go without breaking a border or opening a gap.' } : null);
+        return res;
       }
-      const t = api.tidyPick(o.options).tol;
-      if (which === 'region') previewRegionResample(t, 'shape'); else previewResample(t, 'shape');
-      return;
+      const tFc = asFc(res, baseFc);
+      const touched = changedRegionNames(baseFc, tFc, idProp);
+      commit(tFc); setBaseline(tFc);
+      setMoved((prev) => { const n = new Set(prev); touched.forEach((x) => n.add(x)); return n; });
+      setResampleOpts(null);
+      const left = done.reduce((t, x) => t + (x.bunchedAfter || 0), 0);
+      const parts = done.map((x) => `${x.region} ${x.before} → ${x.after}`);
+      setTidyNotice({ text: `Tidied${label ? ` after ${label}` : ''}: ${parts.join(', ')} points`
+        + (left ? `. ${left} still sit close together, where borders meet — they can't go without shifting a neighbour.`
+          : ', none bunched together.') });
+      return res;
+    } catch (e) {
+      if (seq === tidySeq.current) setTidyNotice(null);
+      return null;
     }
-    loadResampleOptions(which, 'shape', 'tidy');
-  }, [regionScope, borderScope, resampleOpts, dsId, previewRegionResample, previewResample,
-    loadResampleOptions]);
+  }, [dsId, idProp, commit]);
+  // After an operation that leaves new outline (Share borders, Merge, Fix a gap,
+  // Clean up, Build the outline, a drawn region): tidy what it changed. Not after
+  // a drag -- the person is mid-edit -- nor Delete point or Split.
+  const autoTidyAfter = useCallback((prevFc, newFc, label) => {
+    if (uiSettings.autoTidy === false || !prevFc || !newFc) return;
+    const names = changedRegionNames(prevFc, newFc, idProp);
+    if (!names.length || names.length > 8) return;     // a big rebuild: leave it to the button
+    runTidy(names, newFc, label);
+  }, [uiSettings.autoTidy, idProp, runTidy]);
+
+  autoTidyAfterRef.current = autoTidyAfter;
+
+  const tidyResample = useCallback((which) => {
+    const names = which === 'region' ? (selectedName ? [selectedName] : []) : borderPicks;
+    runTidy(names, fcRef.current, null, true);
+  }, [selectedName, borderPicks, runTidy]);
 
   // how many of the selected region's points sit right next to another (Edit
   // points shows them orange; the Tidy points box says how many)
@@ -2741,28 +2804,18 @@ export default function App() {
   const shownResampleOpts = resampleOpts && resampleOpts.scope === resampleScope
     && resampleOpts.dsId === dsId && resampleOpts.method === resampleMethod ? resampleOpts : null;
 
-  // Tidy automatically: as soon as a region's counts are ready in Edit points
-  // (and it has points bunched together), or a border's after Share borders,
-  // Tidy runs and is kept -- the box says what changed, with Undo. Once per
-  // region or border; never on an outline edited while the counts were being
-  // worked out; never while a preview is up.
+  // Tidy automatically when Edit points opens on a region with points bunched
+  // together -- once per region per session, so an Undo stays undone; never
+  // while a preview is up or something else is landing.
   useEffect(() => {
-    if (uiSettings.autoTidy === false || !resampleWhich) return;
-    const o = shownResampleOpts;
-    if (!o || o.loading || o.method !== 'shape') return;
-    const key = `${dsId}|${o.scope}`;
+    if (uiSettings.autoTidy === false || mode !== 'modify' || !selectedName) return;
+    const key = `${dsId}|region:${selectedName}`;
     if (autoTidied.current.has(key)) return;
-    if (busyRef.current || o.source !== fcRef.current) return;
-    if (resampleWhich === 'region' && regionResampleRef.current) return;
-    if (resampleWhich === 'border' && resample) return;
+    if (busyRef.current || regionResampleRef.current) return;
     autoTidied.current.add(key);
-    if (resampleWhich === 'region' && bunchedCount === 0) return;   // nothing to tidy
-    const pick = api.tidyPick(o.options);
-    if (!pick) return;
-    if (resampleWhich === 'region') previewRegionResample(pick.tol, 'shape', true);
-    else previewResample(pick.tol, 'shape', true);
-  }, [uiSettings.autoTidy, resampleWhich, shownResampleOpts, dsId, bunchedCount, resample,
-    previewRegionResample, previewResample]);
+    if (bunchedCount === 0) return;                                  // nothing to tidy
+    runTidy([selectedName], fcRef.current, null);
+  }, [uiSettings.autoTidy, mode, selectedName, dsId, bunchedCount, runTidy]);
   const toggleAutoTidy = useCallback((on) => {
     applyUiSettings({ ...uiSettings, autoTidy: !!on });
   }, [uiSettings, applyUiSettings]);
@@ -3085,7 +3138,9 @@ export default function App() {
         return;
       }
       const newFc = asFc(res, fc);
+      const prevForTidy = fcRef.current;
       commit(newFc); setBaseline(newFc);
+      autoTidyAfterRef.current(prevForTidy, newFc, 'Build the outline');   // tidy what it changed
       setMoved((prev) => new Set(prev).add(res.name));
       setOutlinePreview(null);
       setSnapInfo((s) => ({
@@ -3453,8 +3508,8 @@ export default function App() {
                 regionResample={regionResample} onRegionResampleTol={previewRegionResample}
                 resampleOpts={shownResampleOpts} onTidy={tidyResample} bunchedCount={bunchedCount}
                 autoTidy={uiSettings.autoTidy !== false} onAutoTidy={toggleAutoTidy}
-                onUndoAutoTidy={() => { undo(); setAutoTidyNote(null); }}
-                autoTidyNote={autoTidyNote && autoTidyNote.scope === resampleScope ? autoTidyNote.text : null}
+                onUndoAutoTidy={() => { undo(); setTidyNotice(null); }}
+                autoTidyNote={null}
                 onApplyRegionResample={applyRegionResample}
                 onCancelRegionResample={cancelRegionResample}
                 loadAsk={loadAsk} onAnswerLoad={answerLoad} onLoadDamage={answerLoadDamage}
@@ -3635,6 +3690,19 @@ export default function App() {
           </div>
         );
       })()}
+
+      {tidyNotice && (
+        <div className="tidy-notice">
+          <span>{tidyNotice.text}</span>
+          {!tidyNotice.working && (
+            <>
+              <button className="btn sm" onClick={() => { undo(); setTidyNotice(null); }}
+                title="put the points back as they were (Ctrl+Z does the same)">Undo</button>
+              <button className="btn sm" onClick={() => setTidyNotice(null)} title="close">✕</button>
+            </>
+          )}
+        </div>
+      )}
 
       {regionMenu && (
         <div className="ctxmenu" ref={regionMenuRef}

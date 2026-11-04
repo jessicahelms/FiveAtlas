@@ -5438,12 +5438,82 @@ def resample_region(features, id_prop, name, tol=20.0, eps=0.5, max_drift=0.05,
                 parents.add(o)
             elif shared_area >= _RS_NEST * g.area:
                 children.add(o)
+    parent_bodies = {o: near_bodies[o] for o in parents}
     for o in parents:
         near_bodies.pop(o, None)
     parent_body = unary_union([_body(features, idx[o]) for o in parents] or [Polygon()])
-    outside_parent = (_box(*body_before.bounds).buffer(tol + 50.0).difference(parent_body)
+    # Leaving ANY parent is taking ground: atlases nest more than one deep
+    # (XETG's Dentate gyrus NUC lies in Dentate gyrus_726.001, which lies in
+    # HPF), and outside the UNION of parents meant outside HPF only -- Tidy
+    # pushed 6,562 px2 of Dentate gyrus NUC out of Dentate gyrus_726.001.
+    parent_core = None
+    for o in parents:
+        parent_core = parent_bodies[o] if parent_core is None else \
+            _safe_intersection(parent_core, parent_bodies[o])
+    outside_parent = (_box(*body_before.bounds).buffer(tol + 50.0).difference(parent_core)
                       if parents else Polygon())
     _others_cache = {}
+
+    # Ground this region GIVES UP along a stretch goes somewhere. On a shared
+    # stretch the partner takes it (the partner gets the same points) -- and
+    # nothing checked what the partner took: re-pointing TH's border with HY
+    # handed HY 18,645 px2 of Nucleus of reuniens (a thalamic nucleus that
+    # straddles that border), and ISO's coast with hemi and border with dft
+    # pushed 72,292 px2 of RSP (a child of ISO) out of ISO, 23,256 px2 of it
+    # into dft. On any stretch, ground given up where one of this region's
+    # CHILDREN lies pushes that child out of it. Watched per partner:
+    #   * this region's children (bar the partner itself);
+    #   * a partner on the OTHER side (not nested with this region): every
+    #     nearby region it does not nest with -- its overlap with them grows --
+    #     and whatever lies outside the partner's own parents;
+    #   * a partner on the SAME side (a parent or child of this region, whose
+    #     edge this stretch is): it gives up the same ground, so its children.
+    rel_bodies = {o: g for o, g in list(near_bodies.items()) + list(parent_bodies.items())
+                  if o not in containers}
+    child_bodies = {o: g for o, g in near_bodies.items() if o in children}
+    _given_cache = {}
+
+    def _given_zone(partner):
+        if partner in _given_cache:
+            return _given_cache[partner]
+        parts = [g for o, g in child_bodies.items() if o != partner]
+        if partner is not None and partner not in containers and partner in idx:
+            pb = rel_bodies.get(partner) or _body(features, idx[partner])
+            p_par, p_chi = set(), set()
+            for o, g in list(rel_bodies.items()) + [(name, body_before)]:
+                if o == partner or g.is_empty or not g.intersects(pb):
+                    continue
+                inter = _safe_intersection(g, pb).area
+                if inter >= _RS_NEST * pb.area:
+                    p_par.add(o)
+                elif inter >= _RS_NEST * g.area:
+                    p_chi.add(o)
+            if partner in parents or partner in children:
+                parts += [rel_bodies[o] for o in p_chi if o != name and o in rel_bodies]
+            else:
+                parts += [g for o, g in rel_bodies.items()
+                          if o != partner and o not in p_par and o not in p_chi]
+                core = None
+                for o in p_par:
+                    g = body_before if o == name else rel_bodies[o]
+                    core = g if core is None else _safe_intersection(core, g)
+                if core is not None:
+                    parts.append(_box(*body_before.bounds).buffer(tol + 50.0).difference(core))
+        z = unary_union(parts) if parts else Polygon()
+        _given_cache[partner] = z
+        return z
+
+    def _gives_ground(cand, poly, seg_a, seg_b, partner):
+        """px2 of ground `poly` had and `cand` gives up, near the stretch that
+        changed, that a partner may not take or a child may not lose."""
+        z = _given_zone(partner)
+        if z.is_empty:
+            return 0.0
+        local = _box(*LineString(list(seg_a) + list(seg_b)).bounds).buffer(2.0)
+        if not local.intersects(z):
+            return 0.0
+        freed = poly.intersection(local).difference(cand)
+        return freed.intersection(z).area if not freed.is_empty else 0.0
 
     def _others(partner):
         """Every nearby region's ground except `partner`'s -- the one a shared
@@ -5517,7 +5587,8 @@ def resample_region(features, id_prop, name, tol=20.0, eps=0.5, max_drift=0.05,
             if method == "shape" and not _area_drift_ok(cand, poly, max_drift):
                 return False
             return (_takes_ground(cand, poly, orig, new, partner) <= 0.5
-                    and (partner is not None or _opens_gap(cand, poly, orig, new) <= gap_ok))
+                    and (partner is not None or _opens_gap(cand, poly, orig, new) <= gap_ok)
+                    and _gives_ground(cand, poly, orig, new, partner) <= 0.5)
 
         spacing = tol
         guard = None
@@ -5570,6 +5641,8 @@ def resample_region(features, id_prop, name, tol=20.0, eps=0.5, max_drift=0.05,
         given_zone = Polygon()
         if partner is None and not gap_zone.is_empty and gap_zone.intersects(zone):
             given_zone = polyl.intersection(gap_zone).difference(cover_not_gap)
+        gz = _given_zone(partner)
+        kept_zone = polyl.intersection(gz) if not gz.is_empty and gz.intersects(zone) else Polygon()
 
         def ok(i, j):
             if j - i <= 1:
@@ -5581,6 +5654,9 @@ def resample_region(features, id_prop, name, tol=20.0, eps=0.5, max_drift=0.05,
             if not taken_zone.is_empty and sweep.intersection(taken_zone).area > 0.5 * share:
                 return False
             if not given_zone.is_empty and sweep.intersection(given_zone).area > gap_all * share:
+                return False
+            # ground a partner may not take, or a child may not lose
+            if not kept_zone.is_empty and sweep.intersection(kept_zone).area > 0.5 * share:
                 return False
             return True
         return ok
@@ -5751,6 +5827,17 @@ def resample_region(features, id_prop, name, tol=20.0, eps=0.5, max_drift=0.05,
                     finer = _point_arc(pc["orig"], t, method, guard_pc)
                     if len(finer) >= len(pc["orig"]):
                         break
+                    # the chord guard splits chords by their share; the
+                    # stretch as a whole is held to the same ground checks
+                    kept_new = pc["new"]
+                    pc["new"] = finer
+                    alone = _single_polygon(
+                        ring_from([j == pi for j in range(len(pieces))]), holes)
+                    pc["new"] = kept_new
+                    if alone is None or (
+                            _takes_ground(alone, poly, pc["orig"], finer, pc["with"]) > 0.5
+                            or _gives_ground(alone, poly, pc["orig"], finer, pc["with"]) > 0.5):
+                        continue
                     rec = _swap_stretch_all(out, idx, pc["with"], pc["orig"], finer,
                                             swap_eps, max_drift)
                     if rec is not None:
@@ -5828,6 +5915,8 @@ def _merge_close_points(out, idx, name, nb_names, containers, gap_zone, limit, e
     import shapely as _sh
     near = sorted({n for n in list(nb_names) + list(parents) if n in idx and n != name}) + [name]
     merged = 0
+    nest0 = {o: _body(original, idx[o]) for o in near}   # who lies inside whom, as it was
+    nest_inter = {}
 
     def snap_ring(cs, src, dst):
         """ring `cs` (closed coords) with every point within eps of src moved to
@@ -5898,12 +5987,41 @@ def _merge_close_points(out, idx, name, nb_names, containers, gap_zone, limit, e
                 return None
         pars = [p for p in parents if p in trial]
         if pars and name in names_changed:
-            # moving within its parent takes nothing -- leaving it does
-            p0 = unary_union([before[p] for p in pars]).intersection(zone)
-            p1 = unary_union([trial[p] for p in pars]).intersection(zone)
+            # moving within its parent takes nothing -- leaving it does; leaving
+            # ANY of them (they nest: Dentate gyrus NUC in Dentate gyrus_726.001
+            # in HPF -- outside the union meant outside HPF only)
+            p0 = p1 = None
+            for p in pars:
+                p0 = before[p] if p0 is None else _safe_intersection(p0, before[p])
+                p1 = trial[p] if p1 is None else _safe_intersection(p1, trial[p])
+            p0, p1 = p0.intersection(zone), p1.intersection(zone)
             if (trial[name].intersection(zone).difference(p1).area
                     - before[name].intersection(zone).difference(p0).area) > 0.5:
                 return None
+        # a region that lies inside another (>= _RS_NEST of it) is never pushed
+        # further out of it -- by either of them moving
+        for o in names_changed:
+            if o in containers:
+                continue
+            for p in near:
+                if p == o or p in containers:
+                    continue
+                ob, pb = nest0.get(o), nest0.get(p)
+                if ob is None or pb is None or ob.is_empty or pb.is_empty:
+                    continue
+                inter = nest_inter.get((o, p))
+                if inter is None:
+                    inter = _safe_intersection(ob, pb).area if ob.intersects(pb) else 0.0
+                    nest_inter[(o, p)] = nest_inter[(p, o)] = inter
+                if inter >= _RS_NEST * pb.area:
+                    child, parent = p, o
+                elif inter >= _RS_NEST * ob.area:
+                    child, parent = o, p
+                else:
+                    continue
+                if (trial[child].intersection(zone).difference(trial[parent]).area
+                        - before[child].intersection(zone).difference(before[parent]).area) > 0.5:
+                    return None
         for o in names_changed:
             if o in containers:
                 continue
@@ -6328,6 +6446,410 @@ def delete_point(features, id_prop, name, point, respace=True, eps=0.5,
     out[k]["geometry"] = mapping(ng)
     return {"features": out, "removedFrom": removed_from, "respaced": respaced,
             "stretch": stretch}
+
+
+# ---- Tidy points, finish: delete what is still bunched -------------------------
+# Tidy (the gentlest Fewest points setting that moves the outline <= TIDY_MOVE)
+# leaves some points closer than _RS_MIN_GAP to the next -- the orange ones. The
+# finish step deletes them one at a time exactly as right-click "Delete point"
+# does (delete_point), closest pair first, and keeps a deletion only if the
+# whole file still passes the guards below, measured against the file as it was
+# BEFORE Tidy (so Tidy + finish together stay within them).
+TIDY_FINISH_DRIFT = 0.05      # area per region vs before Tidy
+TIDY_FINISH_MOVED = 60.0      # px, outline Hausdorff vs before Tidy
+TIDY_FINISH_GAP = 250.0       # px2, new unowned ground (inside hemi) vs before Tidy
+TIDY_FINISH_OVERLAP = 0.5     # px2, new overlap per pair of regions vs before Tidy
+
+
+def tidy_pick(options):
+    """The option Tidy points picks (frontend api.tidyPick): the last safe one
+    that moves the outline no more than TIDY_MOVE, else the first safe one."""
+    safe = [o for o in (options or []) if not o.get("deform")]
+    gentle = [o for o in safe if o.get("moved") is None or o["moved"] <= TIDY_MOVE]
+    if gentle:
+        return gentle[-1]
+    return safe[0] if safe else None
+
+
+def tidy_region(features, id_prop, name):
+    """Tidy points on ONE region, as the page's one click (and the automatic
+    tidy) does: the fewest points at a Fewest points setting that moves the
+    outline no more than TIDY_MOVE and drifts no region's area past 5% -- the
+    same pick as tidy_pick(resample_options(...)), but walking the settings
+    from gentle up and stopping at the first that moves the outline too far,
+    rather than working out all 28 (1.7 s a region on average, up to 6 s).
+    Returns (features, pick) -- pick None (and the features unchanged) when no
+    setting is safe."""
+    name = str(name)
+    idx = _index_all(features, id_prop)
+    if name not in idx:
+        return json.loads(json.dumps(features)), None
+    old = {name: _body(features, idx[name])}
+    digest = _features_digest(features)
+    best = None
+    for t in _FEWEST_GRID:
+        r = resample_at(features, id_prop, [name], t, "shape", digest)
+        h = r.get("handles") or {}
+        if "after" not in h:
+            continue
+        moved = _outline_moved(old, r["features"], id_prop)
+        drift = max((abs(c.get("areaDrift", 0.0)) for c in r.get("counts") or []), default=0.0)
+        if moved > TIDY_MOVE or drift > 5.0:
+            break                       # every coarser setting moves it further
+        if h["after"] < h["before"] and (best is None or h["after"] < best[1]["handles"]["after"]):
+            best = (float(t), r, moved)
+    if best is None:
+        return json.loads(json.dumps(features)), None
+    t, r, moved = best
+    return r["features"], {"points": r["handles"]["after"], "tol": t, "deform": False,
+                           "moved": round(moved, 1)}
+
+
+def _outline_pairs(features, idx, name):
+    """(distance, p, q) for every pair of consecutive points on every ring of
+    `name` (outline and holes)."""
+    out = []
+    for k in idx.get(name, []):
+        for poly in _polys(_geom_at(features, k)):
+            for ring in [poly.exterior] + list(poly.interiors):
+                cs = [tuple(c) for c in ring.coords[:-1]]
+                n = len(cs)
+                for i in range(n):
+                    p, q = cs[i], cs[(i + 1) % n]
+                    out.append((math.hypot(q[0] - p[0], q[1] - p[1]), p, q))
+    return out
+
+
+def bunched_count(features, id_prop, name, px=_RS_MIN_GAP):
+    """How many of `name`'s points sit within `px` of the point before or after
+    them on their ring -- frontend bunchedPoints(), counted."""
+    total = 0
+    for f in features:
+        if str((f.get("properties") or {}).get(id_prop)) != str(name):
+            continue
+        g = f.get("geometry") or {}
+        polys = ([g.get("coordinates")] if g.get("type") == "Polygon"
+                 else (g.get("coordinates") or []) if g.get("type") == "MultiPolygon" else [])
+        for poly in polys:
+            for ring in poly:
+                n = len(ring) - 1
+                if n < 3:
+                    continue
+                near = [False] * n
+                for i in range(n):
+                    a, b = ring[i], ring[(i + 1) % n]
+                    if math.hypot(b[0] - a[0], b[1] - a[1]) < px:
+                        near[i] = near[(i + 1) % n] = True
+                total += sum(near)
+    return total
+
+
+def point_count(features, id_prop, name):
+    """`name`'s points, every ring, every feature (closing repeats not counted)
+    -- the handles a person sees. (_vertex_count counts each ring's closing
+    point too: dft on 29110 read 264 for 241 handles.)"""
+    return sum(len(r.coords) - 1
+               for k in _index_all(features, id_prop).get(str(name), [])
+               for p in _polys(_geom_at(features, k))
+               for r in [p.exterior] + list(p.interiors))
+
+
+class _FinishGuard:
+    """The finish step's rules, measured against `original` (before Tidy) in a
+    window round `name` -- nothing outside it can change, because every edit
+    moves the outline <= TIDY_FINISH_MOVED. Values kept for the current state;
+    trial() checks one edit by recomputing only what it touched."""
+
+    def __init__(self, original, current, id_prop, name, containers, pad=200.0,
+                 close_r=10.0, max_drift=TIDY_FINISH_DRIFT, max_moved=TIDY_FINISH_MOVED,
+                 gap_budget=TIDY_FINISH_GAP, overlap_budget=TIDY_FINISH_OVERLAP):
+        from shapely.geometry import box as _box
+        self.id_prop, self.name = id_prop, name
+        self.max_drift, self.max_moved = max_drift, max_moved
+        self.gap_budget, self.overlap_budget = gap_budget, overlap_budget
+        self.close_r = close_r
+        idx0 = _index_all(original, id_prop)
+        b = _body(original, idx0[name])
+        x0, y0, x1, y1 = b.bounds
+        self.W = _box(x0 - pad, y0 - pad, x1 + pad, y1 + pad)
+        self.local = [n for n in idx0
+                      if not _body(original, idx0[n]).is_empty
+                      and _body(original, idx0[n]).intersects(self.W)]
+        self.cont = [n for n in self.local if n in containers]
+        self.peers = [n for n in self.local if n not in containers]
+        # parts per feature of each name, in file order (keyed by NAME: the
+        # finish step works on a subset of the file, whose indices differ)
+        self.parts0 = {n: [len(_polys(_geom_at(original, k))) for k in idx0[n]]
+                       for n in self.local}
+        self.b0 = {n: _body(original, idx0[n]) for n in self.local}
+        # Layered atlases: a pair where one holds _RS_NEST of the other is a
+        # child inside its parent (Dentate gyrus in HPF), not an overlap --
+        # moving within the parent takes nothing. For those pairs the value
+        # watched is the child's ground OUTSIDE its parent instead.
+        self.nest = {}
+        raw = self._overlaps(self.b0, self.peers)
+        for (a, b), v in raw.items():
+            small, big = (a, b) if self.b0[a].area <= self.b0[b].area else (b, a)
+            if v >= _RS_NEST * self.b0[small].area > 0:
+                self.nest[(a, b)] = (small, big)
+        self.ov0 = self._overlaps(self.b0, self.peers)
+        self.gap0 = self._gap(self.b0)
+        # the current state (Tidy's result)
+        idx = _index_all(current, id_prop)
+        self.cur = {n: _body(current, idx[n]) for n in self.local}
+        self.drift = {n: self._drift(n, self.cur[n]) for n in self.local}
+        self.moved = {n: self._moved(n, self.cur[n]) for n in self.local}
+        self.ov = self._overlaps(self.cur, self.peers)
+        self.gap = self._gap(self.cur)
+        self.valid = self._valid(current, idx, self.local)
+
+    def _drift(self, n, g):
+        a0 = self.b0[n].area
+        return abs(g.area - a0) / max(a0, 1e-9)
+
+    def _moved(self, n, g):
+        g0 = self.b0[n]
+        if g0.is_empty or g.is_empty:
+            return 0.0 if g0.is_empty and g.is_empty else float("inf")
+        return g0.boundary.hausdorff_distance(g.boundary)
+
+    def _overlaps(self, bodies, names):
+        """{(a, b): px2} for every pair of peers with a in `names`."""
+        out = {}
+        for a in names:
+            ga = bodies[a]
+            for b in self.peers:
+                if b == a:
+                    continue
+                key = (a, b) if a < b else (b, a)
+                if key in out:
+                    continue
+                gb = bodies[b]
+                if key in self.nest:
+                    child, parent = self.nest[key]
+                    out[key] = _safe_difference(bodies[child], bodies[parent]).area
+                    continue
+                if ga.is_empty or gb.is_empty or not ga.intersects(gb):
+                    out[key] = 0.0
+                    continue
+                out[key] = _safe_intersection(ga, gb).area
+        return out
+
+    def _gap(self, bodies):
+        """Unowned ground in the window: inside hemi where there is one, else
+        what a closing of the peers' union fills (pockets and slivers between
+        regions narrower than 2 * close_r)."""
+        U = unary_union([bodies[n].intersection(self.W) for n in self.peers] or [Polygon()])
+        if self.cont:
+            H = unary_union([bodies[c] for c in self.cont]).intersection(self.W)
+            return _safe_difference(H, U).area
+        closed = U.buffer(self.close_r).buffer(-self.close_r)
+        return _safe_difference(closed.intersection(self.W), U).area
+
+    def _valid(self, features, idx, names):
+        bad = []
+        for n in names:
+            counts = []
+            for k in idx.get(n, []):
+                try:
+                    g = shape(features[k]["geometry"])
+                except Exception:
+                    bad.append(n)
+                    continue
+                if g.is_empty or not g.is_valid or g.geom_type not in ("Polygon", "MultiPolygon"):
+                    bad.append(n)
+                counts.append(len(_polys(g)))
+            if n in self.parts0 and counts != self.parts0[n]:
+                bad.append(n)
+        return sorted(set(bad))
+
+    def worst(self):
+        """The current state's guard values."""
+        news = [v - self.ov0.get(k, 0.0) for k, v in self.ov.items()]
+        return {"drift": max(self.drift.values(), default=0.0),
+                "moved": max(self.moved.values(), default=0.0),
+                "newGap": self.gap - self.gap0,
+                "newOverlap": max(news, default=0.0),
+                "invalid": list(self.valid)}
+
+    def trial(self, features, idx, changed):
+        """Check the state `features` where only `changed` names differ from the
+        current one. Returns (ok, failed rules, record for accept, step moved)."""
+        changed = [n for n in changed if n in self.cur]
+        bodies = dict(self.cur)
+        for n in changed:
+            bodies[n] = _body(features, idx[n])
+        failed = []
+        drift = {n: self._drift(n, bodies[n]) for n in changed}
+        moved = {n: self._moved(n, bodies[n]) for n in changed}
+        step = max((self.cur[n].boundary.hausdorff_distance(bodies[n].boundary)
+                    for n in changed if not bodies[n].is_empty and not self.cur[n].is_empty),
+                   default=0.0)
+        for n in changed:
+            if drift[n] > self.max_drift and drift[n] > self.drift[n] + 1e-9:
+                failed.append(f"area drift {n} {drift[n] * 100:.2f}%")
+            if moved[n] > self.max_moved and moved[n] > self.moved[n] + 1e-6:
+                failed.append(f"moved {n} {moved[n]:.1f}px")
+        ov = self._overlaps(bodies, [n for n in changed if n in self.peers])
+        for key, v in ov.items():
+            new = v - self.ov0.get(key, 0.0)
+            if new > self.overlap_budget and v > self.ov.get(key, 0.0) + 1e-6:
+                if key in self.nest:
+                    failed.append(f"leaves-parent {self.nest[key][0]} outside "
+                                  f"{self.nest[key][1]} +{new:.2f}px2")
+                else:
+                    failed.append(f"overlap {key[0]}/{key[1]} +{new:.2f}px2")
+        gap = self._gap(bodies)
+        if gap - self.gap0 > self.gap_budget and gap > self.gap + 1e-6:
+            failed.append(f"gap +{gap - self.gap0:.1f}px2")
+        bad = self._valid(features, idx, changed)
+        if bad:
+            failed.append("invalid " + ",".join(bad))
+        rec = {"bodies": {n: bodies[n] for n in changed}, "drift": drift, "moved": moved,
+               "ov": ov, "gap": gap, "changed": changed}
+        return (not failed), failed, rec, step
+
+    def accept(self, rec):
+        for n in rec["changed"]:
+            self.cur[n] = rec["bodies"][n]
+            self.drift[n] = rec["drift"][n]
+            self.moved[n] = rec["moved"][n]
+        self.ov.update(rec["ov"])
+        self.gap = rec["gap"]
+
+
+def _snap_point(features, idx, names, src, dst, eps=0.5):
+    """Move point `src` onto `dst` in EVERY region of `names` that has it (repeats
+    dropped) -- two fixed points a few px apart become one, and borders that met
+    there still meet. None if a region's edge passes `src` without a point there
+    (it would be left behind), a ring would drop below a triangle or gain a spike,
+    or nothing has the point. Returns (features copy, changed names)."""
+    from shapely.geometry import MultiPolygon
+    sp = Point(src)
+    out = json.loads(json.dumps(features))
+    changed = []
+    for n in names:
+        for k in idx[n]:
+            g = _geom_at(features, k)
+            if g.is_empty or g.distance(sp) > eps * 2:
+                continue
+            parts, hit = [], False
+            for poly in _polys(g):
+                rings = [list(poly.exterior.coords)] + [list(r.coords) for r in poly.interiors]
+                new_rings = []
+                for cs in rings:
+                    pts = [tuple(c) for c in cs[:-1]]
+                    near = [math.hypot(p[0] - src[0], p[1] - src[1]) <= eps for p in pts]
+                    if not any(near):
+                        new_rings.append(cs)
+                        continue
+                    new = []
+                    for p, h in zip(pts, near):
+                        q = tuple(dst) if h else p
+                        if not new or math.hypot(q[0] - new[-1][0], q[1] - new[-1][1]) > 1e-9:
+                            new.append(q)
+                    while len(new) > 1 and math.hypot(new[0][0] - new[-1][0],
+                                                      new[0][1] - new[-1][1]) <= 1e-9:
+                        new.pop()
+                    if len(new) < 3:
+                        return None
+                    nr = new + [new[0]]
+                    if _ring_flaws(nr) > _ring_flaws(cs):
+                        return None
+                    hit = True
+                    new_rings.append(nr)
+                q = _single_polygon(new_rings[0], new_rings[1:])
+                if q is None:
+                    return None
+                parts.append(q)
+            if not hit:
+                if g.boundary.distance(sp) <= eps:
+                    return None                  # on its edge, not a point of it
+                continue
+            out[k]["geometry"] = mapping(parts[0] if len(parts) == 1 else MultiPolygon(parts))
+            changed.append(n)
+    return (out, sorted(set(changed))) if changed else None
+
+
+def tidy_finish(features, id_prop, name, min_gap=_RS_MIN_GAP, respace=True, original=None,
+                merge_fixed=False, max_drift=TIDY_FINISH_DRIFT, max_moved=TIDY_FINISH_MOVED,
+                gap_budget=TIDY_FINISH_GAP, overlap_budget=TIDY_FINISH_OVERLAP):
+    """Tidy points, last step: starting from Tidy's result (`features`), delete
+    every point of `name`'s outline still within `min_gap` of the next one, one
+    at a time, closest pair first, the way right-click Delete point does.
+
+    For each pair both points are tried with delete_point and the one whose
+    removal moves the outline least is kept; if delete_point refuses one, the
+    other is tried; if both are refused (or break a rule) and `merge_fixed`,
+    one point is snapped onto the other in every region that has it (the
+    junction case: two fixed points a few px apart where 3 regions meet);
+    otherwise the pair is stuck. Every kept edit must leave, vs `original`
+    (the file before Tidy): every region's area within `max_drift`, its
+    outline within `max_moved` px, no new overlap > `overlap_budget` px2 per
+    pair, no new gap > `gap_budget` px2, every part one valid polygon.
+
+    Returns {features, deleted, merged, stuck: [{dist, p, q, why}], steps,
+    guards}."""
+    name = str(name)
+    original = features if original is None else original
+    containers = section_containers(original, id_prop)
+    guard = _FinishGuard(original, features, id_prop, name, containers, max_drift=max_drift,
+                         max_moved=max_moved, gap_budget=gap_budget,
+                         overlap_budget=overlap_budget)
+    out = json.loads(json.dumps(features))
+    idx_full = _index_all(out, id_prop)
+    loc = sorted(k for n in guard.local for k in idx_full.get(n, []))
+    sub = [out[k] for k in loc]                  # delete_point only looks this far
+    idx = _index_all(sub, id_prop)
+    stuck, steps = {}, []
+    deleted = merged = 0
+    key = lambda p, q: tuple(sorted([(round(p[0], 3), round(p[1], 3)),
+                                     (round(q[0], 3), round(q[1], 3))]))
+    for _ in range(point_count(sub, id_prop, name) + 1):
+        pairs = sorted((d, p, q) for d, p, q in _outline_pairs(sub, idx, name)
+                       if d < min_gap and key(p, q) not in stuck)
+        if not pairs:
+            break
+        d, p, q = pairs[0]
+        why, oks = [], []
+        for pt in (p, q):
+            try:
+                r = delete_point(sub, id_prop, name, pt, respace=respace)
+            except ValueError as e:
+                why.append(f"refused: {e}")
+                continue
+            ok, failed, rec, step = guard.trial(r["features"], idx, r["removedFrom"])
+            if ok:
+                oks.append((step, "delete", r["features"], rec, r))
+            else:
+                why.append("rule: " + "; ".join(failed))
+        if not oks and merge_fixed:
+            for src, dst in ((p, q), (q, p)):
+                sn = _snap_point(sub, idx, guard.local, src, dst)
+                if sn is None:
+                    why.append("merge refused")
+                    continue
+                ok, failed, rec, step = guard.trial(sn[0], idx, sn[1])
+                if ok:
+                    oks.append((step, "merge", sn[0], rec, {"removedFrom": sn[1]}))
+                    break
+                why.append("merge rule: " + "; ".join(failed))
+        if not oks:
+            stuck[key(p, q)] = {"dist": round(d, 2), "p": p, "q": q, "why": why}
+            continue
+        step, kind, feats, rec, r = min(oks, key=lambda t: t[0])
+        sub = feats
+        guard.accept(rec)
+        if kind == "delete":
+            deleted += 1
+        else:
+            merged += 1
+        steps.append({"kind": kind, "dist": round(d, 2), "stepMoved": round(step, 2),
+                      "regions": list(r["removedFrom"])})
+    for i, k in enumerate(loc):
+        out[k] = sub[i]
+    return {"features": out, "deleted": deleted, "merged": merged,
+            "stuck": list(stuck.values()), "steps": steps, "guards": guard.worst()}
 
 
 # ---- creating regions ---------------------------------------------------------

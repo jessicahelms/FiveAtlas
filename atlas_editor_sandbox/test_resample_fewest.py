@@ -248,6 +248,36 @@ if real.exists():
         void = c0.difference(cover(r["features"])).intersection(geom(r["features"], "hemi"))
         check(f"{nm}: Tidy opens no gap inside the section", void.area <= 250.0, f"{void.area:.0f} px2")
 
+if real.exists():
+    print("\nthe whole tidy (tidy_region + the delete-style finish), as the page runs it")
+
+    def overlaps(fs, nm):
+        g = geom(fs, nm)
+        return {f["properties"]["name"]: g.intersection(shape(f["geometry"])).area
+                for f in fs if f["properties"]["name"] not in (nm, "hemi")}
+
+    for nm, most_left in (("HPF", 0), ("CP", 0), ("TH", 2), ("dft", 2), ("ISO", 0)):
+        f1, pick = T.tidy_region(feats, "name", nm)
+        fin = T.tidy_finish(f1, "name", nm, respace=False, original=feats, merge_fixed=True)
+        fs = fin["features"]
+        b1 = T.bunched_count(fs, "name", nm)
+        check(f"{nm}: at most {most_left} points left bunched", b1 <= most_left,
+              f"{T.bunched_count(feats, 'name', nm)} -> {b1}, "
+              f"{T.point_count(feats, 'name', nm)} -> {T.point_count(fs, 'name', nm)} points")
+        void = c0.difference(cover(fs)).intersection(geom(fs, "hemi"))
+        check(f"{nm}: no new gap inside the section", void.area <= 250.0, f"{void.area:.0f} px2")
+        o0, o1 = overlaps(feats, nm), overlaps(fs, nm)
+        grew = {k: round(o1[k] - o0.get(k, 0.0), 1) for k in o1 if o1[k] - o0.get(k, 0.0) > 0.5}
+        check(f"{nm}: no overlap with any region grows", not grew, grew)
+        check(f"{nm}: the outline moves no more than 60 px",
+              others0[nm].boundary.hausdorff_distance(geom(fs, nm).boundary) <= 60.0)
+    # RSP lies inside ISO: tidying ISO must not push it out (it pushed 72,292 px2 out)
+    f1, _ = T.tidy_region(feats, "name", "ISO")
+    out0 = others0["RSP"].difference(others0["ISO"]).area
+    out1 = geom(f1, "RSP").difference(geom(f1, "ISO")).area
+    check("tidying ISO doesn't push RSP (which lies inside it) out", out1 - out0 <= 0.5,
+          f"{out1 - out0:+.0f} px2")
+
 print("\n_ring_flaws (plain arithmetic) agrees with the shapely version")
 from shapely.geometry import LineString as _LS   # noqa: E402
 

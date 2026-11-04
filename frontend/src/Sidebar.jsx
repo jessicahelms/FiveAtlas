@@ -869,10 +869,8 @@ function Sidebar({
                   </>
                 )}
                 <div className="hint dim">
-                  The handles on the border update as you drag the slider — Apply
-                  keeps them, Cancel puts the old ones back. Only the shared border
-                  moves, and points where another region touches it stay put, so
-                  nothing opens up against — or pushes into — regions you didn't pick.
+                  Only the shared border changes; points where another region touches
+                  it stay put.
                 </div>
               </div>
             )}

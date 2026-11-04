@@ -367,3 +367,14 @@ input[type=range] { accent-color: #2b6d95; width: 100%; }
 .ch-actions { display: flex; align-items: center; gap: 4px; }
 .rm { background: none; border: none; color: #8b95a4; font-size: 16px; line-height: 1; cursor: pointer; padding: 0 4px; }
 .rm:hover { color: #ff8080; }
+
+/* Tidy points: what an automatic (or one-click) tidy just did, with Undo --
+   over the map, wherever the person is working */
+.tidy-notice {
+  position: fixed; z-index: 45; left: 50%; bottom: 18px; transform: translateX(-50%);
+  max-width: min(720px, calc(100vw - 32px)); display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px; font-size: 13px; color: #dfe5ee;
+  background: #161c26; border: 1px solid #2f3a4c; border-radius: 6px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, .45);
+}
+.tidy-notice span { flex: 1; line-height: 1.35; }
