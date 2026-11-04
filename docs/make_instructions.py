@@ -200,12 +200,15 @@ ITEMS = [
     "and ], or hold Alt and scroll over the image — the ring shows how far "
     "it reaches.",
 
-    "While you are in Edit points, points of the selected region that sit right "
-    "next to another are drawn orange, and the Tidy points box says how many. "
-    "Press Tidy: you get fewer points with none bunched together, the outline "
-    "barely moves, and every neighbour's side of a shared border is re-pointed "
-    "with it, so no border opens up and no gap appears. Press Keep to keep it "
-    "or Cancel to put the old points back (Ctrl+Z undoes it after Keep). "
+    "When you open Edit points on a region, its points are tidied "
+    "automatically: you get fewer points with none bunched together, the "
+    "outline barely moves, and every neighbour's side of a shared border is "
+    "re-pointed with it, so no border opens up and no gap appears. The Tidy "
+    "points box says what changed (“Tidied TH: 127 → 51 points”); press Undo "
+    "(or Ctrl+Z) to put the old points back. Points that still sit right next "
+    "to another are drawn orange. Tidy runs it by hand and shows the result "
+    "first — press Keep to keep it or Cancel to put the old points back. "
+    "Untick Tidy automatically (under Adjust…) to only ever tidy by hand. "
     "Adjust… lets you choose the number yourself: drag the slider from more to "
     "fewer or type a number and press Enter (a number it can't reach goes to "
     "the closest one), and tick Space points evenly for evenly spaced points. "
@@ -260,10 +263,10 @@ ITEMS = [
     "genuinely do not touch stay as separate parts of the one region; the app "
     "never invents tissue between them.",
 
-    "Once you have shared borders, Tidy points appears there too and works the "
-    "same way for the points on the border: press Tidy, or Adjust… to choose "
-    "the number, then Keep or Cancel. This is useful when a border has far more "
-    "points on it than you can work with.",
+    "Once you have shared borders, the border's points are tidied automatically "
+    "the same way (with Undo), and Tidy points appears there too: press Tidy, "
+    "or Adjust… to choose the number, then Keep or Cancel. This is useful when "
+    "a border has far more points on it than you can work with.",
 
     "Split a region cuts one region into two. Press Split a region, then draw "
     "a line all the way across the region on the image, clicking for each "

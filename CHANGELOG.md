@@ -25,13 +25,18 @@ people will care about most and keep that title short.
   keeps the name. Before, that line was refused with "the cut line doesn't
   touch the region".
 
-### Tidy points: one click, no more points bunched together
+### Points tidy themselves: no more points bunched together
 
-- In **Edit points**, points that sit right next to another are shown
-  **orange**, and the box says how many. Press **Tidy** and they're gone:
-  fewer points, the outline barely moves, borders with neighbours stay
-  joined and no gap opens. Then **Keep** or **Cancel**. On a real section TH
-  went from 132 points (40 of them bunched) to 53 (2), CP from 141 to 59.
+- Open **Edit points** on a region and its points are **tidied
+  automatically**: fewer points, none bunched together, the outline barely
+  moves, borders with neighbours stay joined and no gap opens. The box says
+  what changed — "Tidied TH: 127 → 51 points" — with an **Undo** button
+  (Ctrl+Z works too). On a real section TH went from 132 points (40 of them
+  bunched) to 53 (2), CP from 141 to 59. The same happens to a border right
+  after **Share borders**.
+- Points that still sit right next to another are shown **orange**. **Tidy**
+  runs it again by hand; untick **Tidy automatically** under **Adjust…** if
+  you'd rather press it yourself.
 - It works on regions drawn inside another one too (Caudoputamen_672 inside
   CP, a field inside HPF) — before, those were left exactly as dense as
   they were.
