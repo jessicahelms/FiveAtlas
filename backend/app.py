@@ -1882,8 +1882,15 @@ async def regions_resample(ds_id: str, request: Request):
     fc = body.get("fc") or geo.load_regions(ds_id)[0]
     # "even" spacing (the default), or "shape": the fewest points within tol px
     method = str(body.get("method") or "even")
+    # deform: the person said yes to "the shape will deform" -- a region's area
+    # may then change by up to 25% instead of 5%
+    drift = topology.FEWEST_DEFORM_DRIFT if body.get("deform") else 0.05
     try:
-        if len(names) == 1:
+        if len(names) == 1 and method == "shape":
+            res = topology.resample_region_fewest(fc["features"], d["id_prop"], str(names[0]),
+                                                  tol=float(body.get("tol", 20.0)),
+                                                  max_drift=drift)
+        elif len(names) == 1:
             res = topology.resample_region(fc["features"], d["id_prop"], str(names[0]),
                                            tol=float(body.get("tol", 20.0)), method=method)
         else:
@@ -1898,7 +1905,7 @@ async def regions_resample(ds_id: str, request: Request):
                                  names),
             "counts": res["counts"], "tol": res["tol"],
             "handles": res.get("handles"), "arcPoints": res.get("arcPoints"),
-            "kept": res.get("kept", [])}
+            "kept": res.get("kept", []), "used": res.get("used")}
 
 
 @app.post("/api/datasets/{ds_id}/regions/delete-point")

@@ -29,10 +29,13 @@ people will care about most and keep that title short.
 
 - **Resample points** has a new **Fewest points** choice: it keeps only the
   points the shape needs — corners stay, straight runs lose theirs — and the
-  slider sets how far the outline may move, up to 150 px. On a real section,
-  80 px takes CP from 141 points to 38 and TH from 132 to 40; even spacing's
-  coarsest setting left 50 and 123 and moved corners by about 200 px.
-  Borders with neighbours stay joined.
+  slider sets how far the outline may move. On a real section, 80 px takes
+  CP from 141 points to 38 and TH from 132 to 40; even spacing's coarsest
+  setting left 50 and 123 and moved corners by about 200 px. Borders with
+  neighbours stay joined.
+- Want even fewer? Past 150 px the slider asks **"The shape will deform. Do
+  you want fewer vertices?"** — say yes and it goes down to 1000 px (CP: 17
+  points). Moving the slider towards "fewest" never adds points back.
 
 ### Split finds the region by itself
 

@@ -96,12 +96,17 @@ export async function partitionRegions(ds, regions, fc, tol = 40, snapTo = null,
 // Thin the shared border between the picked regions. Returns the updated FC plus
 // before/after vertex counts, so the client can show the effect before keeping it.
 // method 'even': points `tol` px apart; 'shape': the fewest points that keep the
-// outline within `tol` px of where it was.
-export async function resampleRegions(ds, regions, fc, tol = 150, method = 'even') {
+// Fewest points past this many px asks first: the shape will deform
+// (topology.FEWEST_SAFE). The slider and the previews both use it.
+export const FEWEST_SAFE = 150;
+
+// outline within `tol` px of where it was. deform: the person agreed the shape
+// may deform (a region's area may then change by up to 25%, not 5%).
+export async function resampleRegions(ds, regions, fc, tol = 150, method = 'even', deform = false) {
   const r = await fetch(`${API}/datasets/${ds}/regions/resample`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ regions, fc, tol, method }),
+    body: JSON.stringify({ regions, fc, tol, method, deform }),
   });
   if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
   return r.json(); // { type, features, counts, tol }

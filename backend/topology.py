@@ -5457,6 +5457,44 @@ def resample_region(features, id_prop, name, tol=20.0, eps=0.5, max_drift=0.05,
             "kept": sorted(set(kept))}
 
 
+# Past "exact", the settings Fewest points falls back through.
+_FEWEST_LADDER = (1000, 750, 600, 450, 300, 225, 150, 110, 80, 60, 40, 30, 20, 15, 10,
+                  7, 5, 3, 2, 1)
+FEWEST_SAFE = 150.0       # beyond this the page warns that the shape will deform
+FEWEST_DEFORM_DRIFT = 0.25
+
+
+def resample_region_fewest(features, id_prop, name, tol, max_drift=0.05, reach=5.0):
+    """Fewest points for ONE region at no more than `tol` px: resample_region
+    (method="shape") at `tol` and every ladder setting down to tol/`reach`,
+    keeping the result with the fewest points. Adds "used": the setting that
+    gave it. (The next 3 settings were not enough: at 1000 px TH's best was at
+    225 and it came back with 75 points instead of 28.)
+
+    One setting alone is not monotone: a coarser one can fail a guard (a
+    stretch that would take a third region's ground is retried finer; a part
+    whose area drifts too far is left whole), and on the real file CP came
+    back with 28 points at 150 px but 74 at 300 and all 141 at 600. Dragging
+    the slider towards "fewest" must never ADD points. Each try is ~0.1 s."""
+    tol = float(tol)
+    steps = [tol] + [float(v) for v in _FEWEST_LADDER if tol / float(reach) <= v < tol]
+    best = last = None
+    for t in steps:
+        r = resample_region(features, id_prop, name, tol=t, max_drift=max_drift, method="shape")
+        last = r
+        h = r["handles"]
+        if h["after"] >= h["before"]:
+            continue                          # changed nothing at this setting
+        if best is None or h["after"] < best["handles"]["after"]:
+            best, best_t = r, t
+    if best is None:
+        last["used"] = None
+        return last
+    best["used"] = best_t
+    best["tol"] = float(tol)
+    return best
+
+
 def delete_point(features, id_prop, name, point, respace=True, eps=0.5,
                  max_drift=0.05, grab=2.0):
     """Delete one point from a region's outline without opening any border, and

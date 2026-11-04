@@ -130,6 +130,30 @@ if real.exists():
               > others0[o].intersection(g0).area + 1.0]
         check(f"{nm}: no new overlap with any neighbour", not ov, ov)
 
+    print("\nthe slider never adds points back (resample_region_fewest)")
+    for nm in ("CP", "TH", "dft", "VL.1"):
+        if nm not in others0:
+            continue
+        counts, prev = [], None
+        for t, deform in ((20, False), (80, False), (150, False), (300, True),
+                          (600, True), (1000, True)):
+            r = T.resample_region_fewest(feats, "name", nm, tol=t,
+                                         max_drift=T.FEWEST_DEFORM_DRIFT if deform else 0.05)
+            counts.append(r["handles"]["after"])
+            if not deform:
+                g1 = geom(r["features"], nm)
+                check(f"{nm} at {t} px: moves at most {t} px",
+                      others0[nm].boundary.hausdorff_distance(g1.boundary) <= t + 1.0)
+        check(f"{nm}: points only go down as the slider goes up", counts == sorted(counts, reverse=True),
+              counts)
+        r = T.resample_region_fewest(feats, "name", nm, tol=1000, max_drift=T.FEWEST_DEFORM_DRIFT)
+        g1 = geom(r["features"], nm)
+        check(f"{nm} at 1000 px (deform allowed): area within 25%",
+              abs(g1.area - others0[nm].area) / others0[nm].area <= 0.25 + 1e-9,
+              f"{100 * (g1.area - others0[nm].area) / others0[nm].area:+.1f}%")
+        check(f"{nm}: 'used' never exceeds the setting asked for",
+              r["used"] is None or r["used"] <= 1000)
+
 print()
 if fails:
     print(f"{len(fails)} FAILED")

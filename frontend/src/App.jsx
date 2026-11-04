@@ -193,6 +193,8 @@ function closestArcToPointIndex(arcs, pt) {
   return best;
 }
 
+const { FEWEST_SAFE } = api;
+
 function featureName(feature, idProp = 'name') {
   const props = (feature && feature.properties) || {};
   const value = props[idProp] ?? props.name;
@@ -1784,7 +1786,8 @@ export default function App() {
       const source = resample && resample.baseFc ? resample.baseFc : fcRef.current;
       setBusy(true);
       try {
-        const res = await api.resampleRegions(dsId, borderPicks, source, tolValue, method);
+        const res = await api.resampleRegions(dsId, borderPicks, source, tolValue, method,
+          method === 'shape' && tolValue > FEWEST_SAFE);
         if (seq !== resampleSeq.current) return;   // cancelled or superseded
         // Draw the previewed handles straight away -- the whole point is to see
         // the density change while dragging the slider, not after Apply.
@@ -2568,11 +2571,12 @@ export default function App() {
       const source = prev && prev.name === name && prev.dsId === dsId ? prev.baseFc : fcRef.current;
       setBusy(true);
       try {
-        const res = await api.resampleRegions(dsId, [name], source, tolValue, method);
+        const res = await api.resampleRegions(dsId, [name], source, tolValue, method,
+          method === 'shape' && tolValue > FEWEST_SAFE);
         if (seq !== regionResampleSeq.current) return;   // cancelled or superseded
         const previewFc = asFc(res, source);
         const state = { name, dsId, tol: res.tol, counts: res.counts, handles: res.handles,
-                        kept: res.kept || [], baseFc: source, fc: previewFc };
+                        kept: res.kept || [], used: res.used, baseFc: source, fc: previewFc };
         regionResampleRef.current = state;
         fcRef.current = previewFc; setFc(previewFc);
         setRegionResample(state);

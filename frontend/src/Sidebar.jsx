@@ -3,6 +3,7 @@ import { parseName, nextNumber, formatName } from './damage';
 import { displayVersion } from './version';
 import { withStableHandlers, sameFeatureProperties } from './stableProps';
 import FoldTitle from './FoldTitle';
+import { FEWEST_SAFE } from './api';
 
 // Snap reach runs on a LOG scale. Linear, a range wide enough to bridge a torn
 // section would give the 5-50 px end -- where most borders actually are -- about
@@ -29,9 +30,23 @@ function sliderToReach(pos) {
 // The Resample points control, in Edit points and in Edit shared borders. Even
 // spacing: the slider is the gap between points. Fewest points: it is how far
 // the outline may move, and only the points the shape needs are kept -- so it
-// can go far lower than even spacing without cutting corners.
-function ResampleSlider({ method, tol, onMethod, onTol, busy }) {
+// can go far lower than even spacing without cutting corners. Past FEWEST_SAFE
+// px it goes lower still, but the shape deforms, so the slider stops there and
+// asks first; a yes holds until the method or the region changes.
+function ResampleSlider({ method, tol, onMethod, onTol, busy, used, scope }) {
   const shape = method === 'shape';
+  const [deformOk, setDeformOk] = useState(false);
+  const [ask, setAsk] = useState(null);          // the value the person was heading for
+  useEffect(() => { setDeformOk(false); setAsk(null); }, [method, scope]);
+  const deforming = shape && tol > FEWEST_SAFE;
+  const move = (v) => {
+    if (shape && v > FEWEST_SAFE && !deformOk) {
+      setAsk(v);
+      if (tol !== FEWEST_SAFE && onTol) onTol(FEWEST_SAFE);   // stop at the edge
+      return;
+    }
+    if (onTol) onTol(v);
+  };
   return (
     <>
       <div className="row">
@@ -44,14 +59,37 @@ function ResampleSlider({ method, tol, onMethod, onTol, busy }) {
       </div>
       <div className="rng">
         <span>{shape ? 'exact' : 'fine'}</span>
-        <input type="range" min={shape ? 1 : 20} max={shape ? 150 : 600} step={shape ? 1 : 10}
-          value={tol} onChange={(e) => onTol && onTol(Number(e.target.value))} disabled={busy} />
+        <input type="range" min={shape ? 1 : 20} max={shape ? 1000 : 600} step={shape ? 1 : 10}
+          value={tol} onChange={(e) => move(Number(e.target.value))} disabled={busy} />
         <span>{shape ? 'fewest' : 'coarse'}</span>
       </div>
       <div className="prop-readout">
         <span>{shape ? 'outline moves at most' : 'spacing'}</span>
         <span className="v">{tol} px</span>
       </div>
+      {shape && used != null && used < tol && (
+        <div className="hint dim">
+          Fewest at {used} px — a coarser setting would have moved a neighbour or
+          broken a border, so it was not used.
+        </div>
+      )}
+      {ask != null && (
+        <div className="hint warn">
+          The shape will deform. Do you want fewer vertices?
+          <div className="row">
+            <button className="btn sm danger" disabled={busy}
+              onClick={() => { const v = ask; setDeformOk(true); setAsk(null); if (onTol) onTol(v); }}>
+              Yes, fewer vertices
+            </button>
+            <button className="btn sm" onClick={() => setAsk(null)}>No</button>
+          </div>
+        </div>
+      )}
+      {deforming && ask == null && (
+        <div className="hint warn">
+          Past {FEWEST_SAFE} px the shape deforms — check it before you press Apply.
+        </div>
+      )}
     </>
   );
 }
@@ -482,6 +520,8 @@ function Sidebar({
           <div className="prop">
             <div className="pts-head">Resample points</div>
             <ResampleSlider method={resampleMethod} tol={resampleTol} busy={busy}
+              scope={`region:${selectedName}`}
+              used={regionResample && regionResample.name === selectedName ? regionResample.used : null}
               onMethod={(m) => onResampleMethod && onResampleMethod(m, 'region')}
               onTol={onRegionResampleTol} />
             {regionResample && regionResample.handles && (
@@ -712,6 +752,7 @@ function Sidebar({
               <div className="prop">
                 <div className="pts-head">Resample points</div>
                 <ResampleSlider method={resampleMethod} tol={resampleTol} busy={busy}
+                  scope={`border:${picks.join('|')}`}
                   onMethod={(m) => onResampleMethod && onResampleMethod(m, 'border')}
                   onTol={onResampleTol} />
                 {resample && resample.counts && (

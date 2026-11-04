@@ -208,8 +208,11 @@ ITEMS = [
     "opens up. Choose Fewest points above the slider to go much lower: only "
     "the points the shape needs are kept (corners stay, straight runs lose "
     "theirs), none of the remaining points moves, and the slider sets how far "
-    "the outline may move at most — from exact to 150 px. The same choice is "
-    "there for a shared border's Resample points.",
+    "the outline may move at most. Past 150 px the shape starts to deform, "
+    "so the slider stops and asks “The shape will deform. Do you want "
+    "fewer vertices?” — answer yes and it goes on down to 1000 px; check "
+    "the outline before you press Apply. The same choice is there for a "
+    "shared border's Resample points.",
 
     # -- move region -----------------------------------------------------------------------
     "Move region drags a whole region to a new place without changing its "
