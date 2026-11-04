@@ -51,10 +51,14 @@ function ResampleSlider({ method, tol, onMethod, onTol, busy, scope, counts, lab
     if (!opts || i < 0 || i >= opts.length) return;
     if (opts[i].deform && !deformOk) {
       setAsk(i);
-      // stop at the edge: the nearest count before it that keeps the shape
+      // stop at the edge: the nearest count before it that keeps the shape --
+      // unless that has MORE points than now (even spacing on a tidied outline:
+      // its last safe count was 82 on a 51-point TH), then stay where it is
       let edge = -1;
       for (let k = i - 1; k >= 0; k -= 1) { if (!opts[k].deform) { edge = k; break; } }
-      if (edge >= 0 && edge !== optIdx && onTol) onTol(opts[edge].tol);
+      if (edge >= 0 && edge !== optIdx && opts[edge].points < counts.before && onTol) {
+        onTol(opts[edge].tol);
+      }
       return;
     }
     setAsk(null);

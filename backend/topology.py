@@ -6026,7 +6026,13 @@ def resample_region_fewest(features, id_prop, name, tol, max_drift=0.05, reach=5
 _FEWEST_GRID = (1, 2, 3, 4, 5, 7, 10, 12, 15, 20, 25, 30, 40, 50, 60, 80, 95, 110,
                 130, 150, 190, 225, 300, 375, 450, 600, 750, 1000)
 # Even spacing's settings, px between points: the old slider's 20-600 range
-_EVEN_GRID = (20, 30, 40, 50, 60, 80, 100, 120, 150, 200, 250, 300, 400, 500, 600)
+_EVEN_GRID = (20, 30, 40, 50, 60, 80, 100, 120, 150, 200, 250, 300, 400, 500, 600,
+              800, 1000, 1500, 2000, 3000, 5000)
+# Even spacing past the old slider's 600 px: those settings may drift in area
+# like Fewest points past FEWEST_SAFE (after the page asked). Without them even
+# spacing could not go below 69 points on a tidied TH (51) -- "the slider needs
+# to be able to go lower" -- and at 1000-5000 px it reaches 49-24.
+EVEN_LOOSE = 600.0
 _resample_cache = {}          # (features digest, names, method, tol) -> result
 _RESAMPLE_CACHE_MAX = 48
 
@@ -6052,7 +6058,9 @@ def resample_at(features, id_prop, names, tol, method="shape", digest=None):
             hit = resample_region(features, id_prop, names[0], tol=tol, max_drift=drift,
                                   method="shape")
         elif len(names) == 1:
-            hit = resample_region(features, id_prop, names[0], tol=tol, method=method)
+            drift = FEWEST_DEFORM_DRIFT if tol > EVEN_LOOSE else 0.05
+            hit = resample_region(features, id_prop, names[0], tol=tol, max_drift=drift,
+                                  method=method)
         else:
             hit = resample_regions(features, id_prop, names, tol=tol, method=method)
     _resample_cache[key] = hit                    # most recent last
@@ -6087,7 +6095,8 @@ def resample_options(features, id_prop, names, method="shape"):
             best = n
             moved = _outline_moved(old, r["features"], id_prop)
             deform = moved > FEWEST_SAFE
-            if len(names) == 1 and method == "shape" and float(t) > FEWEST_SAFE:
+            loose = FEWEST_SAFE if method == "shape" else EVEN_LOOSE
+            if len(names) == 1 and float(t) > loose:
                 # past FEWEST_SAFE a region (and the neighbours re-pointed with
                 # it) may drift FEWEST_DEFORM_DRIFT in area: more than the safe
                 # 5% is a deformed shape too, however little the outline moved
