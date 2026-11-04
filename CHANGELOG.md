@@ -18,10 +18,18 @@ people will care about most and keep that title short.
 - **Delete this piece**: right-click one separate piece of a region on the
   image, like a triangle of Caudoputamen off on its own, and only that piece
   goes. The rest of the region stays, and **Ctrl+Z** brings it back.
+  A stray piece hidden under another region works too: the menu offers
+  **Delete this piece of** *(that region)*.
 - **Split region** across a gap: draw the line through the gap between a
   region's separate pieces and they become two regions. The larger side
   keeps the name. Before, that line was refused with "the cut line doesn't
   touch the region".
+
+### Menus stay on screen
+
+- A right-click menu opened near the bottom or right edge moves up to fit,
+  and scrolls if the window is too short to show all of it. Before, its
+  last items were cut off.
 
 ## v1.4.0
 

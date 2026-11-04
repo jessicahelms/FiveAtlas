@@ -263,6 +263,7 @@ button.fold:hover .arr { color: #e6e9ef; border-color: #3a4658; }
 /* right-click a region -> rename */
 .ctxmenu {
   position: fixed; z-index: 50; min-width: 150px; padding: 4px;
+  max-height: calc(100vh - 16px); overflow-y: auto;   /* App keeps it on screen */
   background: #161c26; border: 1px solid #2f3a4c; border-radius: 6px;
   box-shadow: 0 6px 18px rgba(0, 0, 0, .45);
 }

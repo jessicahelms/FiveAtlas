@@ -158,7 +158,10 @@ ITEMS = [
     "region made of separate pieces, right-clicking one piece on the image "
     "also offers Delete this piece: only that piece goes, the rest of the "
     "region stays, and Ctrl+Z brings it back. Use it for a stray island a "
-    "region picked up, like a triangle of Caudoputamen off on its own.",
+    "region picked up, like a triangle of Caudoputamen off on its own. If the "
+    "stray piece lies under another region, right-click it anyway: the menu "
+    "is the top region's, and it also offers Delete this piece of "
+    "(the region underneath).",
 
     # -- switch off --------------------------------------------------------------------
     "The use button beside each region in the list switches it off: it is hidden "

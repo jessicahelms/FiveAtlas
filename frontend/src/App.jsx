@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
+import { useEffect, useLayoutEffect, useState, useCallback, useRef, useMemo } from 'react';
 import Viewer, { regionRgb, rgbToPacked } from './Viewer';
 import Sidebar from './Sidebar';
 import ChannelPanel from './ChannelPanel';
@@ -201,6 +201,41 @@ function featureName(feature, idProp = 'name') {
 
 function featureByName(fc, name, idProp = 'name') {
   return fc && fc.features && fc.features.find((f) => featureName(f, idProp) === String(name));
+}
+
+// Is `pt` inside a polygon given as [outer, ...holes]? Even-odd over every ring,
+// so a point in a hole is outside.
+function inPolygon(pt, rings) {
+  const [x, y] = pt;
+  let inside = false;
+  for (const ring of rings) {
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+      const [xi, yi] = ring[i];
+      const [xj, yj] = ring[j];
+      if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
+    }
+  }
+  return inside;
+}
+
+// Every region in several separate pieces with one of them under `pt`, top-most
+// first -- including regions drawn UNDER the one a right-click lands on. A stray
+// piece left by registration usually sits inside a neighbour, so the click took
+// the neighbour and "Delete this piece" never appeared for it. Switched-off
+// regions are hidden on the map, so they are not offered.
+function piecesUnder(fc, pt, idProp, off) {
+  const feats = (fc && fc.features) || [];
+  const out = [];
+  for (let i = feats.length - 1; i >= 0; i--) {      // later features draw on top
+    const g = feats[i] && feats[i].geometry;
+    if (!g || g.type !== 'MultiPolygon' || g.coordinates.length < 2) continue;
+    const nm = featureName(feats[i], idProp);
+    if (off && off.has(nm)) continue;
+    if (g.coordinates.some((poly) => inPolygon(pt, poly))) {
+      out.push({ index: i, name: nm, pieces: g.coordinates.length });
+    }
+  }
+  return out;
 }
 
 // The falloff ring as state, but only a NEW object when it actually moved or
@@ -1951,6 +1986,19 @@ export default function App() {
     setSelected([m.index]);
   }, []);
   const closeRegionMenu = useCallback(() => { setRegionMenu(null); setMenuView('menu'); }, []);
+  // Keep the menu on screen: opened near the bottom (or right) edge it ran off
+  // the window and its last items could not be reached. It moves up/left to
+  // fit, and when it is taller than the window it scrolls (.ctxmenu max-height).
+  const regionMenuRef = useRef(null);
+  const [regionMenuPos, setRegionMenuPos] = useState(null);
+  useLayoutEffect(() => {
+    const el = regionMenuRef.current;
+    if (!regionMenu || !el) { setRegionMenuPos(null); return; }
+    const pad = 8;
+    const left = Math.max(pad, Math.min(regionMenu.x, window.innerWidth - el.offsetWidth - pad));
+    const top = Math.max(pad, Math.min(regionMenu.y, window.innerHeight - el.offsetHeight - pad));
+    setRegionMenuPos((p) => (p && p.left === left && p.top === top ? p : { left, top }));
+  }, [regionMenu, menuView]);
   const applyRename = useCallback(() => {
     if (!regionMenu) { closeRegionMenu(); return; }
     const next = String(renameDraft == null ? '' : renameDraft).trim();
@@ -3366,7 +3414,8 @@ export default function App() {
       })()}
 
       {regionMenu && (
-        <div className="ctxmenu" style={{ left: regionMenu.x, top: regionMenu.y }}>
+        <div className="ctxmenu" ref={regionMenuRef}
+          style={regionMenuPos || { left: regionMenu.x, top: regionMenu.y }}>
           <div className="ctx-title">{regionMenu.name || '(unnamed)'}</div>
 
           {menuView === 'menu' && (
@@ -3400,17 +3449,36 @@ export default function App() {
               </button>
               {(() => {
                 // only for a region in several separate pieces, right-clicked on the map
+                if (!regionMenu.coord) return null;
                 const g = fc && fc.features && fc.features[regionMenu.index]
                   && fc.features[regionMenu.index].geometry;
                 const pieces = g && g.type === 'MultiPolygon' ? g.coordinates.length : 1;
-                return regionMenu.coord && pieces > 1 ? (
-                  <button className="ctx-item danger"
-                    title={`remove just the piece you right-clicked; the other ${pieces - 1} `
-                      + `piece${pieces > 2 ? 's stay' : ' stays'} — Ctrl+Z undoes it`}
-                    onClick={() => { deleteRegionPart(regionMenu); closeRegionMenu(); }}>
-                    Delete this piece
-                  </button>
-                ) : null;
+                const tip = (n) => `remove just the piece you right-clicked; the other ${n - 1} `
+                  + `piece${n > 2 ? 's stay' : ' stays'} — Ctrl+Z undoes it`;
+                // ...and for every region with a piece hidden under this one
+                const under = piecesUnder(fc, regionMenu.coord, idProp, regionsOff)
+                  .filter((u) => u.index !== regionMenu.index);
+                return (
+                  <>
+                    {pieces > 1 && (
+                      <button className="ctx-item danger" title={tip(pieces)}
+                        onClick={() => { deleteRegionPart(regionMenu); closeRegionMenu(); }}>
+                        Delete this piece
+                      </button>
+                    )}
+                    {under.map((u) => (
+                      <button key={u.index} className="ctx-item danger"
+                        title={`a separate piece of ${u.name} lies under ${regionMenu.name} here: `
+                          + tip(u.pieces)}
+                        onClick={() => {
+                          deleteRegionPart({ name: u.name, coord: regionMenu.coord });
+                          closeRegionMenu();
+                        }}>
+                        Delete this piece of {u.name}
+                      </button>
+                    ))}
+                  </>
+                );
               })()}
               <button className="ctx-item danger" onClick={() => setMenuView('delete')}>Delete</button>
             </>
