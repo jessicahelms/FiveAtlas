@@ -3603,6 +3603,66 @@ def _split_result(features, idx, id_prop, name, new_name, gA, gB):
             "parts": [len(_polys(gA)), len(_polys(gB))]}
 
 
+def split_candidates(features, id_prop, points, exclude=()):
+    """Which region(s) a Split line drawn with nothing picked is meant for, most
+    likely first -> {names, reason}. `reason` explains an empty list.
+
+    Picking the region in the list before every cut was a click per split. But
+    the line alone is ambiguous: its ends lie in the NEIGHBOURS (regions tile the
+    section), and split_region carries an end that stops inside a region on to
+    that region's far edge -- so asked region by region, every neighbour holding
+    an end would "split" too. So, in order:
+      1. regions the line crosses all the way as drawn (both ends outside), and
+         regions in separate pieces whose gap it runs through (it misses every
+         piece but crosses their convex hull);
+      2. only if there are none: any region it touches that split_region can cut
+         (a line stopping short of an edge), the longest stretch inside first.
+    Each is confirmed by actually running split_region. Several names means the
+    caller asks; it never picks among them."""
+    coords = [(float(x), float(y)) for x, y in points]
+    if len(coords) < 2:
+        return {"names": [], "reason": "draw a cut line with at least two points"}
+    line = LineString(coords)
+    ends = [Point(coords[0]), Point(coords[-1])]
+    skip = {str(n) for n in (exclude or ())} | set(section_containers(features, id_prop))
+    seen, strict, loose = set(), [], []
+    reason = None
+    for f in features:
+        nm = str((f.get("properties") or {}).get(id_prop, ""))
+        if not nm or nm in seen or nm in skip:
+            continue
+        seen.add(nm)
+        try:
+            G = shape(f["geometry"])
+        except Exception:
+            continue
+        if G.is_empty:
+            continue
+        if not G.is_valid:
+            G = G.buffer(0)
+        crosses = line.intersects(G)
+        if crosses:
+            tier = 1 if not any(G.contains(e) for e in ends) else 2
+        elif len(_polys(G)) > 1 and line.intersects(G.convex_hull):
+            tier = 1
+        else:
+            continue
+        try:
+            split_region(features, id_prop, nm, coords)
+        except ValueError as e:
+            if crosses and reason is None:
+                reason = str(e)          # e.g. a name that means two polygons
+            continue
+        (strict if tier == 1 else loose).append((line.intersection(G).length, nm))
+    pick = strict or loose
+    pick.sort(key=lambda t: -t[0])
+    names = [nm for _, nm in pick]
+    if not names:
+        reason = reason or ("that line doesn't cut any region — draw it across a region, "
+                            "or through the gap between a region's separate pieces")
+    return {"names": names, "reason": None if names else reason}
+
+
 def delete_part(features, id_prop, name, point, tol=20.0):
     """Delete ONE separate piece of a region -- the piece under `point` (or the
     nearest one within `tol` px) -- and keep the rest of the region.

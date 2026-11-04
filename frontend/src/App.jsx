@@ -453,6 +453,8 @@ export default function App() {
   // split: a line the user draws across one region to cut it in two
   const [splitDraw, setSplitDraw] = useState({ type: 'FeatureCollection', features: [] });
   const [splitMsg, setSplitMsg] = useState(null);
+  // a Split line that could cut more than one region: {coords, names}, asked
+  const [splitAsk, setSplitAsk] = useState(null);
   // dissolve: click a leftover void -> preview it, then hand it to its neighbours
   const [gapFind, setGapFind] = useState(null);   // { gap, area, kind, regions, fc }
   const [gapMsg, setGapMsg] = useState(null);
@@ -1370,7 +1372,7 @@ export default function App() {
     setResample(null);
   }, []);
   const clearSplit = useCallback(() => {
-    setSplitDraw({ type: 'FeatureCollection', features: [] }); setSplitMsg(null);
+    setSplitDraw({ type: 'FeatureCollection', features: [] }); setSplitMsg(null); setSplitAsk(null);
   }, []);
   const clearGap = useCallback(() => { setGapFind(null); setGapMsg(null); }, []);
   const clearDraw = useCallback(() => {
@@ -2123,11 +2125,11 @@ export default function App() {
   //   // eslint-disable-next-line react-hooks/exhaustive-deps
   // }, [selectedName]);
 
-  const applySplit = useCallback(async (coords) => {
-    if (!selectedName) { setSplitMsg('Pick the region to split first — click one in the list.'); return; }
+  const splitAs = useCallback(async (name, coords) => {
+    setSplitAsk(null);
     setBusy(true); setError(null);
     try {
-      const res = await api.splitRegion(dsId, selectedName, fc, coords);
+      const res = await api.splitRegion(dsId, name, fc, coords);
       const newFc = asFc(res, fc);
       commit(newFc); setBaseline(newFc);
       setMoved((prev) => { const n = new Set(prev); res.names.forEach((x) => n.add(x)); return n; });
@@ -2136,7 +2138,27 @@ export default function App() {
     } catch (e) {
       setSplitMsg(`Split failed: ${apiDetail(e)}`);
     } finally { setBusy(false); }
-  }, [dsId, fc, selectedName, commit]);
+  }, [dsId, fc, commit]);
+
+  // The line says which region it is for: picking it in the list first was a
+  // click per cut. A region picked in the list still wins when the line can
+  // split it; a line that could mean several regions asks instead of guessing.
+  const applySplit = useCallback(async (coords) => {
+    setSplitAsk(null);
+    setBusy(true); setError(null);
+    let names;
+    try {
+      const r = await api.splitCandidates(dsId, fc, coords, offList());
+      names = r.names || [];
+      if (!names.length) { setSplitMsg(`Nothing to split: ${r.reason}`); return; }
+    } catch (e) {
+      setSplitMsg(`Split failed: ${apiDetail(e)}`); return;
+    } finally { setBusy(false); }
+    if (selectedName && names.includes(selectedName)) { splitAs(selectedName, coords); return; }
+    if (names.length === 1) { splitAs(names[0], coords); return; }
+    setSplitAsk({ coords, names });
+    setSplitMsg('That line could split more than one region — which one?');
+  }, [dsId, fc, selectedName, offList, splitAs]);
 
   const onSplitEdit = useCallback(({ updatedData, editType }) => {
     if (editType === 'addFeature') {
@@ -3253,6 +3275,9 @@ export default function App() {
                 borderPicks={borderPicks} borderMsg={borderMsg} borderShared={borderShared}
                 onClearBorder={clearBorder} onShareBorders={doShareBorders}
                 onMerge={doMerge} splitMsg={splitMsg}
+                splitAsk={splitAsk && splitAsk.names}
+                onSplitPick={(nm) => splitAsk && splitAs(nm, splitAsk.coords)}
+                onSplitCancel={() => { setSplitAsk(null); setSplitMsg(null); }}
                 onShareAgain={() => setBorderShared(false)}
                 mergeAsk={mergeAsk} onFoldIntoContainer={() => doMerge(true)}
                 onCancelMergeAsk={() => setMergeAsk(null)}

@@ -13,7 +13,7 @@ people will care about most and keep that title short.
 
 ## v1.4.1
 
-### Remove a stray piece of a region
+### You can now delete pieces of regions
 
 - **Delete this piece**: right-click one separate piece of a region on the
   image, like a triangle of Caudoputamen off on its own, and only that piece
@@ -24,6 +24,11 @@ people will care about most and keep that title short.
   region's separate pieces and they become two regions. The larger side
   keeps the name. Before, that line was refused with "the cut line doesn't
   touch the region".
+
+### Split finds the region by itself
+
+- No need to pick the region in the list before each cut: just draw the
+  line. If it could split more than one region, Split asks which.
 
 ### Menus stay on screen
 

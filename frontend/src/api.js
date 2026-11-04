@@ -142,6 +142,17 @@ export async function splitRegion(ds, region, fc, points, name) {
   return r.json(); // { type, features, names:[a,b] }
 }
 
+// Which region a Split line is meant for when none is picked, most likely first
+export async function splitCandidates(ds, fc, points, exclude) {
+  const r = await fetch(`${API}/datasets/${ds}/regions/split-candidates`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fc, points, exclude }),
+  });
+  if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+  return r.json(); // { names, reason }
+}
+
 // Find the leftover void under a clicked point and hand it to the region(s)
 // around it. Returns the gap outline (for preview) AND the updated FC, so the
 // client can show what it found and commit it without a second round trip.

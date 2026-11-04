@@ -41,7 +41,7 @@ function Sidebar({
   borderPicks, borderMsg, borderShared, onClearBorder, onShareBorders, onMerge,
   mergeAsk, onFoldIntoContainer, onCancelMergeAsk, onShareAgain,
   snapTol, onSnapTol, reachGap, fillAll, onFillAll,
-  splitMsg, drawMsg, drawKind, onDrawKind, designations, damageAsk, onAnswerDamage,
+  splitMsg, splitAsk, onSplitPick, onSplitCancel, drawMsg, drawKind, onDrawKind, designations, damageAsk, onAnswerDamage,
   resample, resampleTol, onResampleTol, onApplyResample, onCancelResample,
   gapFind, gapMsg, onDissolve, onFillGap, onClearGap,
   selectedName,
@@ -748,14 +748,23 @@ function Sidebar({
 
         {mode === 'split' && (
           <div className="border-pick">
-            <div className="pts-head">
-              Target: {selectedName ? <b>{selectedName}</b> : <span className="dim">click a region in the list above</span>}
-            </div>
             <div className="hint dim">
-              Draw a line across it on the image — click each point, then <b>right-click
-              to finish</b> (or Enter). <b>Esc</b> throws the line away.
+              Draw a line across the region you want to cut — click each point, then
+              <b> right-click to finish</b> (or Enter). The line finds the region by
+              itself; to separate a piece that is already apart, draw it through the
+              gap. <b>Esc</b> throws the line away.
             </div>
             {splitMsg && <div className="hint">{splitMsg}</div>}
+            {splitAsk && splitAsk.length > 0 && (
+              <div className="row wrap">
+                {splitAsk.map((nm) => (
+                  <button key={nm} className="btn sm" onClick={() => onSplitPick(nm)}>
+                    Split {nm}
+                  </button>
+                ))}
+                <button className="btn sm" onClick={onSplitCancel}>Cancel</button>
+              </div>
+            )}
           </div>
         )}
 

@@ -2000,6 +2000,26 @@ async def regions_split(ds_id: str, request: Request):
             "areas": res.get("areas"), "parts": res.get("parts")}
 
 
+@app.post("/api/datasets/{ds_id}/regions/split-candidates")
+async def regions_split_candidates(ds_id: str, request: Request):
+    """Which region a Split line is meant for when none is picked, most likely
+    first. Read-only. Body: {points, fc?, exclude?} -> {names, reason}."""
+    try:
+        d = ds.get_dataset(ds_id)
+    except KeyError:
+        raise HTTPException(404, "unknown dataset")
+    body = await request.json()
+    points = body.get("points")
+    if not points:
+        raise HTTPException(400, "need 'points'")
+    fc = body.get("fc") or geo.load_regions(ds_id)[0]
+    try:
+        return topology.split_candidates(fc["features"], d["id_prop"], points,
+                                         body.get("exclude") or [])
+    except Exception as e:
+        raise HTTPException(500, f"finding the region to split failed: {e}")
+
+
 @app.post("/api/datasets/{ds_id}/regions/delete-part")
 async def regions_delete_part(ds_id: str, request: Request):
     """Delete the one separate piece of a region under a right-click, keeping the

@@ -260,9 +260,11 @@ ITEMS = [
     "This is useful when a border has far more points on it than you can work "
     "with.",
 
-    "Split a region cuts one region into two. Select the region, then draw a "
-    "line all the way across it on the image, clicking for each point, and "
-    "right click (or press Enter) to finish. Press Esc to throw the line away "
+    "Split a region cuts one region into two. Press Split a region, then draw "
+    "a line all the way across the region on the image, clicking for each "
+    "point, and right click (or press Enter) to finish. You don't need to "
+    "pick the region first: the line finds it, and if it could split more "
+    "than one region, the app asks which. Press Esc to throw the line away "
     "and start again. To separate a piece that is already apart from the rest, "
     "draw the line through the gap between them instead: the pieces on each "
     "side become their own region, and the larger side keeps the name.",
