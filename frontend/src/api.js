@@ -102,11 +102,14 @@ export const FEWEST_SAFE = 150;
 
 // outline within `tol` px of where it was. deform: the person agreed the shape
 // may deform (a region's area may then change by up to 25%, not 5%).
-export async function resampleRegions(ds, regions, fc, tol = 150, method = 'even', deform = false) {
+// exact: one notch of the by-number slider -- exactly the result fewestOptions
+// offered at that setting.
+export async function resampleRegions(ds, regions, fc, tol = 150, method = 'even', deform = false,
+  exact = false) {
   const r = await fetch(`${API}/datasets/${ds}/regions/resample`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ regions, fc, tol, method, deform }),
+    body: JSON.stringify({ regions, fc, tol, method, deform, exact }),
   });
   if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
   return r.json(); // { type, features, counts, tol }
@@ -147,6 +150,18 @@ export async function splitRegion(ds, region, fc, points, name) {
   });
   if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
   return r.json(); // { type, features, names:[a,b] }
+}
+
+// Every number of points Fewest points can give one region (fewest last), for
+// the slider to step through: { before, options: [{ points, tol, deform }] }.
+export async function fewestOptions(ds, region, fc) {
+  const r = await fetch(`${API}/datasets/${ds}/regions/fewest-options`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ region, fc }),
+  });
+  if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+  return r.json();
 }
 
 // Which region a Split line is meant for when none is picked, most likely first

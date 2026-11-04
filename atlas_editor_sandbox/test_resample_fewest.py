@@ -178,6 +178,71 @@ if real.exists():
     check("HPF's border with V3 (a thin ventricle) is thinned too, not left as a dense bunch",
           after_v3 < before_v3 / 3, f"{before_v3} -> {after_v3} points")
 
+    print("\nthe slider goes by NUMBER of points (fewest_options)")
+    for nm in ("HPF", "CP", "TH"):
+        o = T.fewest_options(feats, "name", nm)
+        pts = [x["points"] for x in o["options"]]
+        check(f"{nm}: counts only go down along the slider", pts == sorted(set(pts), reverse=True), pts)
+        check(f"{nm}: every count is below what it has now", all(p < o["before"] for p in pts),
+              f"before {o['before']}")
+        check(f"{nm}: options past {T.FEWEST_SAFE:g} px are marked as deforming",
+              all(x["deform"] == (x["tol"] > T.FEWEST_SAFE) for x in o["options"]))
+        bad = [x for x in o["options"]
+               if T.resample_region_at(feats, "name", nm, x["tol"])["handles"]["after"] != x["points"]]
+        check(f"{nm}: picking a notch gives exactly the count it showed", not bad, bad[:2])
+
+print("\n_ring_flaws (plain arithmetic) agrees with the shapely version")
+from shapely.geometry import LineString as _LS   # noqa: E402
+
+
+def _flaws_shapely(cs, max_deg=2.0, min_len=3.0, needle_tol=0.01, window=8):
+    pts = cs[:-1] if len(cs) > 1 and tuple(cs[0]) == tuple(cs[-1]) else cs
+    n = len(pts)
+    if n < 3:
+        return 0
+    flaws = 0
+    for i in range(n):
+        p0, p1, p2 = pts[i - 1], pts[i], pts[(i + 1) % n]
+        ax, ay = p0[0] - p1[0], p0[1] - p1[1]
+        bx, by = p2[0] - p1[0], p2[1] - p1[1]
+        la, lb = math.hypot(ax, ay), math.hypot(bx, by)
+        if la >= min_len and lb >= min_len:
+            c = max(-1.0, min(1.0, (ax * bx + ay * by) / (la * lb)))
+            if math.degrees(math.acos(c)) < max_deg:
+                flaws += 1
+    ring = list(pts) + [pts[0]]
+    for k in range(n):
+        ea = _LS([ring[k], ring[k + 1]])
+        if ea.length < 2.0:
+            continue
+        for m in range(k + 2, min(k + window, n)):
+            if {tuple(ring[k]), tuple(ring[k + 1])} & {tuple(ring[m]), tuple(ring[m + 1])}:
+                continue
+            eb = _LS([ring[m], ring[m + 1]])
+            if eb.length < 2.0 or ea.distance(eb) >= needle_tol:
+                continue
+            short, other = (ea, eb) if ea.length <= eb.length else (eb, ea)
+            if short.interpolate(0.5, normalized=True).distance(other) < needle_tol:
+                flaws += 1
+    return flaws
+
+
+import random   # noqa: E402
+random.seed(7)
+rings = []
+for _ in range(400):
+    p = [(random.uniform(0, 40), random.uniform(0, 40)) for _ in range(random.randint(4, 12))]
+    if random.random() < 0.4:
+        p += [p[1], (p[0][0] + 0.004, p[0][1])]          # needles and doubled-back edges
+    rings.append(p + [p[0]])
+rings.append([(0, 0), (10, 0), (10, 10), (10, 0.005), (20, 0), (20, 20), (0, 20), (0, 0)])
+if real.exists():
+    for f in feats:
+        for poly in T._polys(shape(f["geometry"])):
+            rings.append([tuple(c) for c in poly.exterior.coords])
+mism = [r for r in rings if _flaws_shapely(r) != T._ring_flaws(r)]
+check(f"same answer on {len(rings)} rings (random, needles, real)", not mism, len(mism))
+
 print()
 if fails:
     print(f"{len(fails)} FAILED")

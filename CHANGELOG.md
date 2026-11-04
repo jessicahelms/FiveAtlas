@@ -27,15 +27,15 @@ people will care about most and keep that title short.
 
 ### Far fewer points, same shape
 
-- **Resample points** has a new **Fewest points** choice: it keeps only the
-  points the shape needs — corners stay, straight runs lose theirs — and the
-  slider sets how far the outline may move. On a real section, 80 px takes
-  CP from 141 points to 38 and TH from 132 to 40; even spacing's coarsest
-  setting left 50 and 123 and moved corners by about 200 px. Borders with
-  neighbours stay joined.
-- Want even fewer? Past 150 px the slider asks **"The shape will deform. Do
-  you want fewer vertices?"** — say yes and it goes down to 1000 px (CP: 17
-  points). Moving the slider towards "fewest" never adds points back.
+- **Resample points** has a new **Fewest points** choice: pick how many
+  vertices you want. It keeps only the points the shape needs — corners
+  stay, straight runs lose theirs — and the slider steps through the counts
+  the region can actually reach, with the readout showing e.g.
+  **81 → 29**. On a real section CP goes from 141 to 28 and TH from 132 to
+  34 while keeping their shape; even spacing's coarsest setting left 50 and
+  123 and moved corners by about 200 px. Borders with neighbours stay joined.
+- Want even fewer? Past that point the slider asks **"The shape will deform.
+  Do you want fewer vertices?"** — say yes and it goes lower still (CP: 17).
 - Resample points no longer opens a gap where a region runs close to a
   neighbour without touching it, and a border with a thin neighbour (like
   V3) is thinned too instead of being left as a dense bunch of points.

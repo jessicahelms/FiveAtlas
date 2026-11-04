@@ -205,14 +205,16 @@ ITEMS = [
     "you see “points on (region): before → after” as you go, then "
     "press Apply to keep them or Cancel to put the old ones back. Every "
     "neighbour's side of a shared border is re-pointed with it, so no border "
-    "opens up. Choose Fewest points above the slider to go much lower: only "
-    "the points the shape needs are kept (corners stay, straight runs lose "
-    "theirs), none of the remaining points moves, and the slider sets how far "
-    "the outline may move at most. Past 150 px the shape starts to deform, "
-    "so the slider stops and asks “The shape will deform. Do you want "
-    "fewer vertices?” — answer yes and it goes on down to 1000 px; check "
-    "the outline before you press Apply. The same choice is there for a "
-    "shared border's Resample points.",
+    "opens up. Choose Fewest points above the slider to go much lower and pick "
+    "the number of vertices you want: only the points the shape needs are "
+    "kept (corners stay, straight runs lose theirs), none of the remaining "
+    "points moves, and the slider steps through the counts the region can "
+    "actually reach — it takes a moment to work them out the first time. "
+    "Past the point where the shape starts to deform, the slider stops and "
+    "asks “The shape will deform. Do you want fewer vertices?” — answer yes "
+    "and it goes lower still; check the outline before you press Apply. A "
+    "shared border's Resample points has Fewest points too, set by how far "
+    "the border may move.",
 
     # -- move region -----------------------------------------------------------------------
     "Move region drags a whole region to a new place without changing its "

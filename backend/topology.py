@@ -4758,21 +4758,50 @@ def _ring_flaws(cs, max_deg=2.0, min_len=3.0, needle_tol=0.01, window=8):
             c = max(-1.0, min(1.0, (ax * bx + ay * by) / (la * lb)))
             if math.degrees(math.acos(c)) < max_deg:
                 flaws += 1
-    ring = list(pts) + [pts[0]]
+    # Plain arithmetic, not shapely: this ran for every edge pair on every
+    # resample try (a LineString per edge) and was two thirds of Fewest points'
+    # time. Same tests, same answers (test_resample_fewest checks them against
+    # the shapely version).
+    ring = [(float(p[0]), float(p[1])) for p in pts] + [(float(pts[0][0]), float(pts[0][1]))]
     for k in range(n):
-        ea = LineString([ring[k], ring[k + 1]])
-        if ea.length < 2.0:
+        a, b = ring[k], ring[k + 1]
+        la = math.hypot(b[0] - a[0], b[1] - a[1])
+        if la < 2.0:
             continue
         for m in range(k + 2, min(k + window, n)):
-            if {tuple(ring[k]), tuple(ring[k + 1])} & {tuple(ring[m]), tuple(ring[m + 1])}:
+            c, d = ring[m], ring[m + 1]
+            if a == c or a == d or b == c or b == d:
                 continue
-            eb = LineString([ring[m], ring[m + 1]])
-            if eb.length < 2.0 or ea.distance(eb) >= needle_tol:
+            lb = math.hypot(d[0] - c[0], d[1] - c[1])
+            if lb < 2.0 or _seg_seg_dist(a, b, c, d) >= needle_tol:
                 continue
-            short, other = (ea, eb) if ea.length <= eb.length else (eb, ea)
-            if short.interpolate(0.5, normalized=True).distance(other) < needle_tol:
+            (s0, s1), (o0, o1) = ((a, b), (c, d)) if la <= lb else ((c, d), (a, b))
+            mid = ((s0[0] + s1[0]) / 2.0, (s0[1] + s1[1]) / 2.0)
+            if _pt_seg_dist(mid, o0, o1) < needle_tol:
                 flaws += 1
     return flaws
+
+
+def _pt_seg_dist(p, a, b):
+    """Distance from point p to segment ab."""
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    L2 = dx * dx + dy * dy
+    if L2 <= 0.0:
+        return math.hypot(p[0] - a[0], p[1] - a[1])
+    t = max(0.0, min(1.0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / L2))
+    return math.hypot(p[0] - (a[0] + t * dx), p[1] - (a[1] + t * dy))
+
+
+def _seg_seg_dist(a, b, c, d):
+    """Distance between segments ab and cd (0 when they cross or touch)."""
+    def orient(p, q, r):
+        v = (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+        return (v > 0) - (v < 0)
+    o1, o2, o3, o4 = orient(a, b, c), orient(a, b, d), orient(c, d, a), orient(c, d, b)
+    if o1 != o2 and o3 != o4 and 0 not in (o1, o2, o3, o4):
+        return 0.0
+    return min(_pt_seg_dist(c, a, b), _pt_seg_dist(d, a, b),
+               _pt_seg_dist(a, c, d), _pt_seg_dist(b, c, d))
 
 
 def _shared_runs(pts, other_edge, fixed, eps):
@@ -5533,6 +5562,56 @@ def resample_region_fewest(features, id_prop, name, tol, max_drift=0.05, reach=5
     best["used"] = best_t
     best["tol"] = float(tol)
     return best
+
+
+# ---- Fewest points by NUMBER of points -----------------------------------------
+# The slider used to be a distance (how far the outline may move), and people
+# think in points: "HPF has 81, I want about 20". So the page first asks which
+# counts are reachable for the region -- each a real, fully guarded result at
+# one setting -- and the slider steps through those counts. The results are
+# kept, so picking a notch shows its preview at once.
+_FEWEST_GRID = (1, 2, 3, 4, 5, 7, 10, 12, 15, 20, 25, 30, 40, 50, 60, 80, 95, 110,
+                130, 150, 190, 225, 300, 375, 450, 600, 750, 1000)
+_fewest_cache = {}            # (features digest, region, tol) -> resample_region result
+_FEWEST_CACHE_MAX = len(_FEWEST_GRID) + 8
+
+
+def _features_digest(features):
+    import hashlib
+    return hashlib.md5(json.dumps(features, separators=(",", ":")).encode()).hexdigest()
+
+
+def resample_region_at(features, id_prop, name, tol, digest=None):
+    """Fewest points for ONE region at exactly `tol` px -- the area may drift 5%
+    up to FEWEST_SAFE and FEWEST_DEFORM_DRIFT past it (after the page asked).
+    Remembered, so the notch a person picks is the result they were shown."""
+    tol = float(tol)
+    key = (digest or _features_digest(features), str(name), tol)
+    hit = _fewest_cache.pop(key, None)
+    if hit is None:
+        drift = FEWEST_DEFORM_DRIFT if tol > FEWEST_SAFE else 0.05
+        hit = resample_region(features, id_prop, name, tol=tol, max_drift=drift, method="shape")
+    _fewest_cache[key] = hit                      # most recent last
+    while len(_fewest_cache) > _FEWEST_CACHE_MAX:
+        _fewest_cache.pop(next(iter(_fewest_cache)))
+    return hit
+
+
+def fewest_options(features, id_prop, name):
+    """Every number of points Fewest points can give ONE region, fewest last:
+    {before, options: [{points, tol, deform}]}. Each option is the smallest
+    setting that reaches that count, so the counts only ever go down along the
+    slider; `deform` marks the ones past FEWEST_SAFE (the page asks first)."""
+    digest = _features_digest(features)
+    before, best, options = None, None, []
+    for t in _FEWEST_GRID:
+        r = resample_region_at(features, id_prop, name, t, digest)
+        before = r["handles"]["before"]
+        n = r["handles"]["after"]
+        if n < before and (best is None or n < best):
+            best = n
+            options.append({"points": n, "tol": float(t), "deform": t > FEWEST_SAFE})
+    return {"before": before, "options": options}
 
 
 def delete_point(features, id_prop, name, point, respace=True, eps=0.5,
