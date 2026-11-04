@@ -36,6 +36,9 @@ people will care about most and keep that title short.
 - Want even fewer? Past 150 px the slider asks **"The shape will deform. Do
   you want fewer vertices?"** — say yes and it goes down to 1000 px (CP: 17
   points). Moving the slider towards "fewest" never adds points back.
+- Resample points no longer opens a gap where a region runs close to a
+  neighbour without touching it, and a border with a thin neighbour (like
+  V3) is thinned too instead of being left as a dense bunch of points.
 
 ### Split finds the region by itself
 

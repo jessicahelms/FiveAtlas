@@ -154,6 +154,30 @@ if real.exists():
         check(f"{nm}: 'used' never exceeds the setting asked for",
               r["used"] is None or r["used"] <= 1000)
 
+    print("\nno gap is opened (a stretch NEAR a neighbour gave up ground to nobody)")
+    # HPF lost 300,340 px2 to nobody at 150 px before free stretches were checked:
+    # the user's screenshot. Measured against the NEW hemi, so the coast moving
+    # in together with hemi is not counted as a gap.
+    def cover(fs):
+        return unary_union([shape(f["geometry"]) for f in fs if f["properties"]["name"] != "hemi"])
+    c0 = cover(feats)
+    for nm in ("HPF", "TH", "dft", "V3", "CP"):
+        if nm not in others0:
+            continue
+        for t, deform in ((40, False), (150, False), (600, True)):
+            r = T.resample_region_fewest(feats, "name", nm, tol=t,
+                                         max_drift=T.FEWEST_DEFORM_DRIFT if deform else 0.05)
+            void = c0.difference(cover(r["features"])).intersection(geom(r["features"], "hemi"))
+            check(f"{nm} at {t} px: no new gap inside the section", void.area <= 250.0,
+                  f"{void.area:.0f} px2, {r['handles']['before']} -> {r['handles']['after']} points")
+    r = T.resample_region_fewest(feats, "name", "HPF", tol=600, max_drift=T.FEWEST_DEFORM_DRIFT)
+    before_v3 = sum(1 for p in T._polys(others0["HPF"])[0].exterior.coords
+                    if others0["V3"].boundary.distance(__import__("shapely").geometry.Point(p)) < 0.5)
+    after_v3 = sum(1 for p in T._polys(geom(r["features"], "HPF"))[0].exterior.coords
+                   if geom(r["features"], "V3").boundary.distance(__import__("shapely").geometry.Point(p)) < 0.5)
+    check("HPF's border with V3 (a thin ventricle) is thinned too, not left as a dense bunch",
+          after_v3 < before_v3 / 3, f"{before_v3} -> {after_v3} points")
+
 print()
 if fails:
     print(f"{len(fails)} FAILED")

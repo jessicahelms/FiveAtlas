@@ -5280,23 +5280,49 @@ def resample_region(features, id_prop, name, tol=20.0, eps=0.5, max_drift=0.05,
             return 0.0
         return (cand.intersection(local).difference(poly).intersection(oth).area)
 
+    # Where ground this region gives up would be a GAP: inside the section
+    # outline (hemi), or -- with no outline -- next to a neighbour. A free
+    # stretch running a few px from a neighbour without touching it gave up
+    # ground to nobody when it was re-pointed: Fewest points opened a 300,340
+    # px2 hole between HPF and dft at 150 px (even spacing 63,594 px2 at 600).
+    gap_zone = unary_union([_body(features, idx[c]) for c in containers
+                            if c in idx and c != name] or [Polygon()])
+    if gap_zone.is_empty and near_bodies:
+        gap_zone = unary_union(list(near_bodies.values())).buffer(max(tol, 20.0))
+
+    def _opens_gap(cand, poly, seg_a, seg_b):
+        """px2 of ground `poly` covered that `cand` gives up to nobody, inside
+        the gap zone, near the stretch that changed."""
+        if gap_zone.is_empty:
+            return 0.0
+        local = _box(*LineString(list(seg_a) + list(seg_b)).bounds).buffer(2.0)
+        freed = poly.intersection(local).difference(cand)
+        if freed.is_empty:
+            return 0.0
+        return freed.difference(_others(None)).intersection(gap_zone).area
+
     def _safe_free(pieces, i, ring_of, holes, poly):
         """Piece `i` re-pointed at the slider's spacing, or finer where that would
-        take a third region's ground; its original points if nothing works. A
-        shared piece may trade ground with its partner only -- the coast shared
-        with hemi took RSP's ground on ISO (1,670 px2 at 150) when it was not
-        checked."""
+        take a third region's ground -- or, for a free stretch, leave a gap; its
+        original points if nothing works. A shared piece may trade ground with
+        its partner only -- the coast shared with hemi took RSP's ground on ISO
+        (1,670 px2 at 150) when it was not checked -- and needs no gap check: the
+        partner gets the same points, so whatever one gives up the other takes."""
         orig = pieces[i]["orig"]
         partner = pieces[i]["with"]
+        # a quarter-pixel band along the stretch: rounding, not a gap
+        gap_ok = 0.5 + 0.25 * LineString(orig).length
         spacing = tol
         for _ in range(_RS_TRIES):
             new = _point_arc(orig, spacing, method)
             pieces[i]["new"] = new
             cand = _single_polygon(ring_of(i), holes)
             # too coarse to make a polygon at all is the caller's to judge (it is
-            # left as it was and reported in `kept`); only taking a third
-            # region's ground is retried finer
-            if cand is None or _takes_ground(cand, poly, orig, new, partner) <= 0.5:
+            # left as it was and reported in `kept`); taking a third region's
+            # ground or opening a gap is retried finer
+            if cand is None or (_takes_ground(cand, poly, orig, new, partner) <= 0.5
+                                and (partner is not None
+                                     or _opens_gap(cand, poly, orig, new) <= gap_ok)):
                 return
             spacing /= 2.0
             if spacing < 2.0:
@@ -5415,6 +5441,20 @@ def resample_region(features, id_prop, name, tol=20.0, eps=0.5, max_drift=0.05,
                     continue
                 rec = _swap_stretch(out, idx, pc["with"], pc["orig"], pc["new"],
                                     swap_eps, max_drift)
+                # Fewest points: a neighbour that can't take this stretch at the
+                # slider's setting (a thin one like V3, whose area it would
+                # change too much) gets it finer, not the whole dense run left
+                # as it was -- that left a bunch of ~30 points on HPF's V3 side.
+                t = tol
+                while rec is None and method == "shape" and t / 2.0 >= 2.0:
+                    t /= 2.0
+                    finer = _point_arc(pc["orig"], t, method)
+                    if len(finer) >= len(pc["orig"]):
+                        break
+                    rec = _swap_stretch(out, idx, pc["with"], pc["orig"], finer,
+                                        swap_eps, max_drift)
+                    if rec is not None:
+                        pc["new"] = finer
                 if rec is None:
                     use[pi] = False
                 else:
