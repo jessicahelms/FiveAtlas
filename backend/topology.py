@@ -4649,7 +4649,7 @@ def _even_points(arc, spacing):
     return out
 
 
-def _shape_points(arc, dev):
+def _shape_points(arc, dev, ok=None):
     """`arc` with only the points its shape needs: Douglas-Peucker, so no stretch
     moves more than `dev` px from where it was, and the points that remain are
     the arc's OWN points -- none is moved. Both ends kept exactly.
@@ -4657,22 +4657,128 @@ def _shape_points(arc, dev):
     For "Fewest points". Even spacing spends as many points on a straight run as
     on a corner, and at its coarsest (600 px) still left 45-130 points per
     region on the real files while cutting their corners; this puts the points
-    where the outline bends and drops the rest."""
+    where the outline bends and drops the rest.
+
+    Then no two points are left closer than _RS_MIN_GAP where one of them can go
+    without the stretch moving more than `dev` (_declutter): a run of points a
+    few px apart is what annotators dragging points hate most.
+
+    `ok(i, j)`, if given, says whether the chord arc[i] -> arc[j] may replace the
+    arc between them (it takes nobody's ground, opens no gap): Douglas-Peucker
+    then splits only the chords that fail it, so a stretch that runs a few px
+    from a neighbour keeps the points it needs THERE and is thinned everywhere
+    else -- instead of the whole stretch being retried finer and, in the end,
+    left exactly as dense as it was."""
     if len(arc) <= 2:
         return [tuple(p) for p in arc]
-    out = [tuple(p) for p in LineString(arc).simplify(float(dev), preserve_topology=False).coords]
+    if ok is None:
+        keep = _arc_indices(arc, LineString(arc).simplify(float(dev), preserve_topology=False).coords)
+    else:
+        keep = _guarded_dp(arc, float(dev), ok)
+    keep = _declutter(arc, keep, float(dev), _RS_MIN_GAP, ok)
+    out = [tuple(arc[k]) for k in keep]
     out[0] = tuple(arc[0])
     out[-1] = tuple(arc[-1])
     return out
 
 
+_RS_MIN_GAP = 40.0     # px: Fewest points leaves no two points closer, where it can
+
+
+def _arc_indices(arc, coords):
+    """Indices into `arc` of `coords` -- a subset of its points, in order."""
+    out, k, n = [], 0, len(arc)
+    for c in coords:
+        c = (float(c[0]), float(c[1]))
+        while k < n and (abs(arc[k][0] - c[0]) > 1e-9 or abs(arc[k][1] - c[1]) > 1e-9):
+            k += 1
+        if k >= n:
+            break
+        out.append(k)
+        k += 1
+    if not out or out[0] != 0:
+        out = [0] + out
+    if out[-1] != n - 1:
+        out.append(n - 1)
+    return out
+
+
+def _span_dev(arc, i, j):
+    """(max distance of arc[i..j] from the chord arc[i] -> arc[j], index of it)."""
+    a, b = arc[i], arc[j]
+    best, at = 0.0, i
+    for m in range(i + 1, j):
+        d = _pt_seg_dist(arc[m], a, b)
+        if d > best:
+            best, at = d, m
+    return best, at
+
+
+def _guarded_dp(arc, dev, ok):
+    """Douglas-Peucker on `arc` whose chords must also pass `ok(i, j)`; a chord
+    that fails is split at its farthest point (or its middle, if it is straight
+    to within rounding) exactly as one that strays too far. Indices kept."""
+    n = len(arc)
+    keep = {0, n - 1}
+    stack = [(0, n - 1)]
+    while stack:
+        i, j = stack.pop()
+        if j - i <= 1:
+            continue
+        d, at = _span_dev(arc, i, j)
+        if d <= dev and ok(i, j):
+            continue
+        if d <= 1e-9:
+            at = (i + j) // 2
+        keep.add(at)
+        stack.append((i, at))
+        stack.append((at, j))
+    return sorted(keep)
+
+
+def _declutter(arc, keep, dev, min_gap, ok=None):
+    """`keep` (indices into `arc`, ends included) with points dropped wherever two
+    are closer than `min_gap` and one of them can go: the chord that replaces it
+    keeps every point of `arc` it spans within `dev` (so the stretch still moves
+    no more than the setting allows) and passes `ok`. The two ends never go.
+    Shortest gap first; of its two points the one whose loss moves the line
+    least goes."""
+    keep = list(keep)
+    stuck = set()
+    while len(keep) > 2:
+        best = None
+        for q in range(len(keep) - 1):
+            a, b = arc[keep[q]], arc[keep[q + 1]]
+            L = math.hypot(b[0] - a[0], b[1] - a[1])
+            if L < min_gap and (keep[q], keep[q + 1]) not in stuck and (best is None or L < best[0]):
+                best = (L, q)
+        if best is None:
+            break
+        q = best[1]
+        cands = []
+        for r in (q, q + 1):                      # drop keep[r]: an interior one only
+            if 0 < r < len(keep) - 1:
+                d, _ = _span_dev(arc, keep[r - 1], keep[r + 1])
+                if d <= dev:
+                    cands.append((d, r))
+        done = False
+        for d, r in sorted(cands):
+            if ok is None or ok(keep[r - 1], keep[r + 1]):
+                del keep[r]
+                done = True
+                break
+        if not done:
+            stuck.add((keep[q], keep[q + 1]))
+    return keep
+
+
 RESAMPLE_METHODS = ("even", "shape")
 
 
-def _point_arc(arc, tol, method):
+def _point_arc(arc, tol, method, ok=None):
     """Re-point a stretch for Resample points: even spacing `tol` ("even"), or the
-    fewest points within `tol` px of it ("shape")."""
-    return _shape_points(arc, tol) if method == "shape" else _even_points(arc, tol)
+    fewest points within `tol` px of it ("shape"; `ok` as in _shape_points)."""
+    return _shape_points(arc, tol, ok) if method == "shape" else _even_points(arc, tol)
 
 
 def _swap_ring_span(ring, arc_line, new_pts, eps):
@@ -4739,6 +4845,8 @@ def _swap_ring_span(ring, arc_line, new_pts, eps):
 
 _RS_EPS = 0.5          # px: a vertex this close to the other outline is ON it
 _RS_TRIES = 5          # finer spacings tried before a stretch is left as it was
+_RS_GAP_BUDGET = 100.0 # px2: ground one outline's free stretches may give up to nobody
+_RS_NEST = 0.85        # a region holding this share of another's area is its parent
 
 
 def _ring_flaws(cs, max_deg=2.0, min_len=3.0, needle_tol=0.01, window=8):
@@ -5215,6 +5323,29 @@ def _swap_stretch(out, idx, nm, orig_pts, new_pts, swap_eps, max_drift):
     return None
 
 
+def _swap_stretch_all(out, idx, nm, orig_pts, new_pts, swap_eps, max_drift):
+    """_swap_stretch on EVERY feature of `nm` that carries the stretch, or on
+    none: a list of undo records, or None (and nothing changed). A name can come
+    as several features -- XETG has two near-identical OLF copies -- and
+    re-pointing only the first left the other with the old border, so CTXsp
+    overlapped OLF by 14,140 px2 where the two had shared it exactly."""
+    import shapely as _sh
+    inner = orig_pts[1:-1] if len(orig_pts) > 2 else orig_pts
+    arr = _sh.points([tuple(p) for p in inner])
+    recs = []
+    for k in idx[nm]:
+        g = _geom_at(out, k)
+        if g.is_empty or not _sh.dwithin(arr, g.boundary, swap_eps).any():
+            continue
+        rec = _swap_stretch(out, {nm: [k]}, nm, orig_pts, new_pts, swap_eps, max_drift)
+        if rec is None:
+            for kk, geom in reversed(recs):
+                out[kk]["geometry"] = geom
+            return None
+        recs.append(rec)
+    return recs or None
+
+
 def _even_count(pts, count):
     """`pts` re-pointed evenly into exactly `count` points, both ends kept. A
     closed run (first point == last) stays closed."""
@@ -5290,15 +5421,45 @@ def resample_region(features, id_prop, name, tol=20.0, eps=0.5, max_drift=0.05,
     near_bodies = {o: g for o, g in ((o, _body(features, idx[o])) for o in idx
                                      if o != name and o not in containers)
                    if not g.is_empty and g.intersects(body_before.buffer(tol + 4))}
+    # Layered atlases: most regions lie inside another (Caudoputamen_672 99.9%
+    # inside CP, SSp inside ISO, VL.2 inside dft), and section_containers finds
+    # none of those. The PARENT's ground was counted as a third region's, so
+    # every outward bulge of a chord "took" it, every finer retry failed too,
+    # and the whole outline came back exactly as dense as it was (83% of the
+    # clusters left over). For this region a parent is a container, like hemi:
+    # moving within it takes nothing, and ground given up to it alone is a gap;
+    # leaving it is taking ground. A CHILD (a region lying inside this one)
+    # must stay inside: ground given up over it counts as a gap too.
+    parents, children = set(), set()
+    if not body_before.is_empty:
+        for o, g in near_bodies.items():
+            shared_area = g.intersection(body_before).area
+            if shared_area >= _RS_NEST * body_before.area:
+                parents.add(o)
+            elif shared_area >= _RS_NEST * g.area:
+                children.add(o)
+    for o in parents:
+        near_bodies.pop(o, None)
+    parent_body = unary_union([_body(features, idx[o]) for o in parents] or [Polygon()])
+    outside_parent = (_box(*body_before.bounds).buffer(tol + 50.0).difference(parent_body)
+                      if parents else Polygon())
     _others_cache = {}
 
     def _others(partner):
         """Every nearby region's ground except `partner`'s -- the one a shared
-        stretch legitimately trades ground with."""
+        stretch legitimately trades ground with -- and whatever lies outside
+        this region's parent (unless the stretch is shared with the parent)."""
         if partner not in _others_cache:
-            _others_cache[partner] = unary_union(
-                [g for o, g in near_bodies.items() if o != partner] or [Polygon()])
+            parts = [g for o, g in near_bodies.items() if o != partner]
+            if parents and partner not in parents and not outside_parent.is_empty:
+                parts.append(outside_parent)
+            _others_cache[partner] = unary_union(parts or [Polygon()])
         return _others_cache[partner]
+
+    # ground that is NOT a gap if this region gives it up: a neighbour's that is
+    # not one of its children
+    cover_not_gap = unary_union([g for o, g in near_bodies.items() if o not in children]
+                                or [Polygon()])
 
     def _takes_ground(cand, poly, seg_a, seg_b, partner):
         """px2 of another region's ground `cand` has that `poly` had not, near
@@ -5318,6 +5479,8 @@ def resample_region(features, id_prop, name, tol=20.0, eps=0.5, max_drift=0.05,
                             if c in idx and c != name] or [Polygon()])
     if gap_zone.is_empty and near_bodies:
         gap_zone = unary_union(list(near_bodies.values())).buffer(max(tol, 20.0))
+    if parents:
+        gap_zone = unary_union([gap_zone, parent_body])
 
     def _opens_gap(cand, poly, seg_a, seg_b):
         """px2 of ground `poly` covered that `cand` gives up to nobody, inside
@@ -5328,7 +5491,7 @@ def resample_region(features, id_prop, name, tol=20.0, eps=0.5, max_drift=0.05,
         freed = poly.intersection(local).difference(cand)
         if freed.is_empty:
             return 0.0
-        return freed.difference(_others(None)).intersection(gap_zone).area
+        return freed.difference(cover_not_gap).intersection(gap_zone).area
 
     def _safe_free(pieces, i, ring_of, holes, poly):
         """Piece `i` re-pointed at the slider's spacing, or finer where that would
@@ -5339,29 +5502,111 @@ def resample_region(features, id_prop, name, tol=20.0, eps=0.5, max_drift=0.05,
         partner gets the same points, so whatever one gives up the other takes."""
         orig = pieces[i]["orig"]
         partner = pieces[i]["with"]
-        # a quarter-pixel band along the stretch: rounding, not a gap
-        gap_ok = 0.5 + 0.25 * LineString(orig).length
+        # a quarter-pixel band along the stretch: rounding, not a gap -- but no
+        # more than the stretch's share (by length) of _RS_GAP_BUDGET for the
+        # whole outline. The band alone let one long stretch give up 1,700 px2
+        # (SSp at 12 px), and with chords now split only where they must,
+        # stretches use their allowance: RSP gave up 790 px2.
+        L_orig = LineString(orig).length
+        gap_ok = 0.5 + min(0.25 * L_orig, _RS_GAP_BUDGET * L_orig / max(poly.exterior.length, 1e-9))
+
+        def passes(cand, new):
+            # Fewest points: a stretch that alone drifts the part's area too far
+            # is retried finer too, not left for the whole part to be put back
+            # (VL.2, one free ring inside dft, had no option at all)
+            if method == "shape" and not _area_drift_ok(cand, poly, max_drift):
+                return False
+            return (_takes_ground(cand, poly, orig, new, partner) <= 0.5
+                    and (partner is not None or _opens_gap(cand, poly, orig, new) <= gap_ok))
+
         spacing = tol
-        for _ in range(_RS_TRIES):
+        guard = None
+        for attempt in range(_RS_TRIES):
             new = _point_arc(orig, spacing, method)
+            if attempt and len(new) > len(orig):
+                # a finer RETRY that adds points: even spacing went 28 -> 9,119
+                # points on SSp this way (retried down to 2.5 px). The setting
+                # asked for may add points; a fallback may not.
+                break
             pieces[i]["new"] = new
             cand = _single_polygon(ring_of(i), holes)
             # too coarse to make a polygon at all is the caller's to judge (it is
             # left as it was and reported in `kept`); taking a third region's
             # ground or opening a gap is retried finer
-            if cand is None or (_takes_ground(cand, poly, orig, new, partner) <= 0.5
-                                and (partner is not None
-                                     or _opens_gap(cand, poly, orig, new) <= gap_ok)):
+            if cand is None or passes(cand, new):
                 return
+            if method == "shape":
+                # Fewest points: keep the setting, and split only the chords that
+                # take or give ground (a stretch a few px from a neighbour). Was:
+                # the whole stretch retried finer and, in the end, left as dense
+                # as it was -- ~10 points a few px apart on HPF facing dft.
+                if guard is None:
+                    guard = _chord_guard(orig, partner, poly, gap_ok - 0.5)
+                new = _point_arc(orig, spacing, method, guard)
+                pieces[i]["new"] = new
+                cand = _single_polygon(ring_of(i), holes)
+                if cand is not None and passes(cand, new):
+                    return
             spacing /= 2.0
             if spacing < 2.0:
                 break
         pieces[i]["new"] = orig
 
+    def _chord_guard(orig, partner, poly, gap_all):
+        """ok(i, j) for _shape_points: the chord orig[i] -> orig[j] takes no other
+        region's ground (bar `partner`'s, which gets the same points) and, on a
+        free stretch, gives up none to nobody inside the gap zone -- each chord
+        held to its share (by length) of what _safe_free allows the stretch."""
+        line = LineString(orig)
+        total = max(line.length, 1e-9)
+        cum = [0.0]
+        for a, b in zip(orig, orig[1:]):
+            cum.append(cum[-1] + math.hypot(b[0] - a[0], b[1] - a[1]))
+        zone = _box(*line.bounds).buffer(tol + 4.0)
+        polyl = poly.intersection(zone)
+        oth = _others(partner)
+        oth = oth.intersection(zone) if oth.intersects(zone) else Polygon()
+        taken_zone = oth.difference(polyl) if not oth.is_empty else Polygon()
+        given_zone = Polygon()
+        if partner is None and not gap_zone.is_empty and gap_zone.intersects(zone):
+            given_zone = polyl.intersection(gap_zone).difference(cover_not_gap)
+
+        def ok(i, j):
+            if j - i <= 1:
+                return True
+            sweep = _valid(Polygon([tuple(p) for p in orig[i:j + 1]]))
+            if sweep is None or sweep.is_empty or sweep.area <= 1e-9:
+                return True
+            share = (cum[j] - cum[i]) / total
+            if not taken_zone.is_empty and sweep.intersection(taken_zone).area > 0.5 * share:
+                return False
+            if not given_zone.is_empty and sweep.intersection(given_zone).area > gap_all * share:
+                return False
+            return True
+        return ok
+
     kept = []
     handles_before = handles_after = 0
+    # An exact copy of a feature already done gets the same result, not a second
+    # pass of its own: XETG carries every coarse region twice, and the second
+    # pass re-pointed the neighbours again against the ORIGINAL outline, so the
+    # two copies (and the neighbours) parted -- CP overlapped its neighbours by
+    # 78,060 px2 at the Fewest points safe edge before this change.
+    # (Near-exact too: dft's two copies there differ by 38 px2 of 23 million.)
+    copy_of = {}
+    for i, k in enumerate(idx[name]):
+        gk = _geom_at(features, k)
+        for k0 in idx[name][:i]:
+            g0 = _geom_at(features, k0)
+            if k0 not in copy_of and (g0.equals_exact(gk, 1e-9) or (
+                    _vertex_count(g0) == _vertex_count(gk)
+                    and g0.symmetric_difference(gk).area <= 1e-4 * max(g0.area, 1e-9))):
+                copy_of[k] = k0
+                break
 
     for k in idx[name]:
+        if k in copy_of:
+            continue
         parts = _polys(_geom_at(features, k))
         rebuilt = []
         for poly in parts:
@@ -5456,6 +5701,26 @@ def resample_region(features, id_prop, name, tol=20.0, eps=0.5, max_drift=0.05,
             use = [True] * len(pieces)
             flaws0 = _ring_flaws(coords + [coords[0]])
             cand = _single_polygon(ring_from(use), holes)
+            if (method == "shape" and (cand is None or not _area_drift_ok(cand, poly, max_drift)
+                                       or _ring_flaws(ring_from(use)) > flaws0)):
+                # Fewest points: put stretches back one at a time -- the one
+                # pushing the area furthest the wrong way first -- rather than
+                # the whole part (VL.2: 69 points, and no option at all).
+                drift = (cand.area - poly.area) if cand is not None else 0.0
+                moved = []
+                for pi, pc in enumerate(pieces):
+                    if pc["new"] is pc["orig"] or list(pc["new"]) == list(pc["orig"]):
+                        continue
+                    alone = _single_polygon(ring_from([j == pi for j in range(len(pieces))]), holes)
+                    push = ((alone.area - poly.area) * (1.0 if drift >= 0 else -1.0)
+                            if alone is not None else float("inf"))
+                    moved.append((push, pi))
+                for _, pi in sorted(moved, reverse=True):
+                    pieces[pi]["new"] = pieces[pi]["orig"]
+                    cand = _single_polygon(ring_from(use), holes)
+                    if (cand is not None and _area_drift_ok(cand, poly, max_drift)
+                            and _ring_flaws(ring_from(use)) <= flaws0):
+                        break
             if (cand is None or not _area_drift_ok(cand, poly, max_drift)
                     or _ring_flaws(ring_from(use)) > flaws0):
                 kept.append(name)
@@ -5468,26 +5733,32 @@ def resample_region(features, id_prop, name, tol=20.0, eps=0.5, max_drift=0.05,
             for pi, pc in enumerate(pieces):
                 if not pc["with"]:
                     continue
-                rec = _swap_stretch(out, idx, pc["with"], pc["orig"], pc["new"],
-                                    swap_eps, max_drift)
+                rec = _swap_stretch_all(out, idx, pc["with"], pc["orig"], pc["new"],
+                                        swap_eps, max_drift)
                 # Fewest points: a neighbour that can't take this stretch at the
                 # slider's setting (a thin one like V3, whose area it would
                 # change too much) gets it finer, not the whole dense run left
                 # as it was -- that left a bunch of ~30 points on HPF's V3 side.
                 t = tol
+                guard_pc = None
                 while rec is None and method == "shape" and t / 2.0 >= 2.0:
                     t /= 2.0
-                    finer = _point_arc(pc["orig"], t, method)
+                    # held to the same ground check as every other stretch: it
+                    # was not, and dft took 1,552 px2 of ~VL_Lateral_ventricle.003
+                    # (which overlaps VL.1) through this fallback on 29110
+                    if guard_pc is None:
+                        guard_pc = _chord_guard(pc["orig"], pc["with"], poly, 0.0)
+                    finer = _point_arc(pc["orig"], t, method, guard_pc)
                     if len(finer) >= len(pc["orig"]):
                         break
-                    rec = _swap_stretch(out, idx, pc["with"], pc["orig"], finer,
-                                        swap_eps, max_drift)
+                    rec = _swap_stretch_all(out, idx, pc["with"], pc["orig"], finer,
+                                            swap_eps, max_drift)
                     if rec is not None:
                         pc["new"] = finer
                 if rec is None:
                     use[pi] = False
                 else:
-                    undo.append(rec)
+                    undo.extend(rec)
             ring = ring_from(use)
             cand = _single_polygon(ring, holes)
             if (cand is None or not _area_drift_ok(cand, poly, max_drift)
@@ -5504,6 +5775,19 @@ def resample_region(features, id_prop, name, tol=20.0, eps=0.5, max_drift=0.05,
         if rebuilt:
             ng = rebuilt[0] if len(rebuilt) == 1 else MultiPolygon(rebuilt)
             out[k]["geometry"] = mapping(ng)
+
+    for k, k0 in copy_of.items():
+        out[k]["geometry"] = json.loads(json.dumps(out[k0]["geometry"]))
+        handles_before += sum(len(p.exterior.coords) - 1 for p in _polys(_geom_at(features, k)))
+        handles_after += sum(len(p.exterior.coords) - 1 for p in _polys(_geom_at(out, k)))
+
+    if method == "shape":
+        merged = _merge_close_points(out, idx, name, nb_names, containers, gap_zone,
+                                     min(_RS_MIN_GAP, tol), eps, max_drift, features,
+                                     parents)
+        if merged:
+            handles_after = sum(len(p.exterior.coords) - 1
+                                for k in idx[name] for p in _polys(_geom_at(out, k)))
 
     counts = []
     after = _body(out, idx[name])
@@ -5524,6 +5808,175 @@ def resample_region(features, id_prop, name, tol=20.0, eps=0.5, max_drift=0.05,
     return {"features": out, "counts": counts, "tol": tol,
             "handles": {"before": handles_before, "after": handles_after},
             "kept": sorted(set(kept))}
+
+
+def _merge_close_points(out, idx, name, nb_names, containers, gap_zone, limit, eps,
+                        max_drift, original, parents=()):
+    """Fewest points, last step: two points of `name`'s outline closer than
+    `limit` that nothing else could thin -- both are FIXED, the ends of stretches
+    shared with different neighbours, or a junction a few px from the next one
+    (dft had a 4 px edge where HPF and TH nearly meet) -- become one: the point
+    moves onto its partner in EVERY region that has it, so borders that met
+    there still meet, point for point. Kept only if no region's ground is taken
+    (overlap between any two grows <= 0.5 px2), no gap is opened (ground covered
+    before and by nobody now, inside the gap zone, <= 0.5 px2), every changed
+    part is still one valid polygon with no new spike or needle, and no region's
+    area drifts past `max_drift` from where it started. A point that lies on a
+    neighbour's EDGE (not one of its points) is never moved: the neighbour
+    would be left behind. Edits `out` in place; returns how many were merged."""
+    from shapely.geometry import MultiPolygon
+    import shapely as _sh
+    near = sorted({n for n in list(nb_names) + list(parents) if n in idx and n != name}) + [name]
+    merged = 0
+
+    def snap_ring(cs, src, dst):
+        """ring `cs` (closed coords) with every point within eps of src moved to
+        dst, repeats dropped; None if it had none."""
+        pts = [tuple(c) for c in cs[:-1]]
+        hit = [math.hypot(p[0] - src[0], p[1] - src[1]) <= eps for p in pts]
+        if not any(hit):
+            return None
+        new = []
+        for p, h in zip(pts, hit):
+            q = dst if h else p
+            if not new or math.hypot(q[0] - new[-1][0], q[1] - new[-1][1]) > 1e-9:
+                new.append(q)
+        while len(new) > 1 and math.hypot(new[0][0] - new[-1][0], new[0][1] - new[-1][1]) <= 1e-9:
+            new.pop()
+        return new + [new[0]] if len(new) >= 3 else []
+
+    def try_snap(src, dst):
+        sp = Point(src)
+        changes = []                         # (k, region, new geometry)
+        for o in near:
+            for k in idx[o]:
+                g = _geom_at(out, k)
+                if g.is_empty or g.distance(sp) > eps * 2:
+                    continue
+                parts, hit = [], False
+                for poly in _polys(g):
+                    rings = [list(poly.exterior.coords)] + [list(r.coords) for r in poly.interiors]
+                    new_rings = []
+                    for cs in rings:
+                        nr = snap_ring(cs, src, dst)
+                        if nr is None:
+                            new_rings.append(cs)
+                            continue
+                        if not nr or _ring_flaws(nr) > _ring_flaws(cs):
+                            return None
+                        hit = True
+                        new_rings.append(nr)
+                    try:
+                        q = Polygon(new_rings[0], new_rings[1:])
+                    except Exception:
+                        return None
+                    if not q.is_valid or q.is_empty:
+                        return None
+                    parts.append(q)
+                if not hit:
+                    if o != name and g.boundary.distance(sp) <= eps:
+                        return None          # on its edge, not a point of it
+                    continue
+                ng = parts[0] if len(parts) == 1 else MultiPolygon(parts)
+                changes.append((k, o, ng))
+        if not changes:
+            return None
+        # the area that changed: the triangles at the moved point
+        zone = unary_union([_geom_at(out, k).symmetric_difference(ng) for k, _, ng in changes])
+        if zone.is_empty:
+            return changes
+        zone = zone.buffer(1.0)
+        names_changed = {o for _, o, _ in changes}
+        before = {o: _body(out, idx[o]) for o in near}
+        trial = {o: before[o] for o in near}
+        new_at = {k: ng for k, _, ng in changes}
+        for o in names_changed:
+            trial[o] = unary_union([new_at.get(kk) or _geom_at(out, kk) for kk in idx[o]])
+        for o in names_changed:
+            b0 = _body(original, idx[o])
+            if abs(trial[o].area - b0.area) / max(b0.area, 1e-9) > max_drift:
+                return None
+        pars = [p for p in parents if p in trial]
+        if pars and name in names_changed:
+            # moving within its parent takes nothing -- leaving it does
+            p0 = unary_union([before[p] for p in pars]).intersection(zone)
+            p1 = unary_union([trial[p] for p in pars]).intersection(zone)
+            if (trial[name].intersection(zone).difference(p1).area
+                    - before[name].intersection(zone).difference(p0).area) > 0.5:
+                return None
+        for o in names_changed:
+            if o in containers:
+                continue
+            for p in near:
+                if p == o or p in containers:
+                    continue
+                if p in names_changed and p < o:
+                    continue                 # each changed pair once
+                if {o, p} & {name} and {o, p} & set(parents):
+                    continue                 # moving within its parent takes nothing
+                grow = (trial[o].intersection(trial[p]).intersection(zone).area
+                        - before[o].intersection(before[p]).intersection(zone).area)
+                if grow > 0.5:
+                    return None
+        if not gap_zone.is_empty:
+            cover = [o for o in near if o not in containers and o not in parents]
+            cov0 = unary_union([before[o].intersection(zone) for o in cover] or [Polygon()])
+            cov1 = unary_union([trial[o].intersection(zone) for o in cover] or [Polygon()])
+            # ground anyone outside `near` holds is not a gap either
+            if cov0.difference(cov1).intersection(gap_zone).area > 0.5:
+                rest = unary_union([_body(out, idx[o]) for o in idx
+                                    if o not in near and o not in containers
+                                    and o not in parents] or [Polygon()])
+                if cov0.difference(cov1).difference(rest).intersection(gap_zone).area > 0.5:
+                    return None
+        return changes
+
+    failed = set()
+    tries = 0
+    for _ in range(64):                      # each pass merges one pair, then rescans
+        done = False
+        # only FIXED points: both on another region's outline. A free point
+        # _declutter kept is one the setting needs (moving it would stray more
+        # than the setting allows) -- and trying them all made a free ring like
+        # VL.2's ten times slower
+        edge = unary_union([_body(out, idx[o]).boundary for o in near if o != name]
+                           or [Polygon()])
+        for k in idx[name]:
+            for poly in _polys(_geom_at(out, k)):
+                cs = [tuple(c) for c in poly.exterior.coords[:-1]]
+                n = len(cs)
+                if n <= 3 or edge.is_empty:
+                    continue
+                on = _sh.dwithin(_sh.points(cs), edge, eps)
+                pairs = sorted((math.hypot(cs[i][0] - cs[(i + 1) % n][0],
+                                           cs[i][1] - cs[(i + 1) % n][1]), i) for i in range(n)
+                               if on[i] and on[(i + 1) % n])
+                for L, i in pairs:
+                    if L >= limit or tries >= 32:
+                        break
+                    P, Q = cs[i], cs[(i + 1) % n]
+                    for src, dst in ((P, Q), (Q, P)):
+                        if (src, dst) in failed:
+                            continue
+                        tries += 1
+                        ch = try_snap(src, dst)
+                        if not ch:
+                            failed.add((src, dst))
+                        if ch:
+                            for kk, _, ng in ch:
+                                out[kk]["geometry"] = mapping(ng)
+                            merged += 1
+                            done = True
+                            break
+                    if done:
+                        break
+                if done:
+                    break
+            if done:
+                break
+        if not done:
+            break
+    return merged
 
 
 # Past "exact", the settings Fewest points falls back through.
@@ -5632,9 +6085,29 @@ def resample_options(features, id_prop, names, method="shape"):
             continue
         if best is None or n < best:
             best = n
-            options.append({"points": n, "tol": float(t),
-                            "deform": _outline_moved(old, r["features"], id_prop) > FEWEST_SAFE})
+            moved = _outline_moved(old, r["features"], id_prop)
+            deform = moved > FEWEST_SAFE
+            if len(names) == 1 and method == "shape" and float(t) > FEWEST_SAFE:
+                # past FEWEST_SAFE a region (and the neighbours re-pointed with
+                # it) may drift FEWEST_DEFORM_DRIFT in area: more than the safe
+                # 5% is a deformed shape too, however little the outline moved
+                # (VL.1 came back 7.75% bigger, moved 135 px, marked safe)
+                drift = max((abs(c.get("areaDrift", 0.0)) for c in r.get("counts") or []),
+                            default=0.0)
+                deform = deform or drift > 5.0 or bool(options and options[-1]["deform"])
+            # moved: how far (px) the outline moves -- Tidy points picks the
+            # fewest points that move it no more than TIDY_MOVE
+            options.append({"points": n, "tol": float(t), "deform": deform,
+                            "moved": round(moved, 1)})
     return {"before": before, "options": options}
+
+
+# Tidy points' one click moves an outline no more than this (px, ~8.5 um at
+# 0.2125 um/px). On the real files that already clears nearly every point
+# sitting next to another (HPF 10 -> 0, CP 27 -> 0, TH 40 -> 2,
+# Caudoputamen_672 33 -> 4) at about half the points; the "keeps the shape"
+# edge moves outlines up to 150 px for little more. Refiners default small.
+TIDY_MOVE = 40.0
 
 
 def _outline_moved(old, features, id_prop):

@@ -215,6 +215,39 @@ if real.exists():
     check("even spacing can also ADD points (a fine spacing)", o["options"][0]["points"] > o["before"],
           f"{o['before']} -> {o['options'][0]['points']}")
 
+    print("\nTidy points (one click): no points bunched together, outline barely moves")
+
+    def bunched(g, px=40.0):
+        n = 0
+        for poly in T._polys(g):
+            c = list(poly.exterior.coords)[:-1]
+            m = len(c)
+            near = [False] * m
+            for i in range(m):
+                a, b = c[i], c[(i + 1) % m]
+                if math.hypot(a[0] - b[0], a[1] - b[1]) < px:
+                    near[i] = near[(i + 1) % m] = True
+            n += sum(near)
+        return n
+
+    for nm, most_left in (("HPF", 0), ("CP", 0), ("TH", 4), ("dft", 4)):
+        o = T.resample_options(feats, "name", [nm], "shape")
+        gentle = [x for x in o["options"] if not x["deform"] and x["moved"] <= T.TIDY_MOVE]
+        check(f"{nm}: there is a gentle Tidy option", bool(gentle))
+        if not gentle:
+            continue
+        pick = gentle[-1]
+        r = T.resample_at(feats, "name", [nm], pick["tol"], "shape")
+        g1 = geom(r["features"], nm)
+        b0, b1 = bunched(others0[nm]), bunched(g1)
+        check(f"{nm}: Tidy moves the outline no more than {T.TIDY_MOVE:g} px",
+              others0[nm].boundary.hausdorff_distance(g1.boundary) <= T.TIDY_MOVE + 1e-6,
+              f"{pick['moved']} px")
+        check(f"{nm}: Tidy leaves at most {most_left} points bunched together", b1 <= most_left,
+              f"{b0} -> {b1} bunched, {o['before']} -> {pick['points']} points")
+        void = c0.difference(cover(r["features"])).intersection(geom(r["features"], "hemi"))
+        check(f"{nm}: Tidy opens no gap inside the section", void.area <= 250.0, f"{void.area:.0f} px2")
+
 print("\n_ring_flaws (plain arithmetic) agrees with the shapely version")
 from shapely.geometry import LineString as _LS   # noqa: E402
 

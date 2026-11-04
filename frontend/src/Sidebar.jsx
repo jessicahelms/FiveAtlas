@@ -27,14 +27,14 @@ function sliderToReach(pos) {
   return Math.min(REACH_MAX, Math.round(v / 100) * 100);
 }
 
-// The Resample points control, in Edit points and in Edit shared borders. It
-// goes by the NUMBER of vertices: `counts` lists every count the region (or the
-// border) can reach with this method, each with the setting that gives it and
-// whether it deforms the shape; the slider steps through them and the box takes
-// a number typed in. Even spacing puts the points the same distance apart;
-// Fewest points keeps only the ones the shape needs. A count that deforms the
-// shape is asked first -- a yes holds until the method or the region changes.
-function ResampleSlider({ method, tol, onMethod, onTol, busy, scope, counts, label }) {
+// The Tidy points control, in Edit points and in Edit shared borders. One click
+// (Tidy) gives the fewest points that keep the shape -- borders stay joined, no
+// gap opens -- and Adjust holds the rest: a slider over every count the region
+// (or border) can reach, a box to type one, and even spacing. Counts, never px.
+// A count that deforms the shape is asked first; a yes holds until the method
+// or the region changes.
+function ResampleSlider({ method, tol, onMethod, onTol, busy, scope, counts, label, onTidy,
+  bunched }) {
   const shape = method === 'shape';
   const opts = counts && counts.options ? counts.options : null;
   const optIdx = opts && opts.length
@@ -44,6 +44,7 @@ function ResampleSlider({ method, tol, onMethod, onTol, busy, scope, counts, lab
   const [ask, setAsk] = useState(null);          // the option index the person was heading for
   const [typed, setTyped] = useState('');
   const [typedNote, setTypedNote] = useState(null);   // "closest it can reach" for a typed count
+  const [adjust, setAdjust] = useState(false);
   useEffect(() => { setDeformOk(false); setAsk(null); setTyped(''); setTypedNote(null); },
     [method, scope]);
   const go = (i) => {
@@ -68,50 +69,69 @@ function ResampleSlider({ method, tol, onMethod, onTol, busy, scope, counts, lab
     const fewest = opts[opts.length - 1].points;
     setTypedNote(got === want ? null
       : `${want} isn't one it can reach — the closest is ${got}.`
-        + (!shape && want < fewest ? ' Fewest points can go lower.' : ''));
+        + (!shape && want < fewest ? ' Untick "Space points evenly" to go lower.' : ''));
     go(i);
   };
   const cur = opts && opts.length ? opts[optIdx] : null;
+  const loading = !counts || counts.loading;
   return (
     <>
-      <div className="row">
-        <button className={shape ? 'btn sm' : 'btn sm on'} disabled={busy}
-          title="points the same distance apart all the way round"
-          onClick={() => onMethod && onMethod('even')}>Even spacing</button>
-        <button className={shape ? 'btn sm on' : 'btn sm'} disabled={busy}
-          title="keep only the points the shape needs: corners stay, straight runs lose theirs"
-          onClick={() => onMethod && onMethod('shape')}>Fewest points</button>
-      </div>
-      {(!counts || counts.loading) && (
-        <div className="hint dim">Working out how many vertices {label} can have…</div>
-      )}
-      {opts && opts.length === 0 && (
-        <div className="hint dim">
-          {label} can't change its number of vertices this way without breaking a
-          border or opening a gap.
+      {bunched > 0 && (
+        <div className="hint warn">
+          {bunched} points sit right next to another — orange on the map.
         </div>
       )}
-      {cur && (
+      <div className="row">
+        <button className="btn sm primary" disabled={busy}
+          title="fewer points, none bunched together — the outline barely moves, borders stay joined, no gap opens"
+          onClick={() => { setAsk(null); setTypedNote(null); if (onTidy) onTidy(); }}>
+          {loading && shape ? 'Tidy (getting ready…)' : 'Tidy'}
+        </button>
+        <button className="btn sm" onClick={() => setAdjust((v) => !v)}
+          title="choose the number of points yourself">
+          {adjust ? 'Adjust ▴' : 'Adjust…'}
+        </button>
+      </div>
+      {adjust && (
         <>
-          <div className="rng">
-            <span>more</span>
-            <input type="range" min="0" max={opts.length - 1} step="1" value={optIdx}
-              disabled={busy} onChange={(e) => { setTypedNote(null); go(Number(e.target.value)); }} />
-            <span>fewer</span>
-          </div>
-          <div className="prop-readout">
-            <span>vertices</span>
-            <span className="v">{counts.before} → {cur.points}</span>
-          </div>
-          <div className="row">
-            <input className="ctx-input" type="number" min="1" placeholder="type a number"
-              value={typed} disabled={busy}
-              title={`the counts ${label} can have: ${opts.map((o) => o.points).join(', ')}`}
-              onChange={(e) => setTyped(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter') goTyped(); }} />
-            <button className="btn sm" disabled={busy || !typed} onClick={goTyped}>Go</button>
-          </div>
-          {typedNote && <div className="hint dim">{typedNote}</div>}
+          <label className="chk"
+            title="points the same distance apart all the way round, instead of only where the shape needs them">
+            <input type="checkbox" checked={!shape} disabled={busy}
+              onChange={(e) => onMethod && onMethod(e.target.checked ? 'even' : 'shape')} />
+            Space points evenly
+          </label>
+          {loading && (
+            <div className="hint dim">Working out how many points {label} can have…</div>
+          )}
+          {opts && opts.length === 0 && (
+            <div className="hint dim">
+              {label} can't change its number of points this way without breaking a
+              border or opening a gap.
+            </div>
+          )}
+          {cur && (
+            <>
+              <div className="rng">
+                <span>more</span>
+                <input type="range" min="0" max={opts.length - 1} step="1" value={optIdx}
+                  disabled={busy} onChange={(e) => { setTypedNote(null); go(Number(e.target.value)); }} />
+                <span>fewer</span>
+              </div>
+              <div className="prop-readout">
+                <span>points</span>
+                <span className="v">{counts.before} → {cur.points}</span>
+              </div>
+              <div className="row">
+                <input className="ctx-input" type="number" min="1" placeholder="type a number"
+                  value={typed} disabled={busy}
+                  title={`the counts ${label} can have: ${opts.map((o) => o.points).join(', ')}`}
+                  onChange={(e) => setTyped(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') goTyped(); }} />
+                <button className="btn sm" disabled={busy || !typed} onClick={goTyped}>Go</button>
+              </div>
+              {typedNote && <div className="hint dim">{typedNote}</div>}
+            </>
+          )}
         </>
       )}
       {ask != null && opts && opts[ask] && (
@@ -120,7 +140,7 @@ function ResampleSlider({ method, tol, onMethod, onTol, busy, scope, counts, lab
           <div className="row">
             <button className="btn sm danger" disabled={busy}
               onClick={() => { const i = ask; setDeformOk(true); setAsk(null); if (onTol) onTol(opts[i].tol); }}>
-              Yes, {opts[ask].points} vertices
+              Yes, {opts[ask].points} points
             </button>
             <button className="btn sm" onClick={() => setAsk(null)}>No</button>
           </div>
@@ -128,7 +148,7 @@ function ResampleSlider({ method, tol, onMethod, onTol, busy, scope, counts, lab
       )}
       {cur && cur.deform && ask == null && (
         <div className="hint warn">
-          This deforms the shape — check it before you press Apply.
+          This deforms the shape — check it before you press Keep.
         </div>
       )}
     </>
@@ -144,7 +164,7 @@ function displayName(feature, idProp) {
 function Sidebar({
   info, fc, selected, onSelectName, onRegionMenu, onDeleteSelected, pointMsg,
   regionResample, onRegionResampleTol, onApplyRegionResample, onCancelRegionResample,
-  resampleOpts,
+  resampleOpts, onTidy, bunchedCount,
   loadAsk, onAnswerLoad, onLoadDamage,
   overlapAsk, onAnswerOverlap, onToggleTranslate,
   mode, onToggleModify, onToggleBorder, onToggleSplit, onToggleDissolve, onToggleDraw,
@@ -560,9 +580,10 @@ function Sidebar({
             neighbour's side of a shared border is re-pointed with it. */}
         {mode === 'modify' && selectedName && (
           <div className="prop">
-            <div className="pts-head">Resample points</div>
+            <div className="pts-head">Tidy points</div>
             <ResampleSlider method={resampleMethod} tol={resampleTol} busy={busy}
               scope={`region:${selectedName}`} counts={resampleOpts} label={selectedName}
+              onTidy={() => onTidy && onTidy('region')} bunched={bunchedCount}
               onMethod={(m) => onResampleMethod && onResampleMethod(m, 'region')}
               onTol={onRegionResampleTol} />
             {regionResample && regionResample.handles && (
@@ -585,7 +606,7 @@ function Sidebar({
                   </div>
                 )}
                 <div className="row">
-                  <button className="btn sm primary" onClick={onApplyRegionResample} disabled={busy}>Apply</button>
+                  <button className="btn sm primary" onClick={onApplyRegionResample} disabled={busy}>Keep</button>
                   <button className="btn sm" onClick={onCancelRegionResample} disabled={busy}>Cancel</button>
                 </div>
               </>
@@ -791,10 +812,11 @@ function Sidebar({
             )}
             {picks.length >= 2 && borderShared && (
               <div className="prop">
-                <div className="pts-head">Resample points</div>
+                <div className="pts-head">Tidy points</div>
                 <ResampleSlider method={resampleMethod} tol={resampleTol} busy={busy}
                   scope={`border:${picks.join('|')}`} counts={resampleOpts}
                   label={`the ${picks.join(' | ')} border`}
+                  onTidy={() => onTidy && onTidy('border')}
                   onMethod={(m) => onResampleMethod && onResampleMethod(m, 'border')}
                   onTol={onResampleTol} />
                 {resample && resample.counts && (
@@ -820,7 +842,7 @@ function Sidebar({
                       </div>
                     )}
                     <div className="row">
-                      <button className="btn sm primary" onClick={onApplyResample} disabled={busy}>Apply</button>
+                      <button className="btn sm primary" onClick={onApplyResample} disabled={busy}>Keep</button>
                       <button className="btn sm" onClick={onCancelResample} disabled={busy}>Cancel</button>
                     </div>
                   </>

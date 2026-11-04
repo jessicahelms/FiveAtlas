@@ -16,6 +16,7 @@ import {
   DrawPolygonByDraggingMode,
 } from '@deck.gl-community/editable-layers';
 import { PointEditMode, existingPointProps } from './pointEditMode';
+import { bunchedPoints, pointKey } from './bunched';
 import { stainTileLayer } from './stainLayer';
 import { morphTileLayer } from './morphLayer';
 import { subscribeMorphLive, getMorphLive } from './morphLive';
@@ -348,11 +349,21 @@ export default function Viewer({
   // every render recoloured every region on every pointer move of a drag.
   const fillAlpha = Math.max(0, Math.min(255, Math.round(Number(L.regionFill ?? 70))));
   const lineW = Math.max(0.5, Number(L.outlineWidth ?? 1));
+  // Edit points: the selected region's points that sit right next to another
+  // are drawn orange, so a cluster that Tidy points would clear is visible.
+  const bunched = useMemo(() => {
+    if (mode !== 'modify' || !fc || !selectedIndexes || selectedIndexes.length !== 1) return null;
+    const pts = bunchedPoints(fc.features[selectedIndexes[0]]);
+    return pts.length ? new Set(pts.map(pointKey)) : null;
+  }, [mode, fc, selectedIndexes]);
+  const bunchedKey = bunched ? bunched.size + ':' + (fc && fc.features.length) : 0;
   const regionTriggers = useMemo(() => ({
     getFillColor: [picksKey, colourKey, offKey, fOffKey, fillAlpha],
     getLineColor: [selectedIndexes, picksKey, colourKey, offKey, bOffKey],
     getLineWidth: [selectedIndexes, picksKey, lineW],
-  }), [picksKey, colourKey, offKey, fOffKey, bOffKey, selectedIndexes, fillAlpha, lineW]);
+    getEditHandlePointColor: [bunchedKey, bunched],
+  }), [picksKey, colourKey, offKey, fOffKey, bOffKey, selectedIndexes, fillAlpha, lineW,
+    bunchedKey, bunched]);
 
   const regions = new EditableGeoJsonLayer({
     id: 'regions',
@@ -405,7 +416,10 @@ export default function Viewer({
     editHandlePointRadiusMaxPixels: 14,
     editHandlePointOutline: true,
     editHandlePointStrokeWidth: 2,
-    getEditHandlePointColor: [255, 60, 60, 255],
+    getEditHandlePointColor: bunched
+      ? (h) => (h && h.geometry && bunched.has(pointKey(h.geometry.coordinates))
+        ? [255, 165, 0, 255] : [255, 60, 60, 255])
+      : [255, 60, 60, 255],
     getEditHandlePointOutlineColor: [255, 255, 255, 255],
     onEdit,
   });

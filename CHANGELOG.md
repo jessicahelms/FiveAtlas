@@ -25,22 +25,21 @@ people will care about most and keep that title short.
   keeps the name. Before, that line was refused with "the cut line doesn't
   touch the region".
 
-### Far fewer points, same shape
+### Tidy points: one click, no more points bunched together
 
-- **Resample points** now goes by the **number of vertices**, in Edit points
-  and on a shared border: drag the slider or type the number you want, and
-  the readout shows e.g. **81 → 29**. The slider steps through the counts
-  the region (or border) can actually reach.
-- New **Fewest points** choice next to Even spacing: it keeps only the points
-  the shape needs — corners stay, straight runs lose theirs. On a real
-  section CP goes from 141 to 28 and TH from 132 to 34 while keeping their
-  shape. Borders with neighbours stay joined.
-- Whenever a count would change the shape, it asks first: **"The shape will
-  deform. Do you want fewer vertices?"** — say yes and it goes lower still
-  (CP: 17).
-- Resample points no longer opens a gap where a region runs close to a
-  neighbour without touching it, and a border with a thin neighbour (like
-  V3) is thinned too instead of being left as a dense bunch of points.
+- In **Edit points**, points that sit right next to another are shown
+  **orange**, and the box says how many. Press **Tidy** and they're gone:
+  fewer points, the outline barely moves, borders with neighbours stay
+  joined and no gap opens. Then **Keep** or **Cancel**. On a real section TH
+  went from 132 points (40 of them bunched) to 53 (2), CP from 141 to 59.
+- It works on regions drawn inside another one too (Caudoputamen_672 inside
+  CP, a field inside HPF) — before, those were left exactly as dense as
+  they were.
+- **Adjust…** lets you pick the number of points yourself: a slider or a
+  number you type, and **Space points evenly** if you want them evenly
+  spaced. Whenever a count would change the shape, it asks first: **"The
+  shape will deform. Do you want fewer vertices?"**
+- The same **Tidy** is there for a shared border in Edit shared borders.
 
 ### Split finds the region by itself
 

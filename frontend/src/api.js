@@ -100,6 +100,17 @@ export async function partitionRegions(ds, regions, fc, tol = 40, snapTo = null,
 // (topology.FEWEST_SAFE). The slider and the previews both use it.
 export const FEWEST_SAFE = 150;
 
+// Tidy points' one click: the fewest points that move the outline no more than
+// this many px (topology.TIDY_MOVE) -- nearly every bunched point goes, and the
+// shape barely changes. Adjust goes further.
+export const TIDY_MOVE = 40;
+export function tidyPick(options) {
+  const safe = (options || []).filter((o) => !o.deform);
+  const gentle = safe.filter((o) => o.moved == null || o.moved <= TIDY_MOVE);
+  if (gentle.length) return gentle[gentle.length - 1];
+  return safe.length ? safe[0] : null;
+}
+
 // outline within `tol` px of where it was. deform: the person agreed the shape
 // may deform (a region's area may then change by up to 25%, not 5%).
 // exact: one notch of the by-number slider -- exactly the result fewestOptions

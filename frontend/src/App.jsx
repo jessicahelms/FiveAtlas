@@ -5,6 +5,7 @@ import ChannelPanel from './ChannelPanel';
 import DatasetBar from './DatasetBar';
 import * as api from './api';
 import { parseName, isDamage, nextNumber, formatName } from './damage';
+import { bunchedPoints } from './bunched';
 
 const MOVE_EDITS = new Set([
   'addPosition', 'removePosition', 'movePosition', 'finishMovePosition',
@@ -616,8 +617,10 @@ export default function App() {
   // are kept -- even spacing at its coarsest still left 45-130 points a region
   // and moved corners by ~200 px on the real files. A ref too, for the
   // debounced previews.
-  const [resampleMethod, setResampleMethod] = useState('even');
-  const resampleMethodRef = useRef('even');
+  // Fewest points is the default: it is what Tidy points uses, so its counts
+  // are the ones worked out in the background while a region is selected
+  const [resampleMethod, setResampleMethod] = useState('shape');
+  const resampleMethodRef = useRef('shape');
   const [snapTol, setSnapTol] = useState(40);       // px reach for Share borders / Merge gap bridging
   // On (the default): every free pixel in the gap is filled. Off: a gap pixel
   // is filled only if its line to BOTH picks is clear, so the strips beside a
@@ -2616,11 +2619,16 @@ export default function App() {
       if (seq !== resampleOptsSeq.current) return;
       const options = res.options || [];
       setResampleOpts({ scope, dsId, method, before: res.before, options });
-      // start without deforming: Fewest points a fair way down (the count
-      // nearest 60% of now); even spacing at its usual 150 px
+      // start without deforming: Tidy points goes straight to its gentle pick
+      // (api.tidyPick); otherwise Fewest points a fair way down (the count
+      // nearest 60% of now) and even spacing at its usual 150 px
       const safe = options.filter((o) => !o.deform);
+      if (thenPreview === 'tidy' && !safe.length) {
+        const msg = 'Already tidy: no point can go without breaking a border or opening a gap.';
+        if (which === 'region') setPointMsg(msg); else setBorderMsg(msg);
+      }
       if (thenPreview && safe.length) {
-        const pick = method === 'shape'
+        const pick = thenPreview === 'tidy' ? api.tidyPick(options) : method === 'shape'
           ? safe.reduce((b, o) => (Math.abs(o.points - res.before * 0.6)
             < Math.abs(b.points - res.before * 0.6) ? o : b))
           : safe.reduce((b, o) => (Math.abs(o.tol - 150) < Math.abs(b.tol - 150) ? o : b));
@@ -2643,6 +2651,36 @@ export default function App() {
     setResampleMethod(method);
     loadResampleOptions(which, method, true);
   }, [loadResampleOptions]);
+
+  // Tidy points: one click to the fewest points that move the outline no more
+  // than api.TIDY_MOVE (and never deform it). The counts are usually worked out
+  // already, in the background, so the preview shows at once.
+  const tidyResample = useCallback((which) => {
+    resampleMethodRef.current = 'shape';
+    setResampleMethod('shape');
+    const scope = which === 'region' ? regionScope : borderScope;
+    const o = resampleOpts;
+    if (o && !o.loading && o.scope === scope && o.dsId === dsId && o.method === 'shape') {
+      const safe = (o.options || []).filter((x) => !x.deform);
+      if (!safe.length) {
+        const msg = 'Already tidy: no point can go without breaking a border or opening a gap.';
+        if (which === 'region') setPointMsg(msg); else setBorderMsg(msg);
+        return;
+      }
+      const t = api.tidyPick(o.options).tol;
+      if (which === 'region') previewRegionResample(t, 'shape'); else previewResample(t, 'shape');
+      return;
+    }
+    loadResampleOptions(which, 'shape', 'tidy');
+  }, [regionScope, borderScope, resampleOpts, dsId, previewRegionResample, previewResample,
+    loadResampleOptions]);
+
+  // how many of the selected region's points sit right next to another (Edit
+  // points shows them orange; the Tidy points box says how many)
+  const bunchedCount = useMemo(() => {
+    if (mode !== 'modify' || !fc || selected.length !== 1 || !fc.features[selected[0]]) return 0;
+    return bunchedPoints(fc.features[selected[0]]).length;
+  }, [mode, fc, selected]);
 
   // The Resample box showing for a region or a shared border it has no counts
   // for (another region, other picks, the other method): work them out, without
@@ -3344,7 +3382,7 @@ export default function App() {
                 onDeleteSelected={deleteSelectedRegions}
                 pointMsg={pointMsg}
                 regionResample={regionResample} onRegionResampleTol={previewRegionResample}
-                resampleOpts={shownResampleOpts}
+                resampleOpts={shownResampleOpts} onTidy={tidyResample} bunchedCount={bunchedCount}
                 onApplyRegionResample={applyRegionResample}
                 onCancelRegionResample={cancelRegionResample}
                 loadAsk={loadAsk} onAnswerLoad={answerLoad} onLoadDamage={answerLoadDamage}
