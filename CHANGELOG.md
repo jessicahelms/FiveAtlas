@@ -11,6 +11,18 @@ The first `### ` title of a section is also what the app's update banner
 shows ("FiveAtlas 1.3.2 is out — Faster on laptops"), so lead with the change
 people will care about most and keep that title short.
 
+## v1.4.1
+
+### Remove a stray piece of a region
+
+- **Delete this piece**: right-click one separate piece of a region on the
+  image, like a triangle of Caudoputamen off on its own, and only that piece
+  goes. The rest of the region stays, and **Ctrl+Z** brings it back.
+- **Split region** across a gap: draw the line through the gap between a
+  region's separate pieces and they become two regions. The larger side
+  keeps the name. Before, that line was refused with "the cut line doesn't
+  touch the region".
+
 ## v1.4.0
 
 ### Faster, smoother viewing

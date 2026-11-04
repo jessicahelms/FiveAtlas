@@ -148,13 +148,17 @@ ITEMS = [
     "several selected, Delete selected removes them all in one step, and one "
     "Ctrl+Z brings them all back. If a name appears twice with “part "
     "1/2” beside it, that is one region made of two separate pieces, and "
-    "anything you do applies to both.",
+    "anything you do applies to both — except Delete this piece, below.",
 
     "Right click a region (two-finger click on a Mac trackpad), either in the "
     "list or on the image, to rename it, change its colour, bring it to the "
     "front, send it to the back, or delete it. Bring to front draws it over "
     "everything else, so it is the one your clicks land on; Send to back draws "
-    "it behind everything else, so whatever it contains stays visible.",
+    "it behind everything else, so whatever it contains stays visible. On a "
+    "region made of separate pieces, right-clicking one piece on the image "
+    "also offers Delete this piece: only that piece goes, the rest of the "
+    "region stays, and Ctrl+Z brings it back. Use it for a stray island a "
+    "region picked up, like a triangle of Caudoputamen off on its own.",
 
     # -- switch off --------------------------------------------------------------------
     "The use button beside each region in the list switches it off: it is hidden "
@@ -256,7 +260,9 @@ ITEMS = [
     "Split a region cuts one region into two. Select the region, then draw a "
     "line all the way across it on the image, clicking for each point, and "
     "right click (or press Enter) to finish. Press Esc to throw the line away "
-    "and start again.",
+    "and start again. To separate a piece that is already apart from the rest, "
+    "draw the line through the gap between them instead: the pieces on each "
+    "side become their own region, and the larger side keeps the name.",
 
     # -- drawing a region: replace / overlap / fit around --------------------------------------
     "Add a new region or damage lets you draw a region from scratch. Choose "
