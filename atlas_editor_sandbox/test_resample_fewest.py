@@ -185,11 +185,35 @@ if real.exists():
         check(f"{nm}: counts only go down along the slider", pts == sorted(set(pts), reverse=True), pts)
         check(f"{nm}: every count is below what it has now", all(p < o["before"] for p in pts),
               f"before {o['before']}")
-        check(f"{nm}: options past {T.FEWEST_SAFE:g} px are marked as deforming",
-              all(x["deform"] == (x["tol"] > T.FEWEST_SAFE) for x in o["options"]))
+        old = {nm: others0[nm]}
+        wrong = [x for x in o["options"]
+                 if x["deform"] != (T._outline_moved(
+                     old, T.resample_region_at(feats, "name", nm, x["tol"])["features"], "name")
+                     > T.FEWEST_SAFE)]
+        check(f"{nm}: an option is marked as deforming exactly when the outline moves "
+              f"more than {T.FEWEST_SAFE:g} px", not wrong, wrong[:2])
+        check(f"{nm}: the deforming ones come last", [x["deform"] for x in o["options"]]
+              == sorted(x["deform"] for x in o["options"]))
         bad = [x for x in o["options"]
                if T.resample_region_at(feats, "name", nm, x["tol"])["handles"]["after"] != x["points"]]
         check(f"{nm}: picking a notch gives exactly the count it showed", not bad, bad[:2])
+
+    print("\nby number for even spacing, and on a shared border")
+    for names, meth in ((["HPF"], "even"), (["TH"], "even"), (["HPF", "dft"], "even"),
+                        (["HPF", "dft"], "shape"), (["CP", "dft"], "shape")):
+        o = T.resample_options(feats, "name", names, meth)
+        pts = [x["points"] for x in o["options"]]
+        tag = f"{'+'.join(names)} {meth}"
+        check(f"{tag}: counts only go down along the slider", pts == sorted(set(pts), reverse=True), pts)
+        check(f"{tag}: there is a choice to make", len(pts) >= 3, pts)
+        bad = [x for x in o["options"]
+               if T.resample_at(feats, "name", names, x["tol"], meth)["handles"]["after"] != x["points"]]
+        check(f"{tag}: picking a notch gives exactly the count it showed", not bad, bad[:2])
+        if meth == "shape":
+            check(f"{tag}: Fewest points only ever lowers the count", all(p < o["before"] for p in pts))
+    o = T.resample_options(feats, "name", ["HPF"], "even")
+    check("even spacing can also ADD points (a fine spacing)", o["options"][0]["points"] > o["before"],
+          f"{o['before']} -> {o['options'][0]['points']}")
 
 print("\n_ring_flaws (plain arithmetic) agrees with the shapely version")
 from shapely.geometry import LineString as _LS   # noqa: E402

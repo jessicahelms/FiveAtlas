@@ -3,7 +3,7 @@ import { parseName, nextNumber, formatName } from './damage';
 import { displayVersion } from './version';
 import { withStableHandlers, sameFeatureProperties } from './stableProps';
 import FoldTitle from './FoldTitle';
-import { FEWEST_SAFE } from './api';
+
 
 // Snap reach runs on a LOG scale. Linear, a range wide enough to bridge a torn
 // section would give the 5-50 px end -- where most borders actually are -- about
@@ -27,43 +27,51 @@ function sliderToReach(pos) {
   return Math.min(REACH_MAX, Math.round(v / 100) * 100);
 }
 
-// The Resample points control, in Edit points and in Edit shared borders. Even
-// spacing: the slider is the gap between points. Fewest points: it is how far
-// the outline may move, and only the points the shape needs are kept -- so it
-// can go far lower than even spacing without cutting corners. Past FEWEST_SAFE
-// px it goes lower still, but the shape deforms, so the slider stops there and
-// asks first; a yes holds until the method or the region changes.
-// Fewest points moves through these px settings, one slider notch each (the
-// backend's _FEWEST_LADDER). A straight 1-1000 px slider squeezed everything
-// up to FEWEST_SAFE into its left sixth and showed values like 613 px.
-const FEWEST_STEPS = [1, 2, 3, 5, 7, 10, 15, 20, 30, 40, 60, 80, 110, 150,
-  225, 300, 450, 600, 750, 1000];
-const fewestIndex = (px) => FEWEST_STEPS.reduce((best, v, i) =>
-  (Math.abs(v - px) < Math.abs(FEWEST_STEPS[best] - px) ? i : best), 0);
-
-function ResampleSlider({ method, tol, onMethod, onTol, busy, used, scope, counts }) {
+// The Resample points control, in Edit points and in Edit shared borders. It
+// goes by the NUMBER of vertices: `counts` lists every count the region (or the
+// border) can reach with this method, each with the setting that gives it and
+// whether it deforms the shape; the slider steps through them and the box takes
+// a number typed in. Even spacing puts the points the same distance apart;
+// Fewest points keeps only the ones the shape needs. A count that deforms the
+// shape is asked first -- a yes holds until the method or the region changes.
+function ResampleSlider({ method, tol, onMethod, onTol, busy, scope, counts, label }) {
   const shape = method === 'shape';
-  // By number (Edit points): `counts` lists the point counts this region can
-  // reach, each with the setting that gives it; the slider steps through them.
-  const opts = shape && counts && counts.options ? counts.options : null;
+  const opts = counts && counts.options ? counts.options : null;
   const optIdx = opts && opts.length
     ? opts.reduce((best, o, i) => (Math.abs(o.tol - tol) < Math.abs(opts[best].tol - tol) ? i : best), 0)
     : 0;
   const [deformOk, setDeformOk] = useState(false);
-  const [ask, setAsk] = useState(null);          // the value the person was heading for
-  useEffect(() => { setDeformOk(false); setAsk(null); }, [method, scope]);
-  const deforming = shape && tol > FEWEST_SAFE;
-  const move = (v) => {
-    if (shape && v > FEWEST_SAFE && !deformOk) {
-      setAsk(v);
-      // stop at the edge: the last count that keeps the shape
-      const safe = opts ? opts.filter((o) => !o.deform).map((o) => o.tol) : [FEWEST_SAFE];
-      const edge = safe.length ? Math.max(...safe) : null;
-      if (edge != null && tol !== edge && onTol) onTol(edge);
+  const [ask, setAsk] = useState(null);          // the option index the person was heading for
+  const [typed, setTyped] = useState('');
+  const [typedNote, setTypedNote] = useState(null);   // "closest it can reach" for a typed count
+  useEffect(() => { setDeformOk(false); setAsk(null); setTyped(''); setTypedNote(null); },
+    [method, scope]);
+  const go = (i) => {
+    if (!opts || i < 0 || i >= opts.length) return;
+    if (opts[i].deform && !deformOk) {
+      setAsk(i);
+      // stop at the edge: the nearest count before it that keeps the shape
+      let edge = -1;
+      for (let k = i - 1; k >= 0; k -= 1) { if (!opts[k].deform) { edge = k; break; } }
+      if (edge >= 0 && edge !== optIdx && onTol) onTol(opts[edge].tol);
       return;
     }
-    if (onTol) onTol(v);
+    setAsk(null);
+    if (onTol) onTol(opts[i].tol);
   };
+  const goTyped = () => {
+    const want = Number(typed);
+    if (!opts || !opts.length || !Number.isFinite(want) || want <= 0) return;
+    const i = opts.reduce((best, o, k) =>
+      (Math.abs(o.points - want) < Math.abs(opts[best].points - want) ? k : best), 0);
+    const got = opts[i].points;
+    const fewest = opts[opts.length - 1].points;
+    setTypedNote(got === want ? null
+      : `${want} isn't one it can reach — the closest is ${got}.`
+        + (!shape && want < fewest ? ' Fewest points can go lower.' : ''));
+    go(i);
+  };
+  const cur = opts && opts.length ? opts[optIdx] : null;
   return (
     <>
       <div className="row">
@@ -74,73 +82,53 @@ function ResampleSlider({ method, tol, onMethod, onTol, busy, used, scope, count
           title="keep only the points the shape needs: corners stay, straight runs lose theirs"
           onClick={() => onMethod && onMethod('shape')}>Fewest points</button>
       </div>
-      {shape && counts && counts.loading && (
-        <div className="hint dim">Working out how few vertices {counts.name} can have…</div>
+      {(!counts || counts.loading) && (
+        <div className="hint dim">Working out how many vertices {label} can have…</div>
       )}
       {opts && opts.length === 0 && (
         <div className="hint dim">
-          {counts.name} can't lose any vertices without breaking a border or opening a gap.
+          {label} can't change its number of vertices this way without breaking a
+          border or opening a gap.
         </div>
       )}
-      {opts && opts.length > 0 && (
+      {cur && (
         <>
           <div className="rng">
             <span>more</span>
             <input type="range" min="0" max={opts.length - 1} step="1" value={optIdx}
-              disabled={busy} onChange={(e) => move(opts[Number(e.target.value)].tol)} />
+              disabled={busy} onChange={(e) => { setTypedNote(null); go(Number(e.target.value)); }} />
             <span>fewer</span>
           </div>
           <div className="prop-readout">
             <span>vertices</span>
-            <span className="v">{counts.before} → {opts[optIdx].points}</span>
+            <span className="v">{counts.before} → {cur.points}</span>
           </div>
-          <div className="hint dim">
-            the outline moves at most {opts[optIdx].tol} px
+          <div className="row">
+            <input className="ctx-input" type="number" min="1" placeholder="type a number"
+              value={typed} disabled={busy}
+              title={`the counts ${label} can have: ${opts.map((o) => o.points).join(', ')}`}
+              onChange={(e) => setTyped(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') goTyped(); }} />
+            <button className="btn sm" disabled={busy || !typed} onClick={goTyped}>Go</button>
           </div>
+          {typedNote && <div className="hint dim">{typedNote}</div>}
         </>
       )}
-      {/* Even spacing, and Fewest points on a shared border: a px setting */}
-      {!(shape && counts) && (
-        <>
-          <div className="rng">
-            <span>{shape ? 'exact' : 'fine'}</span>
-            {shape ? (
-              <input type="range" min="0" max={FEWEST_STEPS.length - 1} step="1"
-                value={fewestIndex(tol)} disabled={busy}
-                onChange={(e) => move(FEWEST_STEPS[Number(e.target.value)])} />
-            ) : (
-              <input type="range" min="20" max="600" step="10" value={tol} disabled={busy}
-                onChange={(e) => move(Number(e.target.value))} />
-            )}
-            <span>{shape ? 'fewest' : 'coarse'}</span>
-          </div>
-          <div className="prop-readout">
-            <span>{shape ? 'outline moves at most' : 'spacing'}</span>
-            <span className="v">{tol} px</span>
-          </div>
-        </>
-      )}
-      {shape && used != null && used < tol && (
-        <div className="hint dim">
-          Fewest at {used} px — a coarser setting would have moved a neighbour or
-          broken a border, so it was not used.
-        </div>
-      )}
-      {ask != null && (
+      {ask != null && opts && opts[ask] && (
         <div className="hint warn">
           The shape will deform. Do you want fewer vertices?
           <div className="row">
             <button className="btn sm danger" disabled={busy}
-              onClick={() => { const v = ask; setDeformOk(true); setAsk(null); if (onTol) onTol(v); }}>
-              Yes, fewer vertices
+              onClick={() => { const i = ask; setDeformOk(true); setAsk(null); if (onTol) onTol(opts[i].tol); }}>
+              Yes, {opts[ask].points} vertices
             </button>
             <button className="btn sm" onClick={() => setAsk(null)}>No</button>
           </div>
         </div>
       )}
-      {deforming && ask == null && (
+      {cur && cur.deform && ask == null && (
         <div className="hint warn">
-          Past {FEWEST_SAFE} px the shape deforms — check it before you press Apply.
+          This deforms the shape — check it before you press Apply.
         </div>
       )}
     </>
@@ -156,7 +144,7 @@ function displayName(feature, idProp) {
 function Sidebar({
   info, fc, selected, onSelectName, onRegionMenu, onDeleteSelected, pointMsg,
   regionResample, onRegionResampleTol, onApplyRegionResample, onCancelRegionResample,
-  fewestOpts,
+  resampleOpts,
   loadAsk, onAnswerLoad, onLoadDamage,
   overlapAsk, onAnswerOverlap, onToggleTranslate,
   mode, onToggleModify, onToggleBorder, onToggleSplit, onToggleDissolve, onToggleDraw,
@@ -574,8 +562,7 @@ function Sidebar({
           <div className="prop">
             <div className="pts-head">Resample points</div>
             <ResampleSlider method={resampleMethod} tol={resampleTol} busy={busy}
-              scope={`region:${selectedName}`} counts={fewestOpts}
-              used={regionResample && regionResample.name === selectedName ? regionResample.used : null}
+              scope={`region:${selectedName}`} counts={resampleOpts} label={selectedName}
               onMethod={(m) => onResampleMethod && onResampleMethod(m, 'region')}
               onTol={onRegionResampleTol} />
             {regionResample && regionResample.handles && (
@@ -806,7 +793,8 @@ function Sidebar({
               <div className="prop">
                 <div className="pts-head">Resample points</div>
                 <ResampleSlider method={resampleMethod} tol={resampleTol} busy={busy}
-                  scope={`border:${picks.join('|')}`}
+                  scope={`border:${picks.join('|')}`} counts={resampleOpts}
+                  label={`the ${picks.join(' | ')} border`}
                   onMethod={(m) => onResampleMethod && onResampleMethod(m, 'border')}
                   onTol={onResampleTol} />
                 {resample && resample.counts && (

@@ -193,8 +193,6 @@ function closestArcToPointIndex(arcs, pt) {
   return best;
 }
 
-const { FEWEST_SAFE } = api;
-
 function featureName(feature, idProp = 'name') {
   const props = (feature && feature.properties) || {};
   const value = props[idProp] ?? props.name;
@@ -1786,8 +1784,10 @@ export default function App() {
       const source = resample && resample.baseFc ? resample.baseFc : fcRef.current;
       setBusy(true);
       try {
+        // each notch is a setting resampleOptions already worked out: ask for
+        // exactly that result
         const res = await api.resampleRegions(dsId, borderPicks, source, tolValue, method,
-          method === 'shape' && tolValue > FEWEST_SAFE);
+          false, true);
         if (seq !== resampleSeq.current) return;   // cancelled or superseded
         // Draw the previewed handles straight away -- the whole point is to see
         // the density change while dragging the slider, not after Apply.
@@ -1844,6 +1844,7 @@ export default function App() {
     const kept = resample.handles ? resample.handles.after : null;
     resampleUndoRef.current = null;
     setResample(null);
+    setResampleOpts(null);        // the border changed: its counts are worked out again
     setBorderMsg(kept != null
       ? `Resampled — ${kept} drag points on the border.`
       : 'Resampled.');
@@ -2571,10 +2572,10 @@ export default function App() {
       const source = prev && prev.name === name && prev.dsId === dsId ? prev.baseFc : fcRef.current;
       setBusy(true);
       try {
-        // Fewest points here is by NUMBER: each notch is a setting fewestOptions
-        // already worked out, so ask for exactly that result
+        // each notch is a setting resampleOptions already worked out: ask for
+        // exactly that result
         const res = await api.resampleRegions(dsId, [name], source, tolValue, method,
-          method === 'shape' && tolValue > FEWEST_SAFE, method === 'shape');
+          false, true);
         if (seq !== regionResampleSeq.current) return;   // cancelled or superseded
         const previewFc = asFc(res, source);
         const state = { name, dsId, tol: res.tol, counts: res.counts, handles: res.handles,
@@ -2588,55 +2589,76 @@ export default function App() {
     }, 300);
   }, [dsId, selectedName]);
 
-  // Fewest points in Edit points goes by the NUMBER of points: the counts this
-  // region can reach (each a real, guarded result), worked out once -- 1-4 s on
-  // the real file -- and then stepped through. Spacing in px was what the
-  // slider meant before, and nobody thinks in px. {name, dsId, before, options}
-  // or {name, loading}; dropped after Apply, since the outline changed.
-  const [fewestOpts, setFewestOpts] = useState(null);
-  const fewestSeq = useRef(0);
-  const loadFewestOptions = useCallback(async (name, thenPreview) => {
-    if (!name || !dsId) return;
-    const seq = ++fewestSeq.current;
-    const prev = regionResampleRef.current;
-    const source = prev && prev.name === name && prev.dsId === dsId ? prev.baseFc : fcRef.current;
-    setFewestOpts({ name, dsId, loading: true });
+  // Resample points goes by the NUMBER of points, in Edit points and on a shared
+  // border alike: the counts reachable (each a real, guarded result) are worked
+  // out once -- 1-4 s on the real file -- and the slider steps through them,
+  // each marked if it would deform the shape (the page asks first). Spacing in
+  // px was what the slider meant before, and nobody thinks in px.
+  // {scope, dsId, method, before, options} or {scope, dsId, method, loading};
+  // dropped after Apply, since the outline changed.
+  const [resampleOpts, setResampleOpts] = useState(null);
+  const resampleOptsSeq = useRef(0);
+  const regionScope = selectedName ? `region:${selectedName}` : null;
+  const borderScope = borderPicks.length >= 2 ? `border:${borderPicks.join('|')}` : null;
+  const loadResampleOptions = useCallback(async (which, method, thenPreview) => {
+    const names = which === 'region' ? (selectedName ? [selectedName] : []) : borderPicks;
+    const scope = which === 'region' ? regionScope : borderScope;
+    if (!scope || !dsId || names.length < 1) return;
+    const seq = ++resampleOptsSeq.current;
+    let source = fcRef.current;           // always the outline before any preview
+    if (which === 'region') {
+      const prev = regionResampleRef.current;
+      if (prev && prev.name === names[0] && prev.dsId === dsId) source = prev.baseFc;
+    } else if (resample && resample.baseFc) source = resample.baseFc;
+    setResampleOpts({ scope, dsId, method, loading: true });
     try {
-      const res = await api.fewestOptions(dsId, name, source);
-      if (seq !== fewestSeq.current) return;
-      setFewestOpts({ name, dsId, before: res.before, options: res.options || [] });
-      // start a fair way down without deforming: the count nearest 60% of now
-      const safe = (res.options || []).filter((o) => !o.deform);
+      const res = await api.resampleOptions(dsId, names, source, method);
+      if (seq !== resampleOptsSeq.current) return;
+      const options = res.options || [];
+      setResampleOpts({ scope, dsId, method, before: res.before, options });
+      // start without deforming: Fewest points a fair way down (the count
+      // nearest 60% of now); even spacing at its usual 150 px
+      const safe = options.filter((o) => !o.deform);
       if (thenPreview && safe.length) {
-        const aim = res.before * 0.6;
-        const pick = safe.reduce((b, o) => (Math.abs(o.points - aim) < Math.abs(b.points - aim) ? o : b));
-        previewRegionResample(pick.tol, 'shape');
+        const pick = method === 'shape'
+          ? safe.reduce((b, o) => (Math.abs(o.points - res.before * 0.6)
+            < Math.abs(b.points - res.before * 0.6) ? o : b))
+          : safe.reduce((b, o) => (Math.abs(o.tol - 150) < Math.abs(b.tol - 150) ? o : b));
+        if (which === 'region') previewRegionResample(pick.tol, method);
+        else previewResample(pick.tol, method);
       }
     } catch (e) {
-      if (seq === fewestSeq.current) { setFewestOpts(null); setPointMsg(apiDetail(e)); }
+      if (seq === resampleOptsSeq.current) {
+        setResampleOpts(null);
+        if (which === 'region') setPointMsg(apiDetail(e)); else setBorderMsg(apiDetail(e));
+      }
     }
-  }, [dsId, previewRegionResample]);
+  }, [dsId, selectedName, borderPicks, regionScope, borderScope, resample,
+    previewRegionResample, previewResample]);
 
-  // Even spacing <-> Fewest points: the slider means something else in each, so
-  // it starts again at that method's default and the preview is redrawn at once.
-  const RESAMPLE_START = { even: 150, shape: 20 };
+  // Even spacing <-> Fewest points: different counts, so they are worked out
+  // again and the preview is redrawn at once.
   const chooseResampleMethod = useCallback((method, which) => {
     resampleMethodRef.current = method;
     setResampleMethod(method);
-    const t = RESAMPLE_START[method] || 150;
-    if (which === 'region' && method === 'shape') loadFewestOptions(selectedName, true);
-    else if (which === 'region') previewRegionResample(t, method);
-    else previewResample(t, method);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [previewRegionResample, previewResample, loadFewestOptions, selectedName]);
+    loadResampleOptions(which, method, true);
+  }, [loadResampleOptions]);
 
-  // picking another region (or coming back to Edit points) with Fewest points
-  // on: work out its counts, without previewing until the slider moves
+  // The Resample box showing for a region or a shared border it has no counts
+  // for (another region, other picks, the other method): work them out, without
+  // previewing until the slider moves.
+  const resampleWhich = mode === 'modify' && regionScope ? 'region'
+    : (mode === 'border' && borderShared && borderScope ? 'border' : null);
+  const resampleScope = resampleWhich === 'region' ? regionScope
+    : (resampleWhich === 'border' ? borderScope : null);
   useEffect(() => {
-    if (mode !== 'modify' || resampleMethod !== 'shape' || !selectedName) return;
-    if (fewestOpts && fewestOpts.name === selectedName && fewestOpts.dsId === dsId) return;
-    loadFewestOptions(selectedName, false);
-  }, [mode, resampleMethod, selectedName, dsId, fewestOpts, loadFewestOptions]);
+    if (!resampleWhich) return;
+    const o = resampleOpts;
+    if (o && o.scope === resampleScope && o.dsId === dsId && o.method === resampleMethod) return;
+    loadResampleOptions(resampleWhich, resampleMethod, false);
+  }, [resampleWhich, resampleScope, resampleMethod, dsId, resampleOpts, loadResampleOptions]);
+  const shownResampleOpts = resampleOpts && resampleOpts.scope === resampleScope
+    && resampleOpts.dsId === dsId && resampleOpts.method === resampleMethod ? resampleOpts : null;
 
   const applyRegionResample = useCallback(() => {
     const rr = regionResampleRef.current;
@@ -2648,7 +2670,7 @@ export default function App() {
     }
     regionResampleRef.current = null;
     setRegionResample(null);
-    setFewestOpts(null);          // the outline changed: its counts are worked out again
+    setResampleOpts(null);        // the outline changed: its counts are worked out again
     commit(rr.fc); setBaseline(rr.fc);
     setMoved((prev) => { const n = new Set(prev); (rr.counts || []).forEach((c) => n.add(c.region)); return n; });
     const nb = (rr.counts || []).filter((c) => c.shared).map((c) => c.region);
@@ -3322,7 +3344,7 @@ export default function App() {
                 onDeleteSelected={deleteSelectedRegions}
                 pointMsg={pointMsg}
                 regionResample={regionResample} onRegionResampleTol={previewRegionResample}
-                fewestOpts={fewestOpts && fewestOpts.name === selectedName ? fewestOpts : null}
+                resampleOpts={shownResampleOpts}
                 onApplyRegionResample={applyRegionResample}
                 onCancelRegionResample={cancelRegionResample}
                 loadAsk={loadAsk} onAnswerLoad={answerLoad} onLoadDamage={answerLoadDamage}

@@ -5572,8 +5572,10 @@ def resample_region_fewest(features, id_prop, name, tol, max_drift=0.05, reach=5
 # kept, so picking a notch shows its preview at once.
 _FEWEST_GRID = (1, 2, 3, 4, 5, 7, 10, 12, 15, 20, 25, 30, 40, 50, 60, 80, 95, 110,
                 130, 150, 190, 225, 300, 375, 450, 600, 750, 1000)
-_fewest_cache = {}            # (features digest, region, tol) -> resample_region result
-_FEWEST_CACHE_MAX = len(_FEWEST_GRID) + 8
+# Even spacing's settings, px between points: the old slider's 20-600 range
+_EVEN_GRID = (20, 30, 40, 50, 60, 80, 100, 120, 150, 200, 250, 300, 400, 500, 600)
+_resample_cache = {}          # (features digest, names, method, tol) -> result
+_RESAMPLE_CACHE_MAX = 48
 
 
 def _features_digest(features):
@@ -5581,37 +5583,82 @@ def _features_digest(features):
     return hashlib.md5(json.dumps(features, separators=(",", ":")).encode()).hexdigest()
 
 
-def resample_region_at(features, id_prop, name, tol, digest=None):
-    """Fewest points for ONE region at exactly `tol` px -- the area may drift 5%
-    up to FEWEST_SAFE and FEWEST_DEFORM_DRIFT past it (after the page asked).
-    Remembered, so the notch a person picks is the result they were shown."""
+def resample_at(features, id_prop, names, tol, method="shape", digest=None):
+    """Resample points at exactly one setting, for one region (Edit points) or
+    the shared border of several (Edit shared borders), remembered -- so the
+    notch a person picks is exactly the result they were shown. One region with
+    Fewest points may drift 5% in area up to FEWEST_SAFE and
+    FEWEST_DEFORM_DRIFT past it (the page asks first)."""
+    names = [str(n) for n in names]
     tol = float(tol)
-    key = (digest or _features_digest(features), str(name), tol)
-    hit = _fewest_cache.pop(key, None)
+    key = (digest or _features_digest(features), tuple(names), method, tol)
+    hit = _resample_cache.pop(key, None)
     if hit is None:
-        drift = FEWEST_DEFORM_DRIFT if tol > FEWEST_SAFE else 0.05
-        hit = resample_region(features, id_prop, name, tol=tol, max_drift=drift, method="shape")
-    _fewest_cache[key] = hit                      # most recent last
-    while len(_fewest_cache) > _FEWEST_CACHE_MAX:
-        _fewest_cache.pop(next(iter(_fewest_cache)))
+        if len(names) == 1 and method == "shape":
+            drift = FEWEST_DEFORM_DRIFT if tol > FEWEST_SAFE else 0.05
+            hit = resample_region(features, id_prop, names[0], tol=tol, max_drift=drift,
+                                  method="shape")
+        elif len(names) == 1:
+            hit = resample_region(features, id_prop, names[0], tol=tol, method=method)
+        else:
+            hit = resample_regions(features, id_prop, names, tol=tol, method=method)
+    _resample_cache[key] = hit                    # most recent last
+    while len(_resample_cache) > _RESAMPLE_CACHE_MAX:
+        _resample_cache.pop(next(iter(_resample_cache)))
     return hit
 
 
-def fewest_options(features, id_prop, name):
-    """Every number of points Fewest points can give ONE region, fewest last:
-    {before, options: [{points, tol, deform}]}. Each option is the smallest
-    setting that reaches that count, so the counts only ever go down along the
-    slider; `deform` marks the ones past FEWEST_SAFE (the page asks first)."""
+def resample_options(features, id_prop, names, method="shape"):
+    """Every number of points Resample points can give -- one region's outline,
+    or the shared border of several -- most first:
+    {before, options: [{points, tol, deform}]}. Each option is the first
+    setting that reaches that count, so the counts only go down along the
+    slider (even spacing can also go UP from now: a fine spacing adds points).
+    `deform` marks Fewest points settings past FEWEST_SAFE (the page asks)."""
     digest = _features_digest(features)
+    grid = _FEWEST_GRID if method == "shape" else _EVEN_GRID
+    names = [str(n) for n in names]
+    idx = _index_all(features, id_prop)
+    old = {n: _body(features, idx[n]) for n in names if n in idx}
     before, best, options = None, None, []
-    for t in _FEWEST_GRID:
-        r = resample_region_at(features, id_prop, name, t, digest)
-        before = r["handles"]["before"]
-        n = r["handles"]["after"]
-        if n < before and (best is None or n < best):
+    for t in grid:
+        r = resample_at(features, id_prop, names, t, method, digest)
+        h = r.get("handles") or {}
+        if "after" not in h:
+            continue
+        before = h["before"]
+        n = h["after"]
+        if n == before or (method == "shape" and n > before):
+            continue
+        if best is None or n < best:
             best = n
-            options.append({"points": n, "tol": float(t), "deform": t > FEWEST_SAFE})
+            options.append({"points": n, "tol": float(t),
+                            "deform": _outline_moved(old, r["features"], id_prop) > FEWEST_SAFE})
     return {"before": before, "options": options}
+
+
+def _outline_moved(old, features, id_prop):
+    """How far (px) any of the `old` regions' outlines moved in `features` --
+    what decides "the shape will deform", for any method: even spacing at
+    600 px moved corners ~200 px with no warning at all."""
+    idx = _index_all(features, id_prop)
+    worst = 0.0
+    for n, g0 in old.items():
+        if n in idx and not g0.is_empty:
+            g1 = _body(features, idx[n])
+            if not g1.is_empty:
+                worst = max(worst, g0.boundary.hausdorff_distance(g1.boundary))
+    return worst
+
+
+def resample_region_at(features, id_prop, name, tol, digest=None):
+    """Fewest points for ONE region at exactly `tol` px (resample_at)."""
+    return resample_at(features, id_prop, [name], tol, "shape", digest)
+
+
+def fewest_options(features, id_prop, name):
+    """Every number of points Fewest points can give ONE region (resample_options)."""
+    return resample_options(features, id_prop, [name], "shape")
 
 
 def delete_point(features, id_prop, name, point, respace=True, eps=0.5,

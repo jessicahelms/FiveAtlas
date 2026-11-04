@@ -152,13 +152,14 @@ export async function splitRegion(ds, region, fc, points, name) {
   return r.json(); // { type, features, names:[a,b] }
 }
 
-// Every number of points Fewest points can give one region (fewest last), for
-// the slider to step through: { before, options: [{ points, tol, deform }] }.
-export async function fewestOptions(ds, region, fc) {
-  const r = await fetch(`${API}/datasets/${ds}/regions/fewest-options`, {
+// Every number of points Resample points can give -- one region, or the shared
+// border of several -- most first, each marked if it deforms the shape:
+// { before, options: [{ points, tol, deform }] }. method: 'even' | 'shape'.
+export async function resampleOptions(ds, regions, fc, method) {
+  const r = await fetch(`${API}/datasets/${ds}/regions/resample-options`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ region, fc }),
+    body: JSON.stringify({ regions, fc, method }),
   });
   if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
   return r.json();

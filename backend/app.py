@@ -1886,10 +1886,10 @@ async def regions_resample(ds_id: str, request: Request):
     # may then change by up to 25% instead of 5%
     drift = topology.FEWEST_DEFORM_DRIFT if body.get("deform") else 0.05
     try:
-        if len(names) == 1 and method == "shape" and body.get("exact"):
+        if body.get("exact"):
             # a notch of the by-number slider: exactly the result it was offered
-            res = topology.resample_region_at(fc["features"], d["id_prop"], str(names[0]),
-                                              float(body.get("tol", 20.0)))
+            res = topology.resample_at(fc["features"], d["id_prop"], names,
+                                       float(body.get("tol", 20.0)), method)
         elif len(names) == 1 and method == "shape":
             res = topology.resample_region_fewest(fc["features"], d["id_prop"], str(names[0]),
                                                   tol=float(body.get("tol", 20.0)),
@@ -2013,21 +2013,27 @@ async def regions_split(ds_id: str, request: Request):
             "areas": res.get("areas"), "parts": res.get("parts")}
 
 
-@app.post("/api/datasets/{ds_id}/regions/fewest-options")
-async def regions_fewest_options(ds_id: str, request: Request):
-    """Every number of points Fewest points can give one region, for the slider
-    to step through. Read-only. Body: {region, fc?} -> {before, options}."""
+@app.post("/api/datasets/{ds_id}/regions/resample-options")
+async def regions_resample_options(ds_id: str, request: Request):
+    """Every number of points Resample points can give -- one region's outline,
+    or the shared border of several -- for the slider to step through, each
+    marked if it would deform the shape. Read-only.
+    Body: {regions, method: "even"|"shape", fc?} -> {before, options}."""
     try:
         d = ds.get_dataset(ds_id)
     except KeyError:
         raise HTTPException(404, "unknown dataset")
     body = await request.json()
-    region = body.get("region")
-    if not region:
-        raise HTTPException(400, "need 'region'")
+    names = body.get("regions") or ([body["region"]] if body.get("region") else None)
+    if not names:
+        raise HTTPException(400, "need 'regions'")
+    method = str(body.get("method") or "shape")
+    if method not in topology.RESAMPLE_METHODS:
+        raise HTTPException(422, f"unknown resample method {method!r}")
     fc = body.get("fc") or geo.load_regions(ds_id)[0]
     try:
-        return topology.fewest_options(fc["features"], d["id_prop"], str(region))
+        return topology.resample_options(fc["features"], d["id_prop"],
+                                         [str(n) for n in names], method)
     except ValueError as e:
         raise HTTPException(422, str(e))
     except Exception as e:

@@ -200,21 +200,20 @@ ITEMS = [
     "and ], or hold Alt and scroll over the image — the ring shows how far "
     "it reaches.",
 
-    "While you are in Edit points, the Resample points slider changes how many "
-    "points the selected region's outline has. Drag it from fine to coarse and "
-    "you see “points on (region): before → after” as you go, then "
-    "press Apply to keep them or Cancel to put the old ones back. Every "
+    "While you are in Edit points, Resample points sets how many vertices the "
+    "selected region's outline has. Drag the slider from more to fewer, or type "
+    "the number you want and press Enter, and you see “vertices: before "
+    "→ after” on the image as you go; then press Apply to keep them or "
+    "Cancel to put the old ones back. The slider only offers counts the region "
+    "can actually reach — it takes a moment to work them out the first "
+    "time — and a number it can't reach goes to the closest one. Every "
     "neighbour's side of a shared border is re-pointed with it, so no border "
-    "opens up. Choose Fewest points above the slider to go much lower and pick "
-    "the number of vertices you want: only the points the shape needs are "
-    "kept (corners stay, straight runs lose theirs), none of the remaining "
-    "points moves, and the slider steps through the counts the region can "
-    "actually reach — it takes a moment to work them out the first time. "
-    "Past the point where the shape starts to deform, the slider stops and "
-    "asks “The shape will deform. Do you want fewer vertices?” — answer yes "
-    "and it goes lower still; check the outline before you press Apply. A "
-    "shared border's Resample points has Fewest points too, set by how far "
-    "the border may move.",
+    "opens up. Even spacing puts the points the same distance apart; Fewest "
+    "points keeps only the ones the shape needs (corners stay, straight runs "
+    "lose theirs) and goes much lower. Whenever a count would change the shape, "
+    "the slider stops and asks “The shape will deform. Do you want fewer "
+    "vertices?” — answer yes and it goes on; check the outline before you "
+    "press Apply.",
 
     # -- move region -----------------------------------------------------------------------
     "Move region drags a whole region to a new place without changing its "
@@ -263,11 +262,11 @@ ITEMS = [
     "genuinely do not touch stay as separate parts of the one region; the app "
     "never invents tissue between them.",
 
-    "Once you have shared borders, a Resample points slider appears there too. "
-    "Drag it from fine to coarse and the points on the border change as you "
-    "go, then press Apply to keep them or Cancel to put the old ones back. "
-    "This is useful when a border has far more points on it than you can work "
-    "with.",
+    "Once you have shared borders, Resample points appears there too and works "
+    "the same way, by the number of vertices on the border: drag the slider or "
+    "type a number, then press Apply to keep them or Cancel to put the old ones "
+    "back. This is useful when a border has far more points on it than you can "
+    "work with.",
 
     "Split a region cuts one region into two. Press Split a region, then draw "
     "a line all the way across the region on the image, clicking for each "
