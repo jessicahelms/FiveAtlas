@@ -33,6 +33,14 @@ function sliderToReach(pos) {
 // can go far lower than even spacing without cutting corners. Past FEWEST_SAFE
 // px it goes lower still, but the shape deforms, so the slider stops there and
 // asks first; a yes holds until the method or the region changes.
+// Fewest points moves through these px settings, one slider notch each (the
+// backend's _FEWEST_LADDER). A straight 1-1000 px slider squeezed everything
+// up to FEWEST_SAFE into its left sixth and showed values like 613 px.
+const FEWEST_STEPS = [1, 2, 3, 5, 7, 10, 15, 20, 30, 40, 60, 80, 110, 150,
+  225, 300, 450, 600, 750, 1000];
+const fewestIndex = (px) => FEWEST_STEPS.reduce((best, v, i) =>
+  (Math.abs(v - px) < Math.abs(FEWEST_STEPS[best] - px) ? i : best), 0);
+
 function ResampleSlider({ method, tol, onMethod, onTol, busy, used, scope }) {
   const shape = method === 'shape';
   const [deformOk, setDeformOk] = useState(false);
@@ -59,8 +67,14 @@ function ResampleSlider({ method, tol, onMethod, onTol, busy, used, scope }) {
       </div>
       <div className="rng">
         <span>{shape ? 'exact' : 'fine'}</span>
-        <input type="range" min={shape ? 1 : 20} max={shape ? 1000 : 600} step={shape ? 1 : 10}
-          value={tol} onChange={(e) => move(Number(e.target.value))} disabled={busy} />
+        {shape ? (
+          <input type="range" min="0" max={FEWEST_STEPS.length - 1} step="1"
+            value={fewestIndex(tol)} disabled={busy}
+            onChange={(e) => move(FEWEST_STEPS[Number(e.target.value)])} />
+        ) : (
+          <input type="range" min="20" max="600" step="10" value={tol} disabled={busy}
+            onChange={(e) => move(Number(e.target.value))} />
+        )}
         <span>{shape ? 'fewest' : 'coarse'}</span>
       </div>
       <div className="prop-readout">
