@@ -1105,10 +1105,12 @@ export default function App() {
         setBordersOff(new Set()); setFillsOff(new Set());
         // Two features under one name: ask now, before anything is edited.
         // (Edited as one region they shredded under Share borders.)
-        try {
-          const d = await api.resolveDuplicates(dsId, r);
-          if (!cancel && d.groups && d.groups.length) setDupAsk({ groups: d.groups });
-        } catch (e) { /* the check is a courtesy; the map is loaded either way */ }
+        // Not awaited: genes and stains load meanwhile.
+        api.resolveDuplicates(dsId, r).then((d) => {
+          if (!cancel && fcRef.current === r && d.groups && d.groups.length) {
+            setDupAsk({ groups: d.groups });
+          }
+        }).catch(() => { /* the check is a courtesy; the map is loaded either way */ });
         if (offPref.has('morphology')) setLayers((l) => ({ ...l, showDapi: false }));
         if (!offPref.has('transcripts')) await loadGenesFor(dsId);
         if (!offPref.has('stains')) await loadStainsFor(dsId);
@@ -1761,10 +1763,11 @@ export default function App() {
             arcs = normalizeBorderArcs(sb.arcs);
           } catch (e) { /* ignore */ }
         }
-        if (arcs.length) {
+        // a tidy that landed meanwhile drew the line from ITS outlines
+        if (arcs.length && fcRef.current === newFc) {
           setBorderSegments(arcs); setBorderSegmentIndex(0); setBorderArc(borderArcsFc(arcs));
-          arced = true; segmentCount = arcs.length;
         }
+        if (arcs.length) { arced = true; segmentCount = arcs.length; }
         const spread = repointed && repointed.handles
           ? ` Points evened out, ${repointed.handles.before} → ${repointed.handles.after}.`
           : '';
@@ -1829,6 +1832,7 @@ export default function App() {
         const res = await api.resampleRegions(dsId, borderPicks, source, tolValue, method,
           false, true);
         if (seq !== resampleSeq.current) return;   // cancelled or superseded
+        if (fcRef.current !== source) return;      // the map changed under it (a tidy landed)
         // Draw the previewed handles straight away -- the whole point is to see
         // the density change while dragging the slider, not after Apply.
         const arcs = normalizeBorderArcs(res.arcPoints);
@@ -1891,6 +1895,13 @@ export default function App() {
         + 'nudge the slider again to preview this one.');
       return;
     }
+    if (resample.baseFc && resample.baseFc !== fcRef.current) {
+      // built on the map before something else changed it: keeping it would
+      // quietly undo that change
+      cancelResample();
+      setBorderMsg('The map changed since that preview — move the slider again.');
+      return;
+    }
     // the handles on screen are already the previewed ones, so this just makes
     // the geometry behind them permanent (and undoable)
     commit(resample.fc); setBaseline(resample.fc);
@@ -1902,7 +1913,7 @@ export default function App() {
     setBorderMsg(kept != null
       ? `Resampled — ${kept} drag points on the border.`
       : 'Resampled.');
-  }, [resample, borderPicks, commit, dsId]);
+  }, [resample, borderPicks, commit, dsId, cancelResample]);
 
   // Merging with the section outline is asked first: {container, regions}.
   const [mergeAsk, setMergeAsk] = useState(null);
@@ -1985,6 +1996,10 @@ export default function App() {
     const drop = new Set(selected);
     const names = selected.map((i) => cur.features[i] && featureName(cur.features[i], idProp))
       .filter(Boolean);
+    // one click right above the list took a whole region with no question
+    // (the row menu's Delete asks too)
+    if (!window.confirm(`Delete ${names.length === 1 ? names[0] : `${names.length} regions (${names.join(', ')})`}?`
+      + ' Ctrl+Z brings it back.')) return;
     const next = stampFc({ ...cur, features: cur.features.filter((_, i) => !drop.has(i)) },
                          identityRef.current, 'delete-regions', names.join(', '), names);
     commit(next);
@@ -2635,6 +2650,7 @@ export default function App() {
       const prev = regionResampleRef.current;
       // always from the outline as it was before any preview, never a preview
       const source = prev && prev.name === name && prev.dsId === dsId ? prev.baseFc : fcRef.current;
+      const onScreen = fcRef.current;    // the map (or preview) this one will replace
       setBusy(true);
       try {
         // each notch is a setting resampleOptions already worked out: ask for
@@ -2642,6 +2658,7 @@ export default function App() {
         const res = await api.resampleRegions(dsId, [name], source, tolValue, method,
           false, true);
         if (seq !== regionResampleSeq.current) return;   // cancelled or superseded
+        if (fcRef.current !== onScreen) return;          // the map changed under it
         const previewFc = asFc(res, source);
         if (auto) {
           // Tidy automatically: kept at once -- unless the outline was edited
@@ -2694,7 +2711,7 @@ export default function App() {
       const prev = regionResampleRef.current;
       if (prev && prev.name === names[0] && prev.dsId === dsId) source = prev.baseFc;
     } else if (resample && resample.baseFc) source = resample.baseFc;
-    setResampleOpts({ scope, dsId, method, loading: true });
+    setResampleOpts({ scope, dsId, method, loading: true, source });
     try {
       const res = await api.resampleOptions(dsId, names, source, method);
       if (seq !== resampleOptsSeq.current) return;
@@ -2718,7 +2735,8 @@ export default function App() {
       }
     } catch (e) {
       if (seq === resampleOptsSeq.current) {
-        setResampleOpts(null);
+        // kept (with no counts) so the effect doesn't ask again in a loop
+        setResampleOpts({ scope, dsId, method, source, before: null, options: [], failed: true });
         if (which === 'region') setPointMsg(apiDetail(e)); else setBorderMsg(apiDetail(e));
       }
     }
@@ -2740,8 +2758,28 @@ export default function App() {
   // border, each kept only if no gap, overlap or drift rule breaks. The result
   // is kept as ONE undo step and the notice says what changed, with Undo.
   // Never applied to an outline edited while it was on its way.
-  const [tidyNotice, setTidyNotice] = useState(null);   // {text, working?}
+  // {text, working?, fc?: the map it left -- its Undo is offered only while
+  // that is still the map, so it can never undo some other, later edit}
+  const [tidyNotice, setTidyNotice] = useState(null);
   const tidySeq = useRef(0);
+  const modeRef = useRef(mode);
+  modeRef.current = mode;
+  const borderPicksRef = useRef(borderPicks);
+  borderPicksRef.current = borderPicks;
+  const resampleStateRef = useRef(resample);
+  resampleStateRef.current = resample;
+  // Any other step starting (an operation, a preview) wins over a tidy still on
+  // its way: landing afterwards it would be built on the map before that step.
+  useEffect(() => {
+    if (!busy) return;
+    tidySeq.current += 1;
+    setTidyNotice((n) => (n && n.working ? null : n));
+  }, [busy]);
+  // a notice is about one map: gone with another dataset, or once the map moves on
+  useEffect(() => { tidySeq.current += 1; setTidyNotice(null); }, [dsId]);
+  useEffect(() => {
+    setTidyNotice((n) => (n && n.fc && n.fc !== fc ? null : n));
+  }, [fc]);
   const runTidy = useCallback(async (names, baseFc, label, always = false) => {
     const list = [...new Set((names || []).filter(Boolean))];
     if (!list.length || !dsId || !baseFc) return null;
@@ -2750,7 +2788,13 @@ export default function App() {
     try {
       const res = await api.tidyRegions(dsId, list, baseFc, always);
       if (seq !== tidySeq.current) return null;
-      if (fcRef.current !== baseFc) { setTidyNotice(null); return null; }   // edited since
+      // never under the person: the map edited since, a point or border held
+      // (a border drag changes nothing until it is let go), or a preview up
+      if (fcRef.current !== baseFc || vertexDragRef.current || regionResampleRef.current
+          || resampleStateRef.current) {
+        setTidyNotice(null);
+        return null;
+      }
       const done = (res.summary || []).filter((x) => x.changed);
       if (!done.length) {
         setTidyNotice(always ? { text: 'Already tidy — no point can go without breaking a border or opening a gap.' } : null);
@@ -2763,9 +2807,21 @@ export default function App() {
       setResampleOpts(null);
       const left = done.reduce((t, x) => t + (x.bunchedAfter || 0), 0);
       const parts = done.map((x) => `${x.region} ${x.before} → ${x.after}`);
-      setTidyNotice({ text: `Tidied${label ? ` after ${label}` : ''}: ${parts.join(', ')} points`
+      setTidyNotice({ fc: tFc, text: `Tidied${label ? ` after ${label}` : ''}: ${parts.join(', ')} points`
         + (left ? `. ${left} still sit close together, where borders meet — they can't go without shifting a neighbour.`
           : ', none bunched together.') });
+      // the red border line and its handles are drawn from the outlines: left
+      // as they were, the next border drag started from the pre-tidy points
+      const picks = borderPicksRef.current;
+      if (modeRef.current === 'border' && picks.length === 2 && touched.some((n) => picks.includes(n))) {
+        try {
+          const sb = await api.sharedBorder(dsId, picks[0], picks[1], tFc, { bridge: false });
+          const arcs = normalizeBorderArcs(sb && sb.arcs);
+          if (fcRef.current === tFc && arcs.length) {
+            setBorderSegments(arcs); setBorderSegmentIndex(0); setBorderArc(borderArcsFc(arcs));
+          }
+        } catch (e) { /* the tidy stands; the line refreshes on the next pick */ }
+      }
       return res;
     } catch (e) {
       if (seq === tidySeq.current) setTidyNotice(null);
@@ -2786,8 +2842,12 @@ export default function App() {
 
   const tidyResample = useCallback((which) => {
     const names = which === 'region' ? (selectedName ? [selectedName] : []) : borderPicks;
+    // a slider preview up is not the map: put it away first and tidy what is
+    // really there (it was tidied and recorded, with Keep/Cancel still showing)
+    if (regionResampleRef.current) cancelRegionResample();
+    if (resampleStateRef.current) cancelResample();
     runTidy(names, fcRef.current, null, true);
-  }, [selectedName, borderPicks, runTidy]);
+  }, [selectedName, borderPicks, runTidy, cancelRegionResample, cancelResample]);
 
   // how many of the selected region's points sit right next to another (Edit
   // points shows them orange; the Tidy points box says how many)
@@ -2804,14 +2864,23 @@ export default function App() {
     : (mode === 'border' && borderShared && borderScope ? 'border' : null);
   const resampleScope = resampleWhich === 'region' ? regionScope
     : (resampleWhich === 'border' ? borderScope : null);
+  // the map the counts are for: under a preview, the map it was built on. A
+  // count worked out for an older map is stale -- after Delete point the box
+  // still said "51 → 33" on a 50-point TH
+  const resampleBase = resampleWhich === 'region'
+    ? (regionResample && regionResample.name === selectedName ? regionResample.baseFc : fc)
+    : (resample && resample.baseFc ? resample.baseFc : fc);
   useEffect(() => {
     if (!resampleWhich) return;
     const o = resampleOpts;
-    if (o && o.scope === resampleScope && o.dsId === dsId && o.method === resampleMethod) return;
+    if (o && o.scope === resampleScope && o.dsId === dsId && o.method === resampleMethod
+        && o.source === resampleBase) return;
     loadResampleOptions(resampleWhich, resampleMethod, false);
-  }, [resampleWhich, resampleScope, resampleMethod, dsId, resampleOpts, loadResampleOptions]);
+  }, [resampleWhich, resampleScope, resampleMethod, dsId, resampleOpts, resampleBase,
+    loadResampleOptions]);
   const shownResampleOpts = resampleOpts && resampleOpts.scope === resampleScope
-    && resampleOpts.dsId === dsId && resampleOpts.method === resampleMethod ? resampleOpts : null;
+    && resampleOpts.dsId === dsId && resampleOpts.method === resampleMethod
+    && resampleOpts.source === resampleBase ? resampleOpts : null;
 
   // Tidy automatically when Edit points opens on a region with points bunched
   // together -- once per region per session, so an Undo stays undone; never
@@ -2837,6 +2906,13 @@ export default function App() {
       setPointMsg('That preview was for a different region — move the slider again.');
       return;
     }
+    if (fcRef.current !== rr.fc) {
+      // something replaced the preview on the map since: keeping it would
+      // quietly undo that (and so would putting its base back)
+      dropRegionPreview(false);
+      setPointMsg('The map changed since that preview — move the slider again.');
+      return;
+    }
     regionResampleRef.current = null;
     setRegionResample(null);
     setResampleOpts(null);        // the outline changed: its counts are worked out again
@@ -2845,7 +2921,7 @@ export default function App() {
     const nb = (rr.counts || []).filter((c) => c.shared).map((c) => c.region);
     setPointMsg(`Resampled ${rr.name}: ${rr.handles.before} → ${rr.handles.after} points`
       + (nb.length ? `, kept joined to ${nb.join(', ')}` : '') + '. Ctrl+Z undoes it.');
-  }, [dsId, selectedName, commit, cancelRegionResample]);
+  }, [dsId, selectedName, commit, cancelRegionResample, dropRegionPreview]);
 
   // a preview never survives leaving Edit points or picking another region --
   // nor does one still on its way (the 300 ms debounce, or the request itself)
@@ -2916,6 +2992,7 @@ export default function App() {
     if (choice === 'replace') {
       // Add already renames clashes; a replacing file can bring its own
       api.resolveDuplicates(dsId, next).then((d) => {
+        if (fcRef.current !== next) return;        // edited or switched since: not this map
         if (d.groups && d.groups.length) setDupAsk({ groups: d.groups });
       }).catch(() => { /* a courtesy */ });
     }
@@ -3202,6 +3279,7 @@ export default function App() {
       clearGap(); clearClean(); clearSplit(); clearDraw();
       // the saved file may still use a name twice: same question as on open
       api.resolveDuplicates(dsId, r).then((d) => {
+        if (fcRef.current !== r) return;           // edited or switched since: not this map
         setDupAsk(d.groups && d.groups.length ? { groups: d.groups } : null);
       }).catch(() => { /* a courtesy */ });
     } catch (e) { setError(apiDetail(e)); } finally { setBusy(false); }
@@ -3300,14 +3378,18 @@ export default function App() {
     if (!ask || !action) return;
     setBusy(true); setError(null);
     try {
-      const { changed = [], ...res } = await api.resolveDuplicates(dsId, fcRef.current || fc, action);
-      commit(asFc(res, fcRef.current || fc));
+      const base = fcRef.current || fc;
+      const { changed = [], ...res } = await api.resolveDuplicates(dsId, base, action);
+      if (fcRef.current !== base || !changed.length) return;   // edited since, or nothing to do
+      commit(asFc(res, base));
+      // "make each one region" drops features: indexes picked before point elsewhere
+      setSelected([]);
       const touched = changed.flatMap((c) => c.into);
       if (touched.length) setMoved((prev) => { const n = new Set(prev); touched.forEach((x) => n.add(x)); return n; });
       setSnapInfo((s) => ({ ...(s || {}),
         saved: action === 'rename'
           ? `renamed ${changed.map((c) => c.into.slice(1).join(', ')).join(', ')}`
-          : `kept ${changed.length} name${changed.length === 1 ? '' : 's'} as one region each` }));
+          : `made ${changed.map((c) => c.name).join(', ')} one region${changed.length === 1 ? '' : ' each'}` }));
     } catch (e) { setError(apiDetail(e)); } finally { setBusy(false); }
   }, [dsId, fc, dupAsk, commit]);
 
@@ -3761,14 +3843,14 @@ export default function App() {
                   Rename them
                 </button>
                 <button className="btn" disabled={busy} onClick={() => answerDuplicates('merge')}>
-                  Keep the same name
+                  Make each one region
                 </button>
               </div>
               <div className="hint dim">
                 <b>Rename</b>: the first shape keeps the name and each other one becomes its own
                 {' '}region, numbered .1, .2 …
                 {gs.some((g) => g.identical) && ' Identical shapes then lie exactly on top of each other.'}
-                {' '}<b>Keep the same name</b>: each name becomes one region. Identical shapes
+                {' '}<b>Make each one region</b>: each name becomes one region. Identical shapes
                 {' '}collapse into one
                 {differ.length > 0 && <>; shapes that differ ({differ.map((g) => g.name).join(', ')})
                 {' '}are combined into one outline, the ground either of them covered</>}.
@@ -3787,8 +3869,11 @@ export default function App() {
           <span>{tidyNotice.text}</span>
           {!tidyNotice.working && (
             <>
-              <button className="btn sm" onClick={() => { undo(); setTidyNotice(null); }}
-                title="put the points back as they were (Ctrl+Z does the same)">Undo</button>
+              {tidyNotice.fc && tidyNotice.fc === fc && (
+                <button className="btn sm" disabled={busy}
+                  onClick={() => { if (fcRef.current === tidyNotice.fc) undo(); setTidyNotice(null); }}
+                  title="put the points back as they were (Ctrl+Z does the same)">Undo</button>
+              )}
               <button className="btn sm" onClick={() => setTidyNotice(null)} title="close">✕</button>
             </>
           )}

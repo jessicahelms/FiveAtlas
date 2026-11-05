@@ -66,7 +66,7 @@ people will care about most and keep that title short.
   asks:
   - **Rename them**: the first shape keeps the name and each other one
     becomes its own region, numbered .1, .2 … (PAL → PAL.1).
-  - **Keep the same name**: each name becomes one region. Identical copies
+  - **Make each one region**: each name becomes one region. Identical copies
     become one; shapes that differ are combined into one outline covering
     the ground either of them covered.
   - **Not now**: nothing changes.

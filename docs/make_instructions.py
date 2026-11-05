@@ -111,7 +111,7 @@ ITEMS = [
     "Reset): it lists each such name, with whether the shapes are identical or "
     "how much they differ. Rename them keeps the name on the first shape and "
     "makes each other one its own region, numbered .1, .2 … (PAL becomes "
-    "PAL.1). Keep the same name makes each name one region: identical shapes "
+    "PAL.1). Make each one region makes each name one region: identical shapes "
     "become one, and shapes that differ are combined into one outline covering "
     "the ground either of them covered. Not now leaves everything as it is. "
     "Ctrl+Z undoes either answer, and nothing is written until you Save.",

@@ -36,12 +36,16 @@ function sliderToReach(pos) {
 // tol < 0 marks a count past the fewest the guards allow: that region alone
 // changes, so its borders stop meeting its neighbours'.
 function ResampleSlider({ method, tol, onMethod, onTol, busy, scope, counts, label, onTidy,
-  bunched, auto, onAuto, note, onUndo }) {
+  bunched, auto, onAuto, note, onUndo, previewing }) {
   const shape = method === 'shape';
   const opts = counts && counts.options ? counts.options : null;
-  const optIdx = opts && opts.length
+  // With a preview up the slider sits on its notch; without one (after Keep or
+  // Cancel, or a fresh region) at the count the outline has now -- the old notch
+  // kept showing "51 → 3" and "The shape will deform" over an untouched outline
+  const optIdx = !opts || !opts.length ? 0 : previewing
     ? opts.reduce((best, o, i) => (Math.abs(o.tol - tol) < Math.abs(opts[best].tol - tol) ? i : best), 0)
-    : 0;
+    : opts.reduce((best, o, i) => (Math.abs(o.points - counts.before)
+      < Math.abs(opts[best].points - counts.before) ? i : best), 0);
   const [typed, setTyped] = useState('');
   const [typedNote, setTypedNote] = useState(null);   // "closest it can reach" for a typed count
   const [adjust, setAdjust] = useState(false);
@@ -122,7 +126,7 @@ function ResampleSlider({ method, tol, onMethod, onTol, busy, scope, counts, lab
               </div>
               <div className="prop-readout">
                 <span>points</span>
-                <span className="v">{counts.before} → {cur.points}</span>
+                <span className="v">{previewing ? `${counts.before} → ${cur.points}` : counts.before}</span>
               </div>
               <div className="row">
                 <input className="ctx-input" type="number" min="1" placeholder="type a number"
@@ -137,7 +141,7 @@ function ResampleSlider({ method, tol, onMethod, onTol, busy, scope, counts, lab
           )}
         </>
       )}
-      {cur && cur.deform && (
+      {previewing && cur && cur.deform && (
         <div className="hint warn">
           The shape will deform — check it before you press Keep.
           {cur.tol < 0 && ' Only this region changes, so its borders won\'t meet its neighbours\' exactly (Share borders joins them again).'}
@@ -577,6 +581,7 @@ function Sidebar({
               scope={`region:${selectedName}`} counts={resampleOpts} label={selectedName}
               onTidy={() => onTidy && onTidy('region')} bunched={bunchedCount}
               auto={autoTidy} onAuto={onAutoTidy} note={autoTidyNote} onUndo={onUndoAutoTidy}
+              previewing={!!(regionResample && regionResample.name === selectedName)}
               onMethod={(m) => onResampleMethod && onResampleMethod(m, 'region')}
               onTol={onRegionResampleTol} />
             {regionResample && regionResample.handles && (
@@ -811,6 +816,7 @@ function Sidebar({
                   label={`the ${picks.join(' | ')} border`}
                   onTidy={() => onTidy && onTidy('border')}
                   auto={autoTidy} onAuto={onAutoTidy} note={autoTidyNote} onUndo={onUndoAutoTidy}
+                  previewing={!!(resample && resample.counts)}
                   onMethod={(m) => onResampleMethod && onResampleMethod(m, 'border')}
                   onTol={onResampleTol} />
                 {resample && resample.counts && (
