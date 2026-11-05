@@ -1031,7 +1031,7 @@ def move_border(features, id_prop, region_a, region_b, points, drag_start=None, 
     # into. Real neighbours still are protected; the wrap-everything region is
     # the one thing a border drag is allowed to poke past.
     blanket_names = set(blankets(features, id_prop, keep=[region_a, region_b]))
-    other_geoms = []
+    other_geoms, seen = [], set()
     for k, f in enumerate(features):
         if k in pair:
             continue
@@ -1041,7 +1041,11 @@ def move_border(features, id_prop, region_a, region_b, points, drag_start=None, 
             g = shape(f["geometry"])
             if not g.is_valid:
                 g = g.buffer(0)
-            if not g.is_empty:
+            # an exact copy of a neighbour protects nothing new, and uniting it
+            # in re-noded the protected edge: a TH/lft drag on XETG (every
+            # coarse region stored twice) moved 10 px2 and 46 points differently
+            if not g.is_empty and g.wkb not in seen:
+                seen.add(g.wkb)
                 other_geoms.append(g)
         except Exception:
             pass
@@ -1974,11 +1978,45 @@ def _geom_at(features, k):
 
 
 def _body(features, ks):
-    """A region's whole body: the union of every feature carrying its name."""
-    gs = [g for g in (_geom_at(features, k) for k in ks) if not g.is_empty]
+    """A region's whole body: the union of every feature carrying its name.
+
+    An exact copy of an earlier feature adds nothing, so it is skipped: a name
+    stored twice (XETG stores every coarse region twice) then gives the same
+    outline, vertex for vertex, as the name stored once, instead of one re-noded
+    by a union with itself."""
+    gs = []
+    for g in (_geom_at(features, k) for k in ks):
+        if not g.is_empty and not any(g0.equals_exact(g, 1e-9) for g0 in gs):
+            gs.append(g)
     if not gs:
         return Polygon()
     return gs[0] if len(gs) == 1 else unary_union(gs).buffer(0)
+
+
+#: Two features of one name whose symmetric difference is at most this fraction
+#: of the area are the SAME outline stored twice, not two lobes. XETG keeps
+#: every coarse region twice; dft's copies differ by 38 px2 of 23 million.
+COPY_FRAC = 1e-4
+
+
+def _copies(olds):
+    """{feature index: index of the earlier feature it copies} for every
+    exact or near-exact copy in `olds` ([(feature index, geometry), ...])."""
+    copy_of = {}
+    for i, (k, g) in enumerate(olds):
+        if g.is_empty:
+            continue
+        for k0, g0 in olds[:i]:
+            if k0 in copy_of or g0.is_empty:
+                continue
+            tol = COPY_FRAC * max(g0.area, 1e-9)
+            if abs(g0.area - g.area) > tol or not g0.intersects(g):
+                continue
+            if g0.equals_exact(g, 1e-9) or _safe_difference(g0, g).area \
+                    + _safe_difference(g, g0).area <= tol:
+                copy_of[k] = k0
+                break
+    return copy_of
 
 
 def _distribute(body, olds):
@@ -1990,9 +2028,19 @@ def _distribute(body, olds):
     the edit bridged the lobes into a single piece -- divide the body by nearest
     point instead, which gives every lobe its own neighbourhood and can't empty one.
     Returns {feature index: geometry}; the parts always re-union to exactly `body`.
+
+    A feature that only COPIES another (see _copies) gets that one's share
+    verbatim. Shared out as two lobes, identical copies tie on every piece, the
+    first copy takes the lot, the second starves, and the nearest-point split
+    between two identical generators shredded the body: Share borders left lft in
+    222 pieces (160 -> 3055 points) and a drag on ISO/dft made 253,949 points.
     """
     if len(olds) == 1:
         return {olds[0][0]: body}
+    copy_of = _copies(olds)
+    if copy_of:
+        shares = _distribute(body, [(k, og) for k, og in olds if k not in copy_of])
+        return {k: shares[copy_of.get(k, k)] for k, _ in olds}
     buckets = {k: [] for k, _ in olds}
     for piece in _polys(body):
         best_k, best_a = None, 0.0
@@ -2208,7 +2256,7 @@ def partition_regions(features, id_prop, names, tol=40.0, precision=PARTITION_GR
     # container is not a neighbour with ground to defend here -- the same rule
     # clean_lines applies with its `blanket` set.
     blanket_at = 0.98 * T.area if T.area > 0 else 0.0
-    other_geoms = []
+    other_geoms, seen = [], set()
     for f in features:
         nm = (f.get("properties") or {}).get(id_prop)
         if nm is None or str(nm) in sel:
@@ -2217,8 +2265,9 @@ def partition_regions(features, id_prop, names, tol=40.0, precision=PARTITION_GR
             g = shape(f["geometry"])
             if not g.is_valid:
                 g = g.buffer(0)
-            if g.is_empty:
-                continue
+            if g.is_empty or g.wkb in seen:
+                continue                       # an exact copy defends nothing new
+            seen.add(g.wkb)
             if blanket_at > 0 and _safe_intersection(g, T).area >= blanket_at:
                 continue                       # wraps the pair: nothing to defend
             other_geoms.append(g)
