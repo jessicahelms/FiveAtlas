@@ -816,6 +816,9 @@ export default function App() {
   }, []);
   // Load regions file: read, then ask add / replace (and about damage) first.
   const [loadAsk, setLoadAsk] = useState(null);
+  // Names that more than one feature carries in the file just opened: asked
+  // once (rename them apart, or keep each name as one region). {groups}
+  const [dupAsk, setDupAsk] = useState(null);
   const commit = useCallback((nextFc) => {
     fcRef.current = nextFc; setFc(nextFc); record(nextFc);
   }, [record]);
@@ -1067,7 +1070,7 @@ export default function App() {
     if (!dsId) return;
     let cancel = false;
     (async () => {
-      setInfo(null); setFc(null); setError(null);
+      setInfo(null); setFc(null); setError(null); setDupAsk(null);
       setGeneInfo(null); setChannels(null); setGeneBitmap(null); setGeneBounds(null);
       setStainInfo(null); setStainChannels(null);
       const offPref = readSrcOff(dsId);
@@ -1100,6 +1103,12 @@ export default function App() {
         // hidden faces and borders are keyed by NAME, so they carried over to a
         // new slide with the same atlas names -- it opened with faces hidden
         setBordersOff(new Set()); setFillsOff(new Set());
+        // Two features under one name: ask now, before anything is edited.
+        // (Edited as one region they shredded under Share borders.)
+        try {
+          const d = await api.resolveDuplicates(dsId, r);
+          if (!cancel && d.groups && d.groups.length) setDupAsk({ groups: d.groups });
+        } catch (e) { /* the check is a courtesy; the map is loaded either way */ }
         if (offPref.has('morphology')) setLayers((l) => ({ ...l, showDapi: false }));
         if (!offPref.has('transcripts')) await loadGenesFor(dsId);
         if (!offPref.has('stains')) await loadStainsFor(dsId);
@@ -2904,11 +2913,17 @@ export default function App() {
     commit(next); setBaseline(next);
     setSelected([]); selAnchorRef.current = null;
     if (choice === 'replace') { setMoved(new Set()); setMode('view'); clearBorder(); }
+    if (choice === 'replace') {
+      // Add already renames clashes; a replacing file can bring its own
+      api.resolveDuplicates(dsId, next).then((d) => {
+        if (d.groups && d.groups.length) setDupAsk({ groups: d.groups });
+      }).catch(() => { /* a courtesy */ });
+    }
     const dmgNote = damageQuestion ? (ask.withDamage ? ', damage included' : ', damage left out') : '';
     setLoadAsk({ done: choice === 'replace'
       ? `The map now holds the ${incoming.length} regions from ${ask.name}${dmgNote}. Ctrl+Z brings back what was there; Save to keep it.`
       : `Added ${incoming.length} regions from ${ask.name}${dmgNote}${renamed ? ` (${renamed} renamed so no name is used twice)` : ''}. Ctrl+Z undoes it; Save to keep it.` });
-  }, [loadAsk, designations, idProp, commit, clearBorder, uiSettings]);
+  }, [loadAsk, designations, idProp, commit, clearBorder, uiSettings, dsId]);
 
   useEffect(() => {
     setSaveTarget(null);
@@ -3185,6 +3200,10 @@ export default function App() {
       setMoved(new Set()); setSelected([]);
       setSnapInfo(null); setMode('view'); clearBorder();
       clearGap(); clearClean(); clearSplit(); clearDraw();
+      // the saved file may still use a name twice: same question as on open
+      api.resolveDuplicates(dsId, r).then((d) => {
+        setDupAsk(d.groups && d.groups.length ? { groups: d.groups } : null);
+      }).catch(() => { /* a courtesy */ });
     } catch (e) { setError(apiDetail(e)); } finally { setBusy(false); }
   }, [dsId, dirty, moved, commit, clearBorder, clearGap, clearClean, clearSplit, clearDraw,
       dropRegionPreview]);
@@ -3272,6 +3291,25 @@ export default function App() {
       if (fixed.length) setMoved((prev) => { const n = new Set(prev); fixed.forEach((x) => n.add(x)); return n; });
     } catch (e) { setError(apiDetail(e)); } finally { setBusy(false); }
   }, [dsId, fc, commit]);
+
+  // The open-time question about names used twice. Either answer is an ordinary
+  // edit: Ctrl+Z undoes it and nothing reaches the file until Save.
+  const answerDuplicates = useCallback(async (action) => {
+    const ask = dupAsk;
+    setDupAsk(null);
+    if (!ask || !action) return;
+    setBusy(true); setError(null);
+    try {
+      const { changed = [], ...res } = await api.resolveDuplicates(dsId, fcRef.current || fc, action);
+      commit(asFc(res, fcRef.current || fc));
+      const touched = changed.flatMap((c) => c.into);
+      if (touched.length) setMoved((prev) => { const n = new Set(prev); touched.forEach((x) => n.add(x)); return n; });
+      setSnapInfo((s) => ({ ...(s || {}),
+        saved: action === 'rename'
+          ? `renamed ${changed.map((c) => c.into.slice(1).join(', ')).join(', ')}`
+          : `kept ${changed.length} name${changed.length === 1 ? '' : 's'} as one region each` }));
+    } catch (e) { setError(apiDetail(e)); } finally { setBusy(false); }
+  }, [dsId, fc, dupAsk, commit]);
 
   // vertex-count control disabled (paused): pointCount removed
   const pointCount = null;
@@ -3685,6 +3723,59 @@ export default function App() {
               </div>
               <div className="row">
                 <button className="btn sm" onClick={() => setExportAsk(null)}>Cancel</button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {dupAsk && (() => {
+        const gs = dupAsk.groups;
+        const differ = gs.filter((g) => !g.identical);
+        const pct = (g) => (g.area > 0 ? (100 * g.diffArea) / g.area : 0);
+        return (
+          <div className="scrim" onClick={() => answerDuplicates(null)}>
+            <div className="ask" onClick={(e) => e.stopPropagation()}>
+              <h4>
+                {gs.length === 1 ? 'One name is' : `${gs.length} names are`} used by more than one
+                {' '}shape
+              </h4>
+              <div className="hint dim">
+                Do you want to rename these different regions, or do you want them to be named
+                {' '}the same?
+              </div>
+              <ul className="dup-list">
+                {gs.map((g) => (
+                  <li key={g.name}>
+                    <b>{g.name}</b>{' '}
+                    <span className="dim">
+                      {g.count} shapes,{' '}
+                      {g.identical ? 'identical'
+                        : `differ by ${Math.round(g.diffArea).toLocaleString()} px² (${pct(g).toFixed(1)}%)`}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              <div className="row">
+                <button className="btn" disabled={busy} onClick={() => answerDuplicates('rename')}>
+                  Rename them
+                </button>
+                <button className="btn" disabled={busy} onClick={() => answerDuplicates('merge')}>
+                  Keep the same name
+                </button>
+              </div>
+              <div className="hint dim">
+                <b>Rename</b>: the first shape keeps the name and each other one becomes its own
+                {' '}region, numbered .1, .2 …
+                {gs.some((g) => g.identical) && ' Identical shapes then lie exactly on top of each other.'}
+                {' '}<b>Keep the same name</b>: each name becomes one region. Identical shapes
+                {' '}collapse into one
+                {differ.length > 0 && <>; shapes that differ ({differ.map((g) => g.name).join(', ')})
+                {' '}are combined into one outline, the ground either of them covered</>}.
+                {' '}Ctrl+Z undoes either, and nothing is written until you Save.
+              </div>
+              <div className="row">
+                <button className="btn sm" onClick={() => answerDuplicates(null)}>Not now</button>
               </div>
             </div>
           </div>

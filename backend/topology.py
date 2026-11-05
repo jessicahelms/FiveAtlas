@@ -2116,6 +2116,84 @@ def _duplicate_names(features, id_prop, names):
     return [n for n in dict.fromkeys(str(x) for x in (names or [])) if counts.get(n, 0) > 1]
 
 
+def duplicate_groups(features, id_prop):
+    """Every name that more than one feature carries, for the question asked
+    when a file is opened: [{name, count, identical, diffArea, area}, ...].
+
+    `identical` is True when every feature is a copy of the first (see _copies:
+    within COPY_FRAC). `diffArea` is the ground NOT shared by all of them --
+    what keeping one name (the union) adds to the smallest copy."""
+    out = []
+    for nm, ks in _index_all(features, id_prop).items():
+        if len(ks) < 2:
+            continue
+        olds = [(k, _geom_at(features, k)) for k in ks]
+        copies = _copies(olds)
+        union = _body(features, ks)
+        common = olds[0][1]
+        for _k, g in olds[1:]:
+            common = _safe_intersection(common, g)
+        out.append({"name": nm, "count": len(ks),
+                    "identical": len(copies) == len(ks) - 1,
+                    "diffArea": round(max(union.area - common.area, 0.0), 1),
+                    "area": round(union.area, 1)})
+    return out
+
+
+def _free_name(name, taken):
+    """`name` numbered the way atlas files number a repeat: 'PAL' -> 'PAL.1',
+    'VL.1' -> the next free 'VL.n'. A damage name takes the next free number of
+    its designation, so the copy still counts as damage."""
+    tag, _n = _damage.parse_name(name)
+    if tag:
+        n = _damage.next_number(list(taken), tag)
+        return _damage.format_name(tag, n)
+    m = re.match(r"^(.*)\.(\d+)$", name)
+    stem = m.group(1) if m and m.group(1) else name
+    i = 1
+    while f"{stem}.{i}" in taken:
+        i += 1
+    return f"{stem}.{i}"
+
+
+def resolve_duplicates(features, id_prop, action):
+    """Give every name ONE feature. `action`:
+
+      * "rename": the first feature keeps the name, each further one is
+        renumbered (PAL, PAL.1, ...), so they become separate regions;
+      * "merge": each name becomes one feature, in the first one's place and
+        with its properties, holding the union of all of them (exact copies add
+        nothing; separate lobes become one multi-part shape).
+
+    Returns {features, changed: [{name, into: [names]}]}; the input is untouched."""
+    if action not in ("rename", "merge"):
+        raise ValueError(f"unknown action {action!r}: use 'rename' or 'merge'")
+    idx = _index_all(features, id_prop)
+    groups = {nm: ks for nm, ks in idx.items() if len(ks) > 1}
+    out = json.loads(json.dumps(features))
+    changed = []
+    if action == "rename":
+        taken = set(idx)
+        for nm, ks in groups.items():
+            into = [nm]
+            for k in ks[1:]:
+                new = _free_name(nm, taken)
+                taken.add(new)
+                _rename_props(out[k], id_prop, new)
+                into.append(new)
+            changed.append({"name": nm, "into": into})
+        return {"features": out, "changed": changed}
+    drop = set()
+    for nm, ks in groups.items():
+        body = _body(features, ks)
+        if body.is_empty:
+            continue
+        out[ks[0]]["geometry"] = mapping(body)
+        drop.update(ks[1:])
+        changed.append({"name": nm, "into": [nm]})
+    return {"features": [f for k, f in enumerate(out) if k not in drop], "changed": changed}
+
+
 def _guard_duplicate_names(features, id_prop, names, what):
     """Refuse an operation that needs a name to mean exactly ONE polygon.
 

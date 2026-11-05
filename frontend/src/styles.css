@@ -260,6 +260,10 @@ button.fold:hover .arr { color: #e6e9ef; border-color: #3a4658; }
 }
 .ask h4 { margin: 0 0 8px; font-size: 14px; }
 .ask .row { margin-top: 12px; }
+.ask .dup-list {
+  margin: 10px 0 0; padding: 0 0 0 18px; max-height: 40vh; overflow-y: auto;
+  font-size: 12px; line-height: 1.6;
+}
 
 /* right-click a region -> rename */
 .ctxmenu {
