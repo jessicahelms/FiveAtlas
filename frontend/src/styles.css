@@ -79,6 +79,9 @@ body {
   border-right: 1px solid #232a35;
   padding: 16px;
   overflow-y: auto;
+  /* rows wrap instead (Share borders' Snap buttons ran past the edge and a
+     sideways scrollbar appeared) */
+  overflow-x: hidden;
 }
 /* the drag handle between the sidebar and the canvas */
 .splitter {

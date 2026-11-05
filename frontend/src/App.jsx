@@ -1537,14 +1537,16 @@ export default function App() {
           setBorderArc(null);
           const gap = formatGapPx(res && res.gapPx);
           setBorderMsg(res && res.touching === false
-            ? `"${next[0]}" and "${next[1]}" are ${gap} apart - click Share borders first to tile the gap.`
+            ? `"${next[0]}" and "${next[1]}" are ${gap} apart. Share borders joins them along a border `
+              + '(it bridges gaps up to the Snap reach below); Merge into one makes them one region.'
             : `"${next[0]}" and "${next[1]}" aren't adjacent - no shared border to edit.`);
           return;
         }
         if (res && res.touching === false) {
           const gap = formatGapPx(res.gapPx);
           setBorderArc(null);
-          setBorderMsg(`"${next[0]}" and "${next[1]}" are ${gap} apart - click Share borders first to make a shared edge, then drag it to fine-tune.`);
+          setBorderMsg(`"${next[0]}" and "${next[1]}" are ${gap} apart. Share borders makes a shared edge `
+            + 'you can then drag (it bridges gaps up to the Snap reach below); Merge into one makes them one region.');
           return;
         }
         setBorderSegments(arcs); setBorderSegmentIndex(0); setBorderArc(borderArcsFc(arcs));
@@ -2064,11 +2066,24 @@ export default function App() {
   const openRegionMenu = useCallback((m) => {
     if (busyRef.current) return;   // a Share landing now would revert a rename/delete
     if (!m || m.index == null || m.index < 0) return;
-    setRegionMenu(m);
+    // The map's pick can be one frame behind a reorder (Send to back): the
+    // menu said VL while V3 -- now at VL's old place -- got selected. The
+    // feature it named wins over the place it gave.
+    const cur = fcRef.current;
+    const feats = (cur && cur.features) || [];
+    let index = m.index;
+    if (m.feature && feats[index] !== m.feature && feats.indexOf(m.feature) >= 0) {
+      index = feats.indexOf(m.feature);
+    } else if (m.name && feats[index] && featureName(feats[index], idProp) !== m.name) {
+      const k = feats.findIndex((f) => featureName(f, idProp) === m.name);
+      if (k >= 0) index = k;
+    }
+    const mm = { ...m, index };
+    setRegionMenu(mm);
     setMenuView('menu');
-    setRenameDraft(m.name || '');
-    setSelected([m.index]);
-  }, []);
+    setRenameDraft(mm.name || '');
+    setSelected([index]);
+  }, [idProp]);
   const closeRegionMenu = useCallback(() => { setRegionMenu(null); setMenuView('menu'); }, []);
   // Keep the menu on screen: opened near the bottom (or right) edge it ran off
   // the window and its last items could not be reached. It moves up/left to
@@ -2853,15 +2868,24 @@ export default function App() {
   // points shows them orange; the Tidy points box says how many)
   const bunchedCount = useMemo(() => {
     if (mode !== 'modify' || !fc || selected.length !== 1 || !fc.features[selected[0]]) return 0;
-    return bunchedPoints(fc.features[selected[0]]).length;
-  }, [mode, fc, selected]);
+    // every feature of the name: a region in several features is one region
+    // (an exact copy -- a region stored twice -- counted once)
+    const nm = featureName(fc.features[selected[0]], idProp);
+    const seen = new Set();
+    return fc.features.filter((f) => featureName(f, idProp) === nm)
+      .filter((f) => { const k = JSON.stringify(f.geometry); if (seen.has(k)) return false; seen.add(k); return true; })
+      .reduce((t, f) => t + bunchedPoints(f).length, 0);
+  }, [mode, fc, selected, idProp]);
 
 
   // The Resample box showing for a region or a shared border it has no counts
   // for (another region, other picks, the other method): work them out, without
   // previewing until the slider moves.
+  // A border can be tidied once there is one: shared now, or two picks that
+  // already touch ("Shared border detected") -- the box used to wait for Share
+  const borderReady = borderShared || (borderPicks.length === 2 && borderSegments.length > 0);
   const resampleWhich = mode === 'modify' && regionScope ? 'region'
-    : (mode === 'border' && borderShared && borderScope ? 'border' : null);
+    : (mode === 'border' && borderReady && borderScope ? 'border' : null);
   const resampleScope = resampleWhich === 'region' ? regionScope
     : (resampleWhich === 'border' ? borderScope : null);
   // the map the counts are for: under a preview, the map it was built on. A
@@ -2889,11 +2913,13 @@ export default function App() {
     if (uiSettings.autoTidy === false || mode !== 'modify' || !selectedName) return;
     const key = `${dsId}|region:${selectedName}`;
     if (autoTidied.current.has(key)) return;
-    if (busyRef.current || regionResampleRef.current) return;
+    // busy: tried again once it is done (busy is a dependency) -- it used to
+    // be skipped for good
+    if (busy || regionResampleRef.current) return;
     autoTidied.current.add(key);
     if (bunchedCount === 0) return;                                  // nothing to tidy
     runTidy([selectedName], fcRef.current, null);
-  }, [uiSettings.autoTidy, mode, selectedName, dsId, bunchedCount, runTidy]);
+  }, [uiSettings.autoTidy, mode, selectedName, dsId, bunchedCount, busy, runTidy]);
   const toggleAutoTidy = useCallback((on) => {
     applyUiSettings({ ...uiSettings, autoTidy: !!on });
   }, [uiSettings, applyUiSettings]);
@@ -3645,6 +3671,7 @@ export default function App() {
                 cleanFound={cleanFound && cleanFound.res} cleanMsg={cleanMsg}
                 onApplyClean={applyClean} onCancelClean={clearClean}
                 borderPicks={borderPicks} borderMsg={borderMsg} borderShared={borderShared}
+                borderReady={borderReady}
                 onClearBorder={clearBorder} onShareBorders={doShareBorders}
                 onMerge={doMerge} splitMsg={splitMsg}
                 splitAsk={splitAsk && splitAsk.names}

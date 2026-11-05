@@ -798,6 +798,7 @@ export default function Viewer({
     e.preventDefault();
     onRegionMenu({
       index: hit.index,
+      feature: hit.object,     // the menu checks the index still points at it
       name: regionName(hit.object, idProp),
       x: e.clientX,
       y: e.clientY,

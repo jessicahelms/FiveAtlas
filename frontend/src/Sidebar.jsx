@@ -164,7 +164,7 @@ function Sidebar({
   loadAsk, onAnswerLoad, onLoadDamage,
   overlapAsk, onAnswerOverlap, onToggleTranslate,
   mode, onToggleModify, onToggleBorder, onToggleSplit, onToggleDissolve, onToggleDraw,
-  borderPicks, borderMsg, borderShared, onClearBorder, onShareBorders, onMerge,
+  borderPicks, borderMsg, borderShared, borderReady, onClearBorder, onShareBorders, onMerge,
   mergeAsk, onFoldIntoContainer, onCancelMergeAsk, onShareAgain,
   snapTol, onSnapTol, reachGap, fillAll, onFillAll,
   splitMsg, splitAsk, onSplitPick, onSplitCancel, drawMsg, drawKind, onDrawKind, designations, damageAsk, onAnswerDamage,
@@ -661,7 +661,8 @@ function Sidebar({
             {picks.length >= 2 && !borderShared && (
               <div className="prop">
                 <div className="pts-head">Share borders — where should the seam go?</div>
-                <div className="row">
+                {/* wraps: with 3 picks "Snap to HY" ran off the sidebar's edge */}
+                <div className="row wrap">
                   <button className="btn sm primary" disabled={busy}
                     title="split the gap (or the overlap) down the middle, as it always did"
                     onClick={() => onShareBorders(null)}>
@@ -758,7 +759,12 @@ function Sidebar({
                           ? ' — no reach closes it'
                           : (snapTol >= need
                             ? ' — this reach closes it ✓'
-                            : ` — set the slider to bridge ${Math.ceil(need) * 2} px or more`)}
+                            // the reach a close needs can be far more than the
+                            // width: "2 px across — bridge 274 px" read as a
+                            // contradiction; it is an open bay beside the gap
+                            : (Math.ceil(need) * 2 > 1.5 * Math.max(reachGap.width, 1)
+                              ? ` — but it opens onto a wider bay, so closing it needs the slider at ${Math.ceil(need) * 2} px or more`
+                              : ` — set the slider to bridge ${Math.ceil(need) * 2} px or more`))}
                       </span>
                     </div>
                   );
@@ -808,7 +814,7 @@ function Sidebar({
                 </>)}
               </div>
             )}
-            {picks.length >= 2 && borderShared && (
+            {picks.length >= 2 && (borderShared || borderReady) && (
               <div className="prop">
                 <div className="pts-head">Tidy points</div>
                 <ResampleSlider method={resampleMethod} tol={resampleTol} busy={busy}

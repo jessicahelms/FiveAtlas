@@ -5351,8 +5351,14 @@ def resample_regions(features, id_prop, names, tol=20.0, precision=1.0, method="
                     pass
         return found
 
+    def _handles(arcs):
+        # the drag points on screen: a closed arc's last point IS its first,
+        # and two arcs meet at a shared end -- counted once each (the box read
+        # 50 where 48 handles showed)
+        return len({(round(p[0], 6), round(p[1], 6)) for a in arcs for p in a})
+
     arcs_before = _arcs_of(out)
-    handles_before = sum(len(a) for a in arcs_before)
+    handles_before = _handles(arcs_before)
     arcs_done, kept = [], []
     containers = section_containers(out, id_prop)
     # Sorted, so the result never depends on which region was clicked first (it
@@ -5379,8 +5385,7 @@ def resample_regions(features, id_prop, names, tol=20.0, precision=1.0, method="
     arcs_after = _arcs_of(out)
     return {"features": out, "counts": counts, "arcs": arcs_done, "tol": tol,
             "arcPoints": arcs_after, "kept": kept,
-            "handles": {"before": handles_before,
-                        "after": sum(len(a) for a in arcs_after)}}
+            "handles": {"before": handles_before, "after": _handles(arcs_after)}}
 
 
 # ---- a region's outline, point by point -----------------------------------------

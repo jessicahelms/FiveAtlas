@@ -11,6 +11,37 @@ The first `### ` title of a section is also what the app's update banner
 shows ("FiveAtlas 1.3.2 is out — Faster on laptops"), so lead with the change
 people will care about most and keep that title short.
 
+## v1.4.3
+
+### Tidy a shared border straight away
+
+- In **Edit shared borders**, the **Tidy points** box now shows as soon as
+  two picked regions already share a border — no need to press **Share
+  borders** first.
+- Its point count counts each point once. It used to count where two
+  stretches of the border meet twice.
+
+### Clearer Share borders
+
+- With three or more regions picked, the **Snap to …** buttons wrap onto a
+  new line instead of running off the edge of the sidebar (which also
+  stopped the sidebar scrolling sideways).
+- The gap readout no longer contradicts itself. When a gap is narrow but
+  opens onto a wider bay it says so: "2 px across — but it opens onto a
+  wider bay, so closing it needs the slider at 274 px or more".
+- Picking two regions that are far apart now says that **Merge into one**
+  makes them one region, as well as what **Share borders** does.
+
+### Smaller fixes
+
+- Right-clicking a region straight after **Send to back** or **Bring to
+  front** always opens the menu for — and selects — the region you clicked.
+  Once in a while it picked the region that used to be there.
+- Opening **Edit points** while something else is still finishing no longer
+  skips the automatic tidy for that region.
+- The orange "points sitting next to another" count covers every part of a
+  region stored in several pieces, and counts a region stored twice once.
+
 ## v1.4.2
 
 ### Points tidy themselves: no more points bunched together
