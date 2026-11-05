@@ -2185,7 +2185,10 @@ def resolve_duplicates(features, id_prop, action):
         return {"features": out, "changed": changed}
     drop = set()
     for nm, ks in groups.items():
-        body = _body(features, ks)
+        # near-exact copies (dft's two differ by 38 px2) add nothing: unioned in,
+        # their hairline offsets gave a saw-tooth outline, 186 -> 332 points
+        copy_of = _copies([(k, _geom_at(features, k)) for k in ks])
+        body = _body(features, [k for k in ks if k not in copy_of])
         if body.is_empty:
             continue
         out[ks[0]]["geometry"] = mapping(body)
@@ -4922,10 +4925,6 @@ def _split_long_edges(poly, spacing):
                    [list(r.coords) for r in poly.interiors])
 
 
-def _ring_handles(poly):
-    return len(poly.exterior.coords) - 1
-
-
 def _point_arc(arc, tol, method, ok=None):
     """Re-point a stretch for Resample points: even spacing `tol` ("even"), or the
     fewest points within `tol` px of it ("shape"; `ok` as in _shape_points)."""
@@ -6018,11 +6017,15 @@ def resample_region(features, id_prop, name, tol=20.0, eps=0.5, max_drift=0.05,
             # points ~150 px apart down its lft side ("space points evenly
             # doesnt work"). Split each such edge evenly, in this region only:
             # the points lie ON the edge, so nothing moves and no border opens.
-            split = [_split_long_edges(p, tol) for p in rebuilt]
-            handles_after += sum(_ring_handles(a) - _ring_handles(b) for a, b in zip(split, rebuilt))
-            rebuilt = split
+            rebuilt = [_split_long_edges(p, tol) for p in rebuilt]
         if rebuilt:
             ng = rebuilt[0] if len(rebuilt) == 1 else MultiPolygon(rebuilt)
+            if not ng.is_valid:
+                # two lobes of one feature re-pointed into each other (seen at
+                # 225-600 px): join them rather than save an invalid shape
+                ng = unary_union(rebuilt)
+                if ng.is_empty or not ng.is_valid:
+                    ng = _geom_at(features, k)
             out[k]["geometry"] = mapping(ng)
 
     for k, k0 in copy_of.items():
@@ -6054,8 +6057,11 @@ def resample_region(features, id_prop, name, tol=20.0, eps=0.5, max_drift=0.05,
                            "areaDrift": round((b1.area - b0.area)
                                               / max(b0.area, 1e-9) * 100, 3),
                            "shared": True})
+    # the handles a person sees, every ring (HY's hole was left out: the slider
+    # said 72 for 96 handles), a region stored twice counted once
     return {"features": out, "counts": counts, "tol": tol,
-            "handles": {"before": handles_before, "after": handles_after},
+            "handles": {"before": point_count(features, id_prop, name),
+                        "after": point_count(out, id_prop, name)},
             "kept": sorted(set(kept))}
 
 
@@ -6418,7 +6424,9 @@ def resample_options(features, id_prop, names, method="shape"):
         for n in sorted(ladder, reverse=True):
             if n >= top:
                 continue
-            moved = _outline_moved(old, _count_features(base, id_prop, nm, ladder[n]), id_prop)
+            g1 = _rows_body(ladder[n])
+            moved = (old[nm].boundary.hausdorff_distance(g1.boundary)
+                     if not g1.is_empty and not old[nm].is_empty else 0.0)
             options.append({"points": n, "tol": -float(n), "deform": True,
                             "moved": round(moved, 1)})
     return {"before": before, "options": options}
@@ -6435,17 +6443,21 @@ COUNT_FLOOR = 3
 _count_cache = {}          # (features digest, name, method) -> (base features, ladder)
 
 
-def _ring_area(cs):
+def _signed_area(cs):
     s = 0.0
     for i in range(len(cs)):
         x0, y0 = cs[i - 1]
         x1, y1 = cs[i]
         s += x0 * y1 - x1 * y0
-    return abs(s) / 2.0
+    return s / 2.0
+
+
+def _signed_tri(a, b, c):
+    return ((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])) / 2.0
 
 
 def _tri_area(a, b, c):
-    return abs((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])) / 2.0
+    return abs(_signed_tri(a, b, c))
 
 
 def _even_ring(cs, m):
@@ -6467,123 +6479,204 @@ def _even_ring(cs, m):
     return out
 
 
+#: Counts above this are not offered one by one below the guarded fewest: a
+#: slider of 2,000 notches helps nobody, and keeping every step cost 11.5 s
+_LADDER_MAX = 400
+
+
 def _count_ladder(features, id_prop, name, method="shape", floor=COUNT_FLOOR):
-    """Every count from the region's points down to `floor`, as
-    {count: [(feature index, [[outer ring], [hole], ...]), ...]}.
+    """Every count from the region's points (at most _LADDER_MAX) down to
+    `floor`, as {count: [(feature index, [[outer ring], [hole], ...]), ...]}.
 
     Visvalingam: drop the point whose triangle with its two neighbours is
     smallest -- the point that matters least to the shape -- one at a time,
-    never one that would make its polygon invalid. A whole small part or hole
-    goes when it costs less (its area) than the next point; the biggest part's
-    outline always stays, so it can reach a triangle. "even" then spaces each
-    ring's points evenly along the outline it had, if that stays valid."""
-    rings, parts = {}, []          # ring id -> points (no closing repeat); parts
-    for k in _index_all(features, id_prop).get(str(name), []):
+    never one that would make its polygon invalid. A whole hole, or a whole
+    small part of a feature that has another, goes when it costs less (its
+    area) than the next point; a feature always keeps a part, and the biggest
+    part always stays, so it can reach a triangle. A copy of another feature
+    of the name (_copies) is left out: _count_features gives it the same shape.
+    "even" then spaces each ring's points evenly along the outline it had, if
+    that stays valid."""
+    import heapq
+    ks = _index_all(features, id_prop).get(str(name), [])
+    copy_of = _copies([(k, _geom_at(features, k)) for k in ks]) if len(ks) > 1 else {}
+    xy, nxt, prv, ring_of = [], [], [], []          # per point
+    rings, parts, orig = [], [], []                 # per ring / part / ring
+
+    def add_ring(cs, pi):
+        rid, base, m = len(rings), len(xy), len(cs)
+        for j, c in enumerate(cs):
+            xy.append(c)
+            nxt.append(base + (j + 1) % m)
+            prv.append(base + (j - 1) % m)
+            ring_of.append(rid)
+        rings.append({"head": base, "n": m, "area": _signed_area(cs), "part": pi, "alive": True})
+        orig.append(list(cs))
+        return rid
+
+    for k in ks:
+        if k in copy_of:
+            continue
         for p in _polys(_geom_at(features, k)):
-            ids = []
-            for r in [p.exterior] + list(p.interiors):
+            ext = [tuple(c[:2]) for c in p.exterior.coords][:-1]
+            if len(ext) < 3:
+                continue
+            pi = len(parts)
+            parts.append({"k": k, "ext": None, "holes": [], "alive": True})
+            parts[pi]["ext"] = add_ring(ext, pi)
+            for r in p.interiors:
                 cs = [tuple(c[:2]) for c in r.coords][:-1]
                 if len(cs) >= 3:
-                    rings[len(rings)] = cs
-                    ids.append(len(rings) - 1)
-                elif not ids:
-                    break                       # no outer ring: nothing to keep
-            if ids:
-                parts.append({"k": k, "ext": ids[0], "holes": ids[1:]})
+                    parts[pi]["holes"].append(add_ring(cs, pi))
     if not parts:
         return {}
-    orig = {i: list(cs) for i, cs in rings.items()}
-    main = max(range(len(parts)), key=lambda i: _ring_area(rings[parts[i]["ext"]]))
+    alive = [True] * len(xy)
+    stamp = [0] * len(xy)
 
-    def total():
-        return sum(len(rings[p["ext"]]) + sum(len(rings[h]) for h in p["holes"])
-                   for p in parts)
+    def ring_pts(rid, skip=None):
+        out, h = [], rings[rid]["head"]
+        v = h
+        while True:
+            if v != skip:
+                out.append(xy[v])
+            v = nxt[v]
+            if v == h:
+                return out
+
+    def main_part():
+        return max((i for i, p in enumerate(parts) if p["alive"]),
+                   key=lambda i: abs(rings[parts[i]["ext"]]["area"]))
 
     def snap():
-        return [(p["k"], p["ext"], list(p["holes"]), {i: list(rings[i]) for i in
-                 [p["ext"]] + p["holes"]}) for p in parts]
+        return [(p["k"], [p["ext"]] + list(p["holes"]),
+                 {r: ring_pts(r) for r in [p["ext"]] + p["holes"]})
+                for p in parts if p["alive"]]
 
-    def valid(p, ring_id=None, pts=None):
-        def get(i):
-            return pts if i == ring_id else rings[i]
+    def tri(v):
+        return _tri_area(xy[prv[v]], xy[v], xy[nxt[v]])
+
+    def valid_without(v):
+        rid = ring_of[v]
+        p = parts[rings[rid]["part"]]
+        rs = [ring_pts(r, v if r == rid else None) for r in [p["ext"]] + p["holes"]]
         try:
-            return Polygon(get(p["ext"]), [get(h) for h in p["holes"]]).is_valid
+            return Polygon(rs[0], rs[1:]).is_valid
         except Exception:
             return False
 
-    snaps = {total(): snap()}
-    while total() > floor:
-        cands = []
-        for pi, p in enumerate(parts):
-            for ri in [p["ext"]] + p["holes"]:
-                cs = rings[ri]
-                if len(cs) > 3:
-                    m = len(cs)
-                    for vi in range(m):
-                        cands.append((_tri_area(cs[vi - 1], cs[vi], cs[(vi + 1) % m]),
-                                      pi, ri, vi))
-                if not (pi == main and ri == p["ext"]):
-                    cands.append((_ring_area(cs), pi, ri, None))
-        cands.sort(key=lambda c: c[0])
-        done = False
-        for _, pi, ri, vi in cands:
-            p = parts[pi]
-            if vi is None:                      # a whole hole, or a whole small part
-                if ri == p["ext"]:
-                    parts.pop(pi)
-                    main = max(range(len(parts)),
-                               key=lambda i: _ring_area(rings[parts[i]["ext"]]))
-                else:
-                    p["holes"].remove(ri)
-                done = True
-                break
-            pts = rings[ri][:vi] + rings[ri][vi + 1:]
-            if valid(p, ri, pts):
-                rings[ri] = pts
-                done = True
-                break
-        if not done:
+    heap = [(tri(v), 0, v) for v in range(len(xy))]
+    heapq.heapify(heap)
+    total = len(xy)
+    main = main_part()
+    snaps = {total: snap()} if total <= _LADDER_MAX else {}
+    blocked = []
+    while total > floor:
+        cand_v = None
+        while heap:
+            a, st, v = heap[0]
+            r = rings[ring_of[v]]
+            if not alive[v] or st != stamp[v] or not r["alive"] or r["n"] <= 3:
+                heapq.heappop(heap)
+                continue
+            cand_v = (a, v)
             break
-        snaps.setdefault(total(), snap())
+        cand_r = None
+        per_k = {}
+        for p in parts:
+            if p["alive"]:
+                per_k[p["k"]] = per_k.get(p["k"], 0) + 1
+        for rid, r in enumerate(rings):
+            if not r["alive"]:
+                continue
+            p = parts[r["part"]]
+            if rid == p["ext"] and (r["part"] == main or per_k.get(p["k"], 0) < 2):
+                continue
+            if cand_r is None or abs(r["area"]) < cand_r[0]:
+                cand_r = (abs(r["area"]), rid)
+        if cand_v is None and cand_r is None:
+            break
+        if cand_r is not None and (cand_v is None or cand_r[0] < cand_v[0]):
+            rid = cand_r[1]
+            p = parts[rings[rid]["part"]]
+            if rid == p["ext"]:                   # a whole small part
+                p["alive"] = False
+                for h in [p["ext"]] + p["holes"]:
+                    rings[h]["alive"] = False
+                    total -= rings[h]["n"]
+                main = main_part()
+            else:                                 # a whole hole
+                p["holes"].remove(rid)
+                rings[rid]["alive"] = False
+                total -= rings[rid]["n"]
+        else:
+            v = cand_v[1]
+            heapq.heappop(heap)
+            if not valid_without(v):
+                blocked.append(v)                 # may be fine once others go
+                continue
+            r = rings[ring_of[v]]
+            pv, nv = prv[v], nxt[v]
+            r["area"] -= _signed_tri(xy[pv], xy[v], xy[nv])
+            nxt[pv], prv[nv] = nv, pv
+            alive[v] = False
+            r["n"] -= 1
+            if r["head"] == v:
+                r["head"] = nv
+            total -= 1
+            for u in [pv, nv] + blocked:
+                if alive[u]:
+                    stamp[u] += 1
+                    heapq.heappush(heap, (tri(u), stamp[u], u))
+            blocked = []
+        if total <= _LADDER_MAX:
+            snaps.setdefault(total, snap())
     if method != "shape":
         for n, sn in snaps.items():
             even = []
-            for k, ext, holes, pts in sn:
-                ev = {i: _even_ring(orig[i], len(pts[i])) for i in pts}
+            for k, rids, pts in sn:
+                ev = {i: _even_ring(orig[i], len(pts[i])) for i in rids}
                 try:
-                    ok = Polygon(ev[ext], [ev[h] for h in holes]).is_valid
+                    ok = Polygon(ev[rids[0]], [ev[h] for h in rids[1:]]).is_valid
                 except Exception:
                     ok = False
-                even.append((k, ext, holes, ev if ok else pts))
+                even.append((k, rids, ev if ok else pts))
             snaps[n] = even
-    return {n: [(k, [pts[ext]] + [pts[h] for h in holes]) for k, ext, holes, pts in sn]
-            for n, sn in snaps.items()}
+    return {n: [(k, [pts[i] for i in rids]) for k, rids, pts in sn] for n, sn in snaps.items()}
+
+
+def _rows_body(rows):
+    """One ladder step's rings as one shape (to measure how far it moved)."""
+    ps = [Polygon(rs[0], rs[1:]) for _, rs in rows]
+    if not ps:
+        return Polygon()
+    g = ps[0] if len(ps) == 1 else unary_union(ps)
+    return g if g.is_valid else _valid(g)
 
 
 def _count_features(features, id_prop, name, rows):
-    """`features` with region `name` replaced by one ladder step's rings."""
+    """`features` with region `name` given one ladder step's rings. A feature
+    the step has no rings for keeps its shape (none is ever emptied), and a
+    copy of another feature of the name follows it (_mirror_copies)."""
     from shapely.geometry import MultiPolygon
     out = json.loads(json.dumps(features))
     by_k = {}
     for k, rs in rows:
         by_k.setdefault(k, []).append(Polygon(rs[0], rs[1:]))
-    for k in _index_all(features, id_prop).get(str(name), []):
-        ps = by_k.get(k, [])
-        if not ps:
-            g = Polygon()
-        elif len(ps) == 1:
-            g = ps[0]
-        else:
-            g = MultiPolygon(ps)
-            if not g.is_valid:
-                g = unary_union(ps)
+    for k, ps in by_k.items():
+        g = ps[0] if len(ps) == 1 else MultiPolygon(ps)
+        if not g.is_valid:
+            g = unary_union(ps)
+        if g.is_empty or not g.is_valid:
+            continue
         out[k]["geometry"] = mapping(g)
-    return out
+    return _mirror_copies(features, out, id_prop)
 
 
 def resample_to_count(features, id_prop, name, n, method="shape", digest=None):
     """Region `name` with `n` points (or the nearest count the ladder has),
-    from below the guarded fewest -- this region alone, the shape may deform."""
+    from below the guarded fewest -- the shape may deform. The ladder starts
+    from the fewest guarded result, so the neighbours it re-pointed change too
+    and are listed in `counts`."""
     name = str(name)
     digest = digest or _features_digest(features)
     key = (digest, name, method)
@@ -6595,10 +6688,16 @@ def resample_to_count(features, id_prop, name, n, method="shape", digest=None):
     got = min(ladder, key=lambda c: (abs(c - int(n)), c))
     out = _count_features(base, id_prop, name, ladder[got])
     idx = _index_all(features, id_prop)
-    b0, b1 = _body(features, idx[name]), _body(out, idx[name])
-    return {"features": out, "tol": -float(got), "kept": [], "used": None,
-            "counts": [{"region": name, "before": _vertex_count(b0), "after": _vertex_count(b1),
-                        "areaDrift": round((b1.area - b0.area) / max(b0.area, 1e-9) * 100, 3)}],
+    counts = []
+    for nm, ks in idx.items():
+        b0, b1 = _body(features, ks), _body(out, ks)
+        if nm != name and b0.equals_exact(b1, 1e-9):
+            continue
+        counts.append({"region": nm, "before": _vertex_count(b0), "after": _vertex_count(b1),
+                       "areaDrift": round((b1.area - b0.area) / max(b0.area, 1e-9) * 100, 3)})
+        if nm != name:
+            counts[-1]["shared"] = True
+    return {"features": out, "tol": -float(got), "kept": [], "used": None, "counts": counts,
             "handles": {"before": point_count(features, id_prop, name),
                         "after": point_count(out, id_prop, name)}}
 
@@ -6635,8 +6734,40 @@ def fewest_options(features, id_prop, name):
     return resample_options(features, id_prop, [name], "shape")
 
 
+def _mirror_copies(features, out, id_prop):
+    """`out` with every copy (see _copies) of a feature in `features` given the
+    same geometry as the feature it copies, whichever of the two an edit
+    changed. An edit that reaches one copy only -- the nearest vertex, or a
+    neighbour's border re-pointed in that name's first feature -- otherwise
+    pulled a region stored twice apart: one HPF point deleted left TH's two
+    copies 14-24k px2 apart, and Tidy split VL.2's by 13,584 px2."""
+    def gj(f):
+        return json.dumps(f.get("geometry"), separators=(",", ":"))
+    for nm, ks in _index_all(features, id_prop).items():
+        if len(ks) < 2:
+            continue
+        for k, k0 in _copies([(k, _geom_at(features, k)) for k in ks]).items():
+            if k >= len(out) or k0 >= len(out):
+                continue
+            if gj(out[k0]) != gj(features[k0]):
+                out[k]["geometry"] = json.loads(gj(out[k0]))
+            elif gj(out[k]) != gj(features[k]):
+                out[k0]["geometry"] = json.loads(gj(out[k]))
+    return out
+
+
 def delete_point(features, id_prop, name, point, respace=True, eps=0.5,
                  max_drift=0.05, grab=2.0):
+    """_delete_point, with a region stored twice kept as one (_mirror_copies)."""
+    res = _delete_point(features, id_prop, name, point, respace=respace, eps=eps,
+                        max_drift=max_drift, grab=grab)
+    if len(res["features"]) == len(features):
+        res["features"] = _mirror_copies(features, res["features"], id_prop)
+    return res
+
+
+def _delete_point(features, id_prop, name, point, respace=True, eps=0.5,
+                  max_drift=0.05, grab=2.0):
     """Delete one point from a region's outline without opening any border, and
     re-space the rest of that stretch so no long gap is left where it was.
 
@@ -6921,9 +7052,12 @@ def bunched_count(features, id_prop, name, px=_RS_MIN_GAP):
 def point_count(features, id_prop, name):
     """`name`'s points, every ring, every feature (closing repeats not counted)
     -- the handles a person sees. (_vertex_count counts each ring's closing
-    point too: dft on 29110 read 264 for 241 handles.)"""
+    point too: dft on 29110 read 264 for 241 handles.) A copy of another
+    feature of the name (_copies) is counted once: it moves with it."""
+    ks = _index_all(features, id_prop).get(str(name), [])
+    copy_of = _copies([(k, _geom_at(features, k)) for k in ks]) if len(ks) > 1 else {}
     return sum(len(r.coords) - 1
-               for k in _index_all(features, id_prop).get(str(name), [])
+               for k in ks if k not in copy_of
                for p in _polys(_geom_at(features, k))
                for r in [p.exterior] + list(p.interiors))
 
@@ -6968,6 +7102,7 @@ class _FinishGuard:
                 self.nest[(a, b)] = (small, big)
         self.ov0 = self._overlaps(self.b0, self.peers)
         self.gap0 = self._gap(self.b0)
+        self.out0 = self._outside(self.b0)
         # the current state (Tidy's result)
         idx = _index_all(current, id_prop)
         self.cur = {n: _body(current, idx[n]) for n in self.local}
@@ -6975,6 +7110,7 @@ class _FinishGuard:
         self.moved = {n: self._moved(n, self.cur[n]) for n in self.local}
         self.ov = self._overlaps(self.cur, self.peers)
         self.gap = self._gap(self.cur)
+        self.out = self._outside(self.cur)
         self.valid = self._valid(current, idx, self.local)
 
     def _drift(self, n, g):
@@ -7076,11 +7212,14 @@ class _FinishGuard:
         gap = self._gap(bodies)
         if gap - self.gap0 > self.gap_budget and gap > self.gap + 1e-6:
             failed.append(f"gap +{gap - self.gap0:.1f}px2")
+        outside = self._outside(bodies)
+        if outside - self.out0 > self.overlap_budget and outside > self.out + 1e-6:
+            failed.append(f"outside the section outline +{outside - self.out0:.1f}px2")
         bad = self._valid(features, idx, changed)
         if bad:
             failed.append("invalid " + ",".join(bad))
         rec = {"bodies": {n: bodies[n] for n in changed}, "drift": drift, "moved": moved,
-               "ov": ov, "gap": gap, "changed": changed}
+               "ov": ov, "gap": gap, "outside": outside, "changed": changed}
         return (not failed), failed, rec, step
 
     def accept(self, rec):
@@ -7090,6 +7229,18 @@ class _FinishGuard:
             self.moved[n] = rec["moved"][n]
         self.ov.update(rec["ov"])
         self.gap = rec["gap"]
+        self.out = rec["outside"]
+
+    def _outside(self, bodies):
+        """Regions' ground outside the section outline (hemi), in the window:
+        deleting hemi's points moved its edge in over SSp (+16,700 px2) with
+        nothing watching -- hemi is a container, not a peer, so no overlap
+        rule saw it."""
+        if not self.cont:
+            return 0.0
+        U = unary_union([bodies[n].intersection(self.W) for n in self.peers] or [Polygon()])
+        H = unary_union([bodies[c] for c in self.cont])
+        return _safe_difference(U, H).area
 
 
 def _snap_point(features, idx, names, src, dst, eps=0.5):
@@ -7203,6 +7354,7 @@ def tidy_finish(features, id_prop, name, min_gap=_RS_MIN_GAP, respace=True, orig
                 if sn is None:
                     why.append("merge refused")
                     continue
+                sn = (_mirror_copies(sub, sn[0], id_prop), sn[1])
                 ok, failed, rec, step = guard.trial(sn[0], idx, sn[1])
                 if ok:
                     oks.append((step, "merge", sn[0], rec, {"removedFrom": sn[1]}))
