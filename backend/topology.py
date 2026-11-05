@@ -4902,6 +4902,30 @@ def _declutter(arc, keep, dev, min_gap, ok=None):
 RESAMPLE_METHODS = ("even", "shape")
 
 
+def _split_ring(cs, spacing):
+    """Closed ring `cs` with every edge longer than 1.5 x `spacing` split into
+    equal parts about `spacing` long. Every old point stays; the new ones lie
+    on the old edges, so the shape is exactly what it was."""
+    out = [tuple(cs[0])]
+    for a, b in zip(cs, cs[1:]):
+        d = math.dist(a[:2], b[:2])
+        k = int(round(d / spacing)) if d > 1.5 * spacing else 1
+        for j in range(1, k):
+            out.append((a[0] + (b[0] - a[0]) * j / k, a[1] + (b[1] - a[1]) * j / k))
+        out.append(tuple(b))
+    return out
+
+
+def _split_long_edges(poly, spacing):
+    """`poly` with _split_ring on its outline (holes are not resampled)."""
+    return Polygon(_split_ring(list(poly.exterior.coords), spacing),
+                   [list(r.coords) for r in poly.interiors])
+
+
+def _ring_handles(poly):
+    return len(poly.exterior.coords) - 1
+
+
 def _point_arc(arc, tol, method, ok=None):
     """Re-point a stretch for Resample points: even spacing `tol` ("even"), or the
     fewest points within `tol` px of it ("shape"; `ok` as in _shape_points)."""
@@ -5986,6 +6010,17 @@ def resample_region(features, id_prop, name, tol=20.0, eps=0.5, max_drift=0.05,
             rebuilt.append(cand)
             handles_after += len(ring) - 1
 
+        if rebuilt and method == "even":
+            # Edges no stretch re-pointed -- a link between two neighbours, a
+            # two-point border, one whose neighbour could not take it -- were
+            # left as one long edge while the rest bunched at the spacing: TH cut
+            # to 17 points came back 32 with an 8,000 px edge and a row of
+            # points ~150 px apart down its lft side ("space points evenly
+            # doesnt work"). Split each such edge evenly, in this region only:
+            # the points lie ON the edge, so nothing moves and no border opens.
+            split = [_split_long_edges(p, tol) for p in rebuilt]
+            handles_after += sum(_ring_handles(a) - _ring_handles(b) for a, b in zip(split, rebuilt))
+            rebuilt = split
         if rebuilt:
             ng = rebuilt[0] if len(rebuilt) == 1 else MultiPolygon(rebuilt)
             out[k]["geometry"] = mapping(ng)
@@ -6330,6 +6365,12 @@ def resample_options(features, id_prop, names, method="shape"):
     digest = _features_digest(features)
     grid = _FEWEST_GRID if method == "shape" else _EVEN_GRID
     names = [str(n) for n in names]
+    if method != "shape" and len(names) == 1:
+        # one region: below the old slider's 600 px the counts down to 3 take
+        # over, spaced evenly all the way round. The coarser settings mixed a
+        # few re-pointed stretches 2,000+ px apart with dense ones left as
+        # they were (TH: 85 points, median gap 57 px, widest 2,302).
+        grid = [t for t in grid if t <= EVEN_LOOSE]
     idx = _index_all(features, id_prop)
     old = {n: _body(features, idx[n]) for n in names if n in idx}
     before, best, options = None, None, []

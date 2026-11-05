@@ -373,6 +373,33 @@ if real.exists():
                   and [x["points"] for x in below] == list(range(below[0]["points"], 2, -1))
                   and not bad, (pts[-4:], bad))
 
+    # "space points evenly doesnt work": TH cut to 17 points (its borders no
+    # longer meeting its neighbours'), then evened out, came back with one
+    # 8,000 px edge and the points bunched down one border. Every edge now
+    # within 1.6x the spacing; the counts below it about the same apart.
+    def edges(fs, nm):
+        g = geom(fs, nm)
+        cs = list(max(T._polys(g), key=lambda q: q.area).exterior.coords)
+        return [math.dist(cs[i], cs[i + 1]) for i in range(len(cs) - 1)]
+
+    o = T.resample_options(feats, "name", ["TH"], "shape")
+    th17 = T.resample_at(feats, "name", ["TH"], -17.0, "shape")["features"]
+    o = T.resample_options(th17, "name", ["TH"], "even")
+    worst, uneven = [], []
+    for x in o["options"]:
+        r = T.resample_at(th17, "name", ["TH"], x["tol"], "even")
+        e = edges(r["features"], "TH")
+        if x["tol"] > 0 and max(e) > 1.6 * x["tol"]:
+            worst.append((x["points"], x["tol"], round(max(e))))
+        if x["tol"] < 0 and max(e) > 2.5 * min(e):
+            uneven.append((x["points"], round(min(e)), round(max(e))))
+    check("even TH (cut to 17 first): no edge left far longer than the spacing", not worst, worst[:4])
+    check("even TH (cut to 17 first): every count below spaced evenly all round", not uneven,
+          uneven[:4])
+    sh = T.resample_at(th17, "name", ["TH"], 150.0, "even")["features"]
+    check("evening out moves no outline that wasn't re-pointed (areas the same within 1%)",
+          abs(geom(sh, "TH").area - geom(th17, "TH").area) <= 0.01 * geom(th17, "TH").area)
+
 print()
 if fails:
     print(f"{len(fails)} FAILED")
