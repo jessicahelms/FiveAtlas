@@ -36,7 +36,7 @@ function sliderToReach(pos) {
 // tol < 0 marks a count past the fewest the guards allow: that region alone
 // changes, so its borders stop meeting its neighbours'.
 function ResampleSlider({ method, tol, onMethod, onTol, busy, scope, counts, label, onTidy,
-  bunched, auto, onAuto, note, onUndo, previewing }) {
+  bunched, auto, onAuto, previewing }) {
   const shape = method === 'shape';
   const opts = counts && counts.options ? counts.options : null;
   // With a preview up the slider sits on its notch; without one (after Keep or
@@ -68,16 +68,7 @@ function ResampleSlider({ method, tol, onMethod, onTol, busy, scope, counts, lab
   const loading = !counts || counts.loading;
   return (
     <>
-      {note && (
-        <div className="hint">
-          {note}
-          <div className="row">
-            <button className="btn sm" disabled={busy} onClick={() => onUndo && onUndo()}
-              title="put the points back as they were (Ctrl+Z does the same)">Undo</button>
-          </div>
-        </div>
-      )}
-      {bunched > 0 && !note && (
+      {bunched > 0 && (
         <div className="hint warn">
           {bunched} points sit right next to another — orange on the map.
         </div>
@@ -160,7 +151,7 @@ function displayName(feature, idProp) {
 function Sidebar({
   info, fc, selected, onSelectName, onRegionMenu, onDeleteSelected, pointMsg,
   regionResample, onRegionResampleTol, onApplyRegionResample, onCancelRegionResample,
-  resampleOpts, onTidy, bunchedCount, autoTidy, onAutoTidy, autoTidyNote, onUndoAutoTidy,
+  resampleOpts, onTidy, bunchedCount, autoTidy, onAutoTidy,
   loadAsk, onAnswerLoad, onLoadDamage,
   overlapAsk, onAnswerOverlap, onToggleTranslate,
   mode, onToggleModify, onToggleBorder, onToggleSplit, onToggleDissolve, onToggleDraw,
@@ -580,7 +571,7 @@ function Sidebar({
             <ResampleSlider method={resampleMethod} tol={resampleTol} busy={busy}
               scope={`region:${selectedName}`} counts={resampleOpts} label={selectedName}
               onTidy={() => onTidy && onTidy('region')} bunched={bunchedCount}
-              auto={autoTidy} onAuto={onAutoTidy} note={autoTidyNote} onUndo={onUndoAutoTidy}
+              auto={autoTidy} onAuto={onAutoTidy}
               previewing={!!(regionResample && regionResample.name === selectedName)}
               onMethod={(m) => onResampleMethod && onResampleMethod(m, 'region')}
               onTol={onRegionResampleTol} />
@@ -821,7 +812,7 @@ function Sidebar({
                   scope={`border:${picks.join('|')}`} counts={resampleOpts}
                   label={`the ${picks.join(' | ')} border`}
                   onTidy={() => onTidy && onTidy('border')}
-                  auto={autoTidy} onAuto={onAutoTidy} note={autoTidyNote} onUndo={onUndoAutoTidy}
+                  auto={autoTidy} onAuto={onAutoTidy}
                   previewing={!!(resample && resample.counts)}
                   onMethod={(m) => onResampleMethod && onResampleMethod(m, 'border')}
                   onTol={onResampleTol} />

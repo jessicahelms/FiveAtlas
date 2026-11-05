@@ -640,8 +640,6 @@ export default function App() {
   // are the ones worked out in the background while a region is selected
   const [resampleMethod, setResampleMethod] = useState('shape');
   const resampleMethodRef = useRef('shape');
-  // what Tidy automatically just did, for the box to say (with Undo): {scope, text}
-  const [autoTidyNote, setAutoTidyNote] = useState(null);
   // scopes ("region:HPF", "border:A|B") already tidied automatically this session
   // -- once each, so an Undo is not undone again a moment later
   const autoTidied = useRef(new Set());
@@ -1813,7 +1811,7 @@ export default function App() {
   // Preview a resample: the backend returns both the counts and the resulting FC,
   // so Apply commits what was already computed. Debounced -- the slider fires a
   // lot and each call is real geometry work.
-  const previewResample = useCallback((tolValue, method = resampleMethodRef.current, auto = false) => {
+  const previewResample = useCallback((tolValue, method = resampleMethodRef.current) => {
     setResampleTol(tolValue);
     // remember the handles as they are now, so Cancel can put them back
     if (!resampleUndoRef.current) {
@@ -1844,19 +1842,7 @@ export default function App() {
         // Stamp what this preview belongs to. Apply refuses if either has moved
         // since -- the preview is only valid for the pair and dataset it was
         // built from.
-        const newFc = asFc(res, fc);
-        if (auto) {
-          // Tidy automatically: kept at once (Undo / Ctrl+Z puts it back)
-          resampleUndoRef.current = null;
-          setResample(null);
-          commit(newFc); setBaseline(newFc);
-          setMoved((prev) => { const n = new Set(prev); borderPicks.forEach((x) => n.add(x)); return n; });
-          setResampleOpts(null);
-          const h = res.handles || {};
-          setAutoTidyNote({ scope: `border:${borderPicks.join('|')}`,
-            text: `Tidied the border: ${h.before} → ${h.after} points, none bunched together.` });
-          return;
-        }
+        const newFc = asFc(res, source);
         setResample({ counts: res.counts, tol: res.tol, handles: res.handles,
                       kept: res.kept || [],
                       baseFc: source, dsId, picks: [...borderPicks],
@@ -2653,8 +2639,7 @@ export default function App() {
   const cancelRegionResample = useCallback(() => { dropRegionPreview(true); },
     [dropRegionPreview]);
 
-  const previewRegionResample = useCallback((tolValue, method = resampleMethodRef.current,
-    auto = false) => {
+  const previewRegionResample = useCallback((tolValue, method = resampleMethodRef.current) => {
     setResampleTol(tolValue);
     if (regionResampleTimer.current) clearTimeout(regionResampleTimer.current);
     const name = selectedName;
@@ -2675,24 +2660,6 @@ export default function App() {
         if (seq !== regionResampleSeq.current) return;   // cancelled or superseded
         if (fcRef.current !== onScreen) return;          // the map changed under it
         const previewFc = asFc(res, source);
-        if (auto) {
-          // Tidy automatically: kept at once -- unless the outline was edited
-          // while this was on its way (then nothing happens under the person)
-          if (fcRef.current !== source) return;
-          regionResampleRef.current = null;
-          setRegionResample(null);
-          commit(previewFc); setBaseline(previewFc);
-          setMoved((prev) => { const n = new Set(prev); (res.counts || []).forEach((c) => n.add(c.region)); return n; });
-          setResampleOpts(null);
-          const h = res.handles || {};
-          const f = previewFc.features.find((ff) => featureName(ff, idProp) === name);
-          const left = f ? bunchedPoints(f).length : 0;
-          setAutoTidyNote({ scope: `region:${name}`,
-            text: `Tidied ${name}: ${h.before} → ${h.after} points`
-              + (left ? `. ${left} still sit close together, where borders meet — moving them would `
-                + 'shift a neighbour.' : ', none bunched together.') });
-          return;
-        }
         const state = { name, dsId, tol: res.tol, counts: res.counts, handles: res.handles,
                         kept: res.kept || [], used: res.used, baseFc: source, fc: previewFc };
         regionResampleRef.current = state;
@@ -2732,16 +2699,11 @@ export default function App() {
       if (seq !== resampleOptsSeq.current) return;
       const options = res.options || [];
       setResampleOpts({ scope, dsId, method, before: res.before, options, source });
-      // start without deforming: Tidy points goes straight to its gentle pick
-      // (api.tidyPick); otherwise Fewest points a fair way down (the count
+      // start without deforming: Fewest points a fair way down (the count
       // nearest 60% of now) and even spacing at its usual 150 px
       const safe = options.filter((o) => !o.deform);
-      if (thenPreview === 'tidy' && !safe.length) {
-        const msg = 'Already tidy: no point can go without breaking a border or opening a gap.';
-        if (which === 'region') setPointMsg(msg); else setBorderMsg(msg);
-      }
       if (thenPreview && safe.length) {
-        const pick = thenPreview === 'tidy' ? api.tidyPick(options) : method === 'shape'
+        const pick = method === 'shape'
           ? safe.reduce((b, o) => (Math.abs(o.points - res.before * 0.6)
             < Math.abs(b.points - res.before * 0.6) ? o : b))
           : safe.reduce((b, o) => (Math.abs(o.tol - 150) < Math.abs(b.tol - 150) ? o : b));
@@ -3654,8 +3616,6 @@ export default function App() {
                 regionResample={regionResample} onRegionResampleTol={previewRegionResample}
                 resampleOpts={shownResampleOpts} onTidy={tidyResample} bunchedCount={bunchedCount}
                 autoTidy={uiSettings.autoTidy !== false} onAutoTidy={toggleAutoTidy}
-                onUndoAutoTidy={() => { undo(); setTidyNotice(null); }}
-                autoTidyNote={null}
                 onApplyRegionResample={applyRegionResample}
                 onCancelRegionResample={cancelRegionResample}
                 loadAsk={loadAsk} onAnswerLoad={answerLoad} onLoadDamage={answerLoadDamage}
