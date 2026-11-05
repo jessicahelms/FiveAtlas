@@ -1263,6 +1263,11 @@ export default function App() {
   }, [propRadius]);
 
   const onEdit = useCallback(({ updatedData, editType, editContext }) => {
+    // A point is held while it moves. Set here too: the point-drag handler
+    // stops deck's own drag-start event, so onGrabVertex never saw a point drag
+    // and a tidy (or the H peek) could land mid-drag.
+    if (editType === 'movePosition') vertexDragRef.current = true;
+    else if (editType === 'finishMovePosition') vertexDragRef.current = false;
     // Dragging a point of a resample PREVIEW builds on the previewed outline, so
     // the preview is kept (and recorded with the drag) rather than thrown away.
     if (regionResampleRef.current) {
@@ -1292,7 +1297,11 @@ export default function App() {
         return nn || prev;
       });
     }
-    if (COMMIT_EDITS.has(editType)) record(data);   // one undo step per edit
+    // one undo step per edit. Not the point a drag on the OUTLINE inserts as it
+    // starts (PointEditMode marks it): the drag's finishMovePosition records the
+    // whole gesture. Recorded here too, one drag left two steps -- the first,
+    // "region + one point" at the press, never on screen.
+    if (COMMIT_EDITS.has(editType) && !(editContext && editContext.dragStart)) record(data);
   }, [selected, record, propEdit, applyProportional, idProp]);
 
   // re-apply proportional movement with a new radius mid-drag
@@ -2243,12 +2252,16 @@ export default function App() {
     setSplitMsg('That line could split more than one region — which one?');
   }, [dsId, fc, selectedName, offList, splitAs]);
 
-  const onSplitEdit = useCallback(({ updatedData, editType }) => {
+  const onSplitEdit = useCallback(({ updatedData, editType, editContext }) => {
     if (editType === 'addFeature') {
       const f = updatedData.features[updatedData.features.length - 1];
       const coords = f && f.geometry && f.geometry.coordinates;
       setSplitDraw({ type: 'FeatureCollection', features: [] });     // clear the drawn line
       if (coords && coords.length >= 2) applySplit(coords);
+    } else if (editType === 'cancelFeature' && editContext && editContext.tooFewPoints) {
+      // Enter / right-click with only one point: the point is dropped, so the
+      // next click starts a new line (it used to become that line's start)
+      setSplitMsg('Line cleared — a cut needs two points or more, then Enter or right-click.');
     } else {
       setSplitDraw(updatedData);                                     // in-progress line
     }

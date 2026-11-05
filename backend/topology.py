@@ -7248,20 +7248,44 @@ class _FinishGuard:
         return _safe_difference(U, H).area
 
 
-def _snap_point(features, idx, names, src, dst, eps=0.5):
+TIDY_JUNCTION_REACH = 2.5    # px: another region's point this close to the pair is part of it
+TIDY_JUNCTION_MOVE = 5.0     # px: a junction merge moves no outline further than this
+
+
+def _snap_point(features, idx, names, src, dst, eps=0.5, reach=0.0,
+                max_pull=TIDY_JUNCTION_MOVE):
     """Move point `src` onto `dst` in EVERY region of `names` that has it (repeats
     dropped) -- two fixed points a few px apart become one, and borders that met
     there still meet. None if a region's edge passes `src` without a point there
     (it would be left behind), a ring would drop below a triangle or gain a spike,
-    or nothing has the point. Returns (features copy, changed names)."""
+    or nothing has the point. Returns (features copy, changed names).
+
+    `reach` > 0 merges the whole junction, not just the pair: a third region
+    whose border stops a px or two short of where the pair's regions meet (its
+    own points within `reach` of `src`, and within `max_pull` of `dst`) has
+    those points moved onto `dst` too, and one whose edge passes within
+    `reach` of `src` with no point there gets a point there first (then moved).
+    Without that the snap swings the pair's long edges across the third region:
+    TH/HPF/dft on the fixture, +715 px2 TH/dft overlap either way round."""
     from shapely.geometry import MultiPolygon
     sp = Point(src)
     out = json.loads(json.dumps(features))
     changed = []
+
+    def pulled(p):
+        # only what is round src moves: a point near dst stays, so no long
+        # edge ending there swings (pulling dft's other tip point onto TH/HPF's
+        # junction too rotated its 1,163 px border with HPF: +5.1 px2 overlap)
+        ds = math.hypot(p[0] - src[0], p[1] - src[1])
+        if ds <= eps:
+            return True
+        return (reach > 0 and ds <= reach
+                and math.hypot(p[0] - dst[0], p[1] - dst[1]) <= max_pull)
+
     for n in names:
         for k in idx[n]:
             g = _geom_at(features, k)
-            if g.is_empty or g.distance(sp) > eps * 2:
+            if g.is_empty or g.distance(sp) > max(eps * 2, reach):
                 continue
             parts, hit = [], False
             for poly in _polys(g):
@@ -7269,7 +7293,20 @@ def _snap_point(features, idx, names, src, dst, eps=0.5):
                 new_rings = []
                 for cs in rings:
                     pts = [tuple(c) for c in cs[:-1]]
-                    near = [math.hypot(p[0] - src[0], p[1] - src[1]) <= eps for p in pts]
+                    near = [pulled(p) for p in pts]
+                    if reach > 0 and not any(near):
+                        # an edge passing src with no point there: give it one
+                        m = len(pts)
+                        best = None
+                        for i in range(m):
+                            a, b = pts[i], pts[(i + 1) % m]
+                            d = _pt_seg_dist(src, a, b)
+                            if d <= reach and (best is None or d < best[0]):
+                                best = (d, i)
+                        if best is not None:
+                            i = best[1]
+                            pts = pts[:i + 1] + [tuple(src)] + pts[i + 1:]
+                            near = [pulled(p) for p in pts]
                     if not any(near):
                         new_rings.append(cs)
                         continue
@@ -7365,6 +7402,22 @@ def tidy_finish(features, id_prop, name, min_gap=_RS_MIN_GAP, respace=True, orig
                     oks.append((step, "merge", sn[0], rec, {"removedFrom": sn[1]}))
                     break
                 why.append("merge rule: " + "; ".join(failed))
+        if not oks and merge_fixed and d <= TIDY_JUNCTION_MOVE:
+            # the pair's regions meet a third whose border stops a px or two
+            # short of them: merge all of that junction onto one point
+            for src, dst in ((p, q), (q, p)):
+                sn = _snap_point(sub, idx, guard.local, src, dst, reach=TIDY_JUNCTION_REACH)
+                if sn is None:
+                    why.append("junction merge refused")
+                    continue
+                sn = (_mirror_copies(sub, sn[0], id_prop), sn[1])
+                ok, failed, rec, step = guard.trial(sn[0], idx, sn[1])
+                if ok and step > TIDY_JUNCTION_MOVE:
+                    ok, failed = False, [f"moved {step:.1f}px"]
+                if ok:
+                    oks.append((step, "merge", sn[0], rec, {"removedFrom": sn[1]}))
+                    break
+                why.append("junction merge rule: " + "; ".join(failed))
         if not oks:
             stuck[key(p, q)] = {"dist": round(d, 2), "p": p, "q": q, "why": why}
             continue

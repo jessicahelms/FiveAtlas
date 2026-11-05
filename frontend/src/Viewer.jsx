@@ -39,7 +39,13 @@ function isRightButton(event) {
 // busy image -- an imprecise second click just adds a stray point. These wrappers
 // keep a handle on the mode's own finishDrawing() so a RIGHT-CLICK can end the
 // shape instead. (Enter and double-click still work; this only adds a way out.)
-function finishableMode(Base, minPoints) {
+//
+// dropShort: asking to finish with too few points DROPS them. Kept, the lone
+// point of a split line whose other click deck never delivered (it holds each
+// click 300 ms for a possible double-click, and a press inside that window
+// cancels it) silently became the first point of the NEXT line -- and the
+// detour from it changed which region the cut was for.
+function finishableMode(Base, minPoints, dropShort = false) {
   return class extends Base {
     // No "Distance: N pixels" label. DrawLineStringMode hangs it on the LAST
     // placed point, which is the one spot you are looking at while placing the
@@ -54,9 +60,29 @@ function finishableMode(Base, minPoints) {
       super.handleClick(event, props);
     }
     handlePointerMove(event, props) { this._props = props; super.handlePointerMove(event, props); }
+    // Enter finishes the way a right-click does (the library's Enter left a
+    // too-short line in place)
+    handleKeyUp(event, props) {
+      this._props = props;
+      if (dropShort && event && event.key === 'Enter') { this.finishNow(); return; }
+      super.handleKeyUp(event, props);
+    }
     pointCount() { return this.getClickSequence().length; }
+    // drop the points placed so far, and redraw without them
+    cancelNow() {
+      if (!this.pointCount()) return;
+      this.resetClickSequence();
+      if (this._props) {
+        this._props.onEdit({ updatedData: this._props.data, editType: 'cancelFeature',
+          editContext: { tooFewPoints: true } });
+      }
+    }
     finishNow() {
-      if (!this._props || this.pointCount() < minPoints) return false;
+      if (!this._props) return false;
+      if (this.pointCount() < minPoints) {
+        if (dropShort) this.cancelNow();
+        return false;
+      }
       try {
         this.finishDrawing(this._props);
       } catch (err) {
@@ -72,7 +98,7 @@ function finishableMode(Base, minPoints) {
     }
   };
 }
-const FinishableLineMode = finishableMode(DrawLineStringMode, 2);
+const FinishableLineMode = finishableMode(DrawLineStringMode, 2, true);
 const FinishablePolygonMode = finishableMode(DrawPolygonMode, 3);
 const DEFAULT_LAYERS = {
   showDapi: true, showGenes: true, showRegions: true, geneOpacity: 1, stainOpacity: 1,
@@ -243,6 +269,17 @@ export default function Viewer({
   // the pan itself while the button is down.
   const cleanModeRef = useRef(null);
   if (!cleanModeRef.current) cleanModeRef.current = new DrawPolygonByDraggingMode();
+  // The points placed so far live in these MODE objects, which outlive their
+  // layers: App's clearSplit/clearDraw only empty the layer data. So a point
+  // left from an earlier attempt (Split or Draw left mid-line) came back as the
+  // start of the next line. Start clean on every mode change, and whenever App
+  // clears the split sketch. Done in render, so the stale point is never drawn.
+  const sketchSeenRef = useRef({ mode, splitDraw });
+  if (sketchSeenRef.current.mode !== mode || sketchSeenRef.current.splitDraw !== splitDraw) {
+    if (sketchSeenRef.current.mode !== mode) drawModeRef.current.resetClickSequence();
+    splitModeRef.current.resetClickSequence();
+    sketchSeenRef.current = { mode, splitDraw };
+  }
 
   const initialViewState = useMemo(() => {
     const vw = Math.max(window.innerWidth - 340, 300);
@@ -721,7 +758,7 @@ export default function Viewer({
     const onDown = (e) => {
       if (e.button !== 2 || !sketchModeRef.current) return;
       swallow(e);
-      sketchModeRef.current.finishNow();   // too few points -> sketch left alone
+      sketchModeRef.current.finishNow();   // too few points: a split drops them, a drawing keeps them
     };
     const onCtx = (e) => {
       if (sketchModeRef.current) {         // never show the browser menu mid-sketch

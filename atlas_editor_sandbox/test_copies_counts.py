@@ -120,6 +120,21 @@ n0 = T.point_count(feats, "name", "dft")
 check("dft keeps its own outline (no saw-tooth)", T.point_count(res["features"], "name", "dft") == n0,
       (T.point_count(res["features"], "name", "dft"), n0))
 
+print("\nTidy clears the junction pair where TH, HPF and dft meet")
+# dft's tip stops 1.7 px short of where TH and HPF meet: TH kept two points
+# 3.9 px apart there, because moving either one alone swung a long edge across
+# dft (+715 px2). Merging the whole junction onto one point clears it.
+f1, _ = T.tidy_region(feats, "name", "TH")
+fin = T.tidy_finish(f1, "name", "TH", respace=False, original=feats, merge_fixed=True)
+g = fin["guards"] if "guards" in fin else {}
+left = T.bunched_count(fin["features"], "name", "TH") if hasattr(T, "bunched_count") else None
+check("TH: no points left bunched together", left == 0, left)
+check("no overlap grew, no outline left invalid",
+      g.get("newOverlap", 0) <= 0.5 and not g.get("invalid"), g)
+th1 = shape(next(f for f in fin["features"] if f["properties"]["name"] == "TH")["geometry"])
+hp1 = shape(next(f for f in fin["features"] if f["properties"]["name"] == "HPF")["geometry"])
+check("TH and HPF still meet", th1.distance(hp1) < 0.5)
+
 print()
 if fails:
     print(f"{len(fails)} FAILED")

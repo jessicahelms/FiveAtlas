@@ -32,6 +32,24 @@ people will care about most and keep that title short.
 - Picking two regions that are far apart now says that **Merge into one**
   makes them one region, as well as what **Share borders** does.
 
+### Split and point dragging behave
+
+- **Split a region:** a half-drawn cut line no longer comes back. Before, a
+  point left from an earlier attempt (after leaving Split, or a click that
+  didn't register) became the start of your next line, and the region was
+  cut along the wrong path. A line with just one point now clears when you
+  press Enter or right-click, and says so.
+- **Dragging a point** is one undo step. Starting a drag on the outline right
+  beside a point used to add an invisible extra point first, so one Ctrl+Z
+  only took you halfway back. A press on a point now always drags that
+  point.
+
+### Tidy reaches the last bunched points
+
+- Where three or four regions meet, Tidy now merges the points sitting a
+  few px apart into one. On a real section TH went from 2 points left
+  bunched to none, with nothing overlapping and every border still joined.
+
 ### Smaller fixes
 
 - Right-clicking a region straight after **Send to back** or **Bring to
