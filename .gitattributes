@@ -3,3 +3,6 @@
 # at the shebang -- "bad interpreter: /usr/bin/env bash^M: no such file or
 # directory" -- so pin these to LF regardless of the cloning machine's settings.
 *.sh text eol=lf
+
+# PDFs are binary: an end-of-line conversion would break their byte offsets.
+*.pdf binary
