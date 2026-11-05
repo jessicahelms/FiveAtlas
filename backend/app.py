@@ -2619,6 +2619,38 @@ async def regions_repair(ds_id: str, request: Request):
             "fixed": res["fixed"]}
 
 
+@app.post("/api/datasets/{ds_id}/regions/duplicates")
+async def regions_duplicates(ds_id: str, request: Request):
+    """Names carried by more than one feature. Body: {fc?, action?}.
+
+    No action: {groups} -- what the open-time question lists. action "rename"
+    renumbers every extra feature (PAL -> PAL.1) so each is its own region;
+    "merge" makes each name ONE feature. Either returns the updated FC plus
+    {changed}; nothing is written to disk (the edit is saved like any other)."""
+    try:
+        d = ds.get_dataset(ds_id)
+    except KeyError:
+        raise HTTPException(404, "unknown dataset")
+    body = await request.json()
+    fc = (body or {}).get("fc") or geo.load_regions(ds_id)[0]
+    action = (body or {}).get("action")
+    feats = fc.get("features", [])
+    if not action:
+        return {"groups": topology.duplicate_groups(feats, d["id_prop"])}
+    try:
+        res = topology.resolve_duplicates(feats, d["id_prop"], str(action))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    names = [c["name"] for c in res["changed"]]
+    if not names:
+        return {**provenance.carry({"type": "FeatureCollection", "features": res["features"]}, fc),
+                "changed": []}
+    what = "renamed" if action == "rename" else "kept as one region"
+    return {**provenance.stamped(res["features"], fc, "duplicate-names",
+                                 f"{len(names)} {what}: {', '.join(names[:6])}", names),
+            "changed": res["changed"]}
+
+
 @app.post("/api/datasets/{ds_id}/regions/export-anndata")
 async def regions_export_anndata(ds_id: str, request: Request):
     """Regions x genes as an AnnData .h5ad: X = transcript-density counts per

@@ -507,6 +507,19 @@ export async function repairRegions(ds, fc) {
   return r.json(); // { type, features, fixed }
 }
 
+// Names carried by more than one feature. No action: { groups } (read-only).
+// action 'rename' (PAL -> PAL.1) or 'merge' (one feature per name) returns the
+// updated FC plus { changed }; nothing is written to disk.
+export async function resolveDuplicates(ds, fc, action = null) {
+  const r = await fetch(`${API}/datasets/${ds}/regions/duplicates`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fc, action }),
+  });
+  if (!r.ok) throw new Error(`duplicates ${r.status}: ${await r.text()}`);
+  return r.json();
+}
+
 // Thrown when export is blocked by geometry errors; carries the problem list.
 export class GeometryError extends Error {
   constructor(payload) {
