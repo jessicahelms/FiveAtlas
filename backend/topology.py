@@ -6168,10 +6168,16 @@ def resample_at(features, id_prop, names, tol, method="shape", digest=None):
     FEWEST_DEFORM_DRIFT past it (the page asks first)."""
     names = [str(n) for n in names]
     tol = float(tol)
-    key = (digest or _features_digest(features), tuple(names), method, tol)
+    digest = digest or _features_digest(features)
+    key = (digest, tuple(names), method, tol)
     hit = _resample_cache.pop(key, None)
     if hit is None:
-        if len(names) == 1 and method == "shape":
+        if tol < 0:
+            # a count below the guarded fewest: -tol points, this region alone
+            if len(names) != 1:
+                raise ValueError("a number of points below the fewest is for one region")
+            hit = resample_to_count(features, id_prop, names[0], -tol, method, digest)
+        elif len(names) == 1 and method == "shape":
             drift = FEWEST_DEFORM_DRIFT if tol > FEWEST_SAFE else 0.05
             hit = resample_region(features, id_prop, names[0], tol=tol, max_drift=drift,
                                   method="shape")
@@ -6226,7 +6232,207 @@ def resample_options(features, id_prop, names, method="shape"):
             # fewest points that move it no more than TIDY_MOVE
             options.append({"points": n, "tol": float(t), "deform": deform,
                             "moved": round(moved, 1)})
+    if len(names) == 1 and names[0] in idx:
+        # past the fewest the guards allow, every count down to COUNT_FLOOR
+        # (this region alone; the page warns). tol = -count marks them.
+        nm = names[0]
+        if before is None:
+            before = point_count(features, id_prop, nm)
+        base = features
+        if options:
+            base = resample_at(features, id_prop, names, options[-1]["tol"], method,
+                               digest)["features"]
+        top = options[-1]["points"] if options else before
+        ladder = _count_ladder(base, id_prop, nm, method)
+        _count_cache[(digest, nm, method)] = (base, ladder)
+        while len(_count_cache) > _RESAMPLE_CACHE_MAX:
+            _count_cache.pop(next(iter(_count_cache)))
+        for n in sorted(ladder, reverse=True):
+            if n >= top:
+                continue
+            moved = _outline_moved(old, _count_features(base, id_prop, nm, ladder[n]), id_prop)
+            options.append({"points": n, "tol": -float(n), "deform": True,
+                            "moved": round(moved, 1)})
     return {"before": before, "options": options}
+
+
+# ---- Any count down to 3 --------------------------------------------------------
+# "the slider is equivalent to number of points. it should go down to 3": past
+# the lowest count every guard above allows, the slider keeps going one point at
+# a time and the page only warns that the shape deforms. These counts change
+# this region ALONE -- neighbours keep their points, so the borders it shared
+# stop meeting exactly (Share borders joins them again) -- starting from the
+# fewest guarded result, so the counts carry on smoothly from it.
+COUNT_FLOOR = 3
+_count_cache = {}          # (features digest, name, method) -> (base features, ladder)
+
+
+def _ring_area(cs):
+    s = 0.0
+    for i in range(len(cs)):
+        x0, y0 = cs[i - 1]
+        x1, y1 = cs[i]
+        s += x0 * y1 - x1 * y0
+    return abs(s) / 2.0
+
+
+def _tri_area(a, b, c):
+    return abs((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])) / 2.0
+
+
+def _even_ring(cs, m):
+    """`m` points the same distance apart along the closed ring `cs`, from cs[0]."""
+    closed = list(cs) + [cs[0]]
+    segs = [math.dist(closed[i], closed[i + 1]) for i in range(len(cs))]
+    total = sum(segs)
+    if total <= 0:
+        return list(cs[:m])
+    out, i, run = [], 0, 0.0
+    for j in range(m):
+        d = total * j / m
+        while i < len(segs) - 1 and run + segs[i] < d:
+            run += segs[i]
+            i += 1
+        f = (d - run) / segs[i] if segs[i] > 0 else 0.0
+        (x0, y0), (x1, y1) = closed[i], closed[i + 1]
+        out.append((x0 + (x1 - x0) * f, y0 + (y1 - y0) * f))
+    return out
+
+
+def _count_ladder(features, id_prop, name, method="shape", floor=COUNT_FLOOR):
+    """Every count from the region's points down to `floor`, as
+    {count: [(feature index, [[outer ring], [hole], ...]), ...]}.
+
+    Visvalingam: drop the point whose triangle with its two neighbours is
+    smallest -- the point that matters least to the shape -- one at a time,
+    never one that would make its polygon invalid. A whole small part or hole
+    goes when it costs less (its area) than the next point; the biggest part's
+    outline always stays, so it can reach a triangle. "even" then spaces each
+    ring's points evenly along the outline it had, if that stays valid."""
+    rings, parts = {}, []          # ring id -> points (no closing repeat); parts
+    for k in _index_all(features, id_prop).get(str(name), []):
+        for p in _polys(_geom_at(features, k)):
+            ids = []
+            for r in [p.exterior] + list(p.interiors):
+                cs = [tuple(c[:2]) for c in r.coords][:-1]
+                if len(cs) >= 3:
+                    rings[len(rings)] = cs
+                    ids.append(len(rings) - 1)
+                elif not ids:
+                    break                       # no outer ring: nothing to keep
+            if ids:
+                parts.append({"k": k, "ext": ids[0], "holes": ids[1:]})
+    if not parts:
+        return {}
+    orig = {i: list(cs) for i, cs in rings.items()}
+    main = max(range(len(parts)), key=lambda i: _ring_area(rings[parts[i]["ext"]]))
+
+    def total():
+        return sum(len(rings[p["ext"]]) + sum(len(rings[h]) for h in p["holes"])
+                   for p in parts)
+
+    def snap():
+        return [(p["k"], p["ext"], list(p["holes"]), {i: list(rings[i]) for i in
+                 [p["ext"]] + p["holes"]}) for p in parts]
+
+    def valid(p, ring_id=None, pts=None):
+        def get(i):
+            return pts if i == ring_id else rings[i]
+        try:
+            return Polygon(get(p["ext"]), [get(h) for h in p["holes"]]).is_valid
+        except Exception:
+            return False
+
+    snaps = {total(): snap()}
+    while total() > floor:
+        cands = []
+        for pi, p in enumerate(parts):
+            for ri in [p["ext"]] + p["holes"]:
+                cs = rings[ri]
+                if len(cs) > 3:
+                    m = len(cs)
+                    for vi in range(m):
+                        cands.append((_tri_area(cs[vi - 1], cs[vi], cs[(vi + 1) % m]),
+                                      pi, ri, vi))
+                if not (pi == main and ri == p["ext"]):
+                    cands.append((_ring_area(cs), pi, ri, None))
+        cands.sort(key=lambda c: c[0])
+        done = False
+        for _, pi, ri, vi in cands:
+            p = parts[pi]
+            if vi is None:                      # a whole hole, or a whole small part
+                if ri == p["ext"]:
+                    parts.pop(pi)
+                    main = max(range(len(parts)),
+                               key=lambda i: _ring_area(rings[parts[i]["ext"]]))
+                else:
+                    p["holes"].remove(ri)
+                done = True
+                break
+            pts = rings[ri][:vi] + rings[ri][vi + 1:]
+            if valid(p, ri, pts):
+                rings[ri] = pts
+                done = True
+                break
+        if not done:
+            break
+        snaps.setdefault(total(), snap())
+    if method != "shape":
+        for n, sn in snaps.items():
+            even = []
+            for k, ext, holes, pts in sn:
+                ev = {i: _even_ring(orig[i], len(pts[i])) for i in pts}
+                try:
+                    ok = Polygon(ev[ext], [ev[h] for h in holes]).is_valid
+                except Exception:
+                    ok = False
+                even.append((k, ext, holes, ev if ok else pts))
+            snaps[n] = even
+    return {n: [(k, [pts[ext]] + [pts[h] for h in holes]) for k, ext, holes, pts in sn]
+            for n, sn in snaps.items()}
+
+
+def _count_features(features, id_prop, name, rows):
+    """`features` with region `name` replaced by one ladder step's rings."""
+    from shapely.geometry import MultiPolygon
+    out = json.loads(json.dumps(features))
+    by_k = {}
+    for k, rs in rows:
+        by_k.setdefault(k, []).append(Polygon(rs[0], rs[1:]))
+    for k in _index_all(features, id_prop).get(str(name), []):
+        ps = by_k.get(k, [])
+        if not ps:
+            g = Polygon()
+        elif len(ps) == 1:
+            g = ps[0]
+        else:
+            g = MultiPolygon(ps)
+            if not g.is_valid:
+                g = unary_union(ps)
+        out[k]["geometry"] = mapping(g)
+    return out
+
+
+def resample_to_count(features, id_prop, name, n, method="shape", digest=None):
+    """Region `name` with `n` points (or the nearest count the ladder has),
+    from below the guarded fewest -- this region alone, the shape may deform."""
+    name = str(name)
+    digest = digest or _features_digest(features)
+    key = (digest, name, method)
+    if key not in _count_cache:
+        resample_options(features, id_prop, [name], method)
+    base, ladder = _count_cache[key]
+    if not ladder:
+        raise ValueError(f"{name} has no outline to take points from")
+    got = min(ladder, key=lambda c: (abs(c - int(n)), c))
+    out = _count_features(base, id_prop, name, ladder[got])
+    idx = _index_all(features, id_prop)
+    b0, b1 = _body(features, idx[name]), _body(out, idx[name])
+    return {"features": out, "tol": -float(got), "kept": [], "used": None,
+            "counts": [{"region": name, "before": _vertex_count(b0), "after": _vertex_count(b1),
+                        "areaDrift": round((b1.area - b0.area) / max(b0.area, 1e-9) * 100, 3)}],
+            "handles": {"before": point_count(features, id_prop, name),
+                        "after": point_count(out, id_prop, name)}}
 
 
 # Tidy points' one click moves an outline no more than this (px, ~8.5 um at

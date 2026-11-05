@@ -49,9 +49,11 @@ people will care about most and keep that title short.
   CP, a field inside HPF) — before, those were left exactly as dense as
   they were.
 - **Adjust…** lets you pick the number of points yourself: a slider or a
-  number you type, and **Space points evenly** if you want them evenly
-  spaced. Whenever a count would change the shape, it asks first: **"The
-  shape will deform. Do you want fewer vertices?"**
+  number you type, all the way **down to 3**, and **Space points evenly** if
+  you want them evenly spaced. When a count would change the shape it just
+  says so — "The shape will deform" — and you decide with **Keep**. Below the
+  fewest that keep every border joined, only that region changes; **Share
+  borders** joins it to its neighbours again.
 - The same **Tidy** is there for a shared border in Edit shared borders.
 
 ### Split finds the region by itself

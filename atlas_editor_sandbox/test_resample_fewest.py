@@ -330,6 +330,49 @@ if real.exists():
 mism = [r for r in rings if _flaws_shapely(r) != T._ring_flaws(r)]
 check(f"same answer on {len(rings)} rings (random, needles, real)", not mism, len(mism))
 
+# "the slider is equivalent to number of points. it should go down to 3": past
+# the guarded fewest, every count down to 3, each a valid outline with exactly
+# that many points, only that region changing, the page warned (deform)
+print("\nany count down to 3")
+sq = [feat("A", Polygon([(0, 0), (50, 0), (100, 0), (100, 50), (100, 100), (50, 100),
+                         (0, 100), (0, 50)], [[(40, 40), (60, 40), (60, 60), (40, 60)]])),
+      feat("B", Polygon([(100, 0), (200, 0), (200, 100), (100, 100), (100, 50)]))]
+for method in ("shape", "even"):
+    o = T.resample_options(sq, "name", ["A"], method)
+    pts = [x["points"] for x in o["options"]]
+    check(f"{method}: the square with a hole reaches 3 points", pts and pts[-1] == 3, pts)
+    r = T.resample_at(sq, "name", ["A"], -3.0, method)
+    g = geom(r["features"], "A")
+    check(f"{method}: 3 points is a valid triangle, hole gone",
+          g.is_valid and g.geom_type == "Polygon" and len(g.exterior.coords) == 4
+          and not list(g.interiors), g.wkt)
+    check(f"{method}: B is left alone", geom(r["features"], "B").equals(geom(sq, "B")))
+if real.exists():
+    for nm in ("TH", "HPF", "VL.1"):
+        for method in ("shape", "even"):
+            o = T.resample_options(feats, "name", [nm], method)
+            below = [x for x in o["options"] if x["tol"] < 0]
+            pts = [x["points"] for x in o["options"]]
+            bad = []
+            # the counts carry on from the fewest guarded result, whose shared
+            # borders already moved in the neighbours too: from there on, alone
+            safe = [x for x in o["options"] if x["tol"] > 0]
+            base = (T.resample_at(feats, "name", [nm], safe[-1]["tol"], method)["features"]
+                    if safe else feats)
+            for x in below:
+                r = T.resample_at(feats, "name", [nm], x["tol"], method)
+                ks = T._index_all(r["features"], "name")[nm]
+                ok = all(shape(r["features"][k]["geometry"]).is_valid for k in ks)
+                others = all(shape(r["features"][k]["geometry"]).equals_exact(
+                                 shape(base[k]["geometry"]), 0) for k in range(len(feats))
+                             if k not in ks)
+                if not ok or not others or T.point_count(r["features"], "name", nm) != x["points"]:
+                    bad.append(x["points"])
+            check(f"{method} {nm}: one point at a time down to 3, all deform-marked, valid, alone",
+                  pts[-1] == 3 and all(x["deform"] for x in below)
+                  and [x["points"] for x in below] == list(range(below[0]["points"], 2, -1))
+                  and not bad, (pts[-4:], bad))
+
 print()
 if fails:
     print(f"{len(fails)} FAILED")

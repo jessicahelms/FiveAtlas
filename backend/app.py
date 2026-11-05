@@ -1904,9 +1904,9 @@ async def regions_resample(ds_id: str, request: Request):
         raise HTTPException(422, str(e))
     except Exception as e:
         raise HTTPException(500, f"resample failed: {e}")
-    return {**provenance.stamped(res["features"], fc, "resample",
-                                 f"{' + '.join(str(n) for n in names)} at {res['tol']:g} px",
-                                 names),
+    detail = (f"{' + '.join(str(n) for n in names)} at {res['tol']:g} px" if res["tol"] >= 0
+              else f"{' + '.join(str(n) for n in names)} to {-res['tol']:g} points")
+    return {**provenance.stamped(res["features"], fc, "resample", detail, names),
             "counts": res["counts"], "tol": res["tol"],
             "handles": res.get("handles"), "arcPoints": res.get("arcPoints"),
             "kept": res.get("kept", []), "used": res.get("used")}

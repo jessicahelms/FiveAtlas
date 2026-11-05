@@ -31,8 +31,10 @@ function sliderToReach(pos) {
 // (Tidy) gives the fewest points that keep the shape -- borders stay joined, no
 // gap opens -- and Adjust holds the rest: a slider over every count the region
 // (or border) can reach, a box to type one, and even spacing. Counts, never px.
-// A count that deforms the shape is asked first; a yes holds until the method
-// or the region changes.
+// The slider IS the number of points and goes down to 3; a count that deforms
+// the shape just says so ("it will just give a warning. it should be simple").
+// tol < 0 marks a count past the fewest the guards allow: that region alone
+// changes, so its borders stop meeting its neighbours'.
 function ResampleSlider({ method, tol, onMethod, onTol, busy, scope, counts, label, onTidy,
   bunched, auto, onAuto, note, onUndo }) {
   const shape = method === 'shape';
@@ -40,28 +42,12 @@ function ResampleSlider({ method, tol, onMethod, onTol, busy, scope, counts, lab
   const optIdx = opts && opts.length
     ? opts.reduce((best, o, i) => (Math.abs(o.tol - tol) < Math.abs(opts[best].tol - tol) ? i : best), 0)
     : 0;
-  const [deformOk, setDeformOk] = useState(false);
-  const [ask, setAsk] = useState(null);          // the option index the person was heading for
   const [typed, setTyped] = useState('');
   const [typedNote, setTypedNote] = useState(null);   // "closest it can reach" for a typed count
   const [adjust, setAdjust] = useState(false);
-  useEffect(() => { setDeformOk(false); setAsk(null); setTyped(''); setTypedNote(null); },
-    [method, scope]);
+  useEffect(() => { setTyped(''); setTypedNote(null); }, [method, scope]);
   const go = (i) => {
     if (!opts || i < 0 || i >= opts.length) return;
-    if (opts[i].deform && !deformOk) {
-      setAsk(i);
-      // stop at the edge: the nearest count before it that keeps the shape --
-      // unless that has MORE points than now (even spacing on a tidied outline:
-      // its last safe count was 82 on a 51-point TH), then stay where it is
-      let edge = -1;
-      for (let k = i - 1; k >= 0; k -= 1) { if (!opts[k].deform) { edge = k; break; } }
-      if (edge >= 0 && edge !== optIdx && opts[edge].points < counts.before && onTol) {
-        onTol(opts[edge].tol);
-      }
-      return;
-    }
-    setAsk(null);
     if (onTol) onTol(opts[i].tol);
   };
   const goTyped = () => {
@@ -70,10 +56,8 @@ function ResampleSlider({ method, tol, onMethod, onTol, busy, scope, counts, lab
     const i = opts.reduce((best, o, k) =>
       (Math.abs(o.points - want) < Math.abs(opts[best].points - want) ? k : best), 0);
     const got = opts[i].points;
-    const fewest = opts[opts.length - 1].points;
     setTypedNote(got === want ? null
-      : `${want} isn't one it can reach — the closest is ${got}.`
-        + (!shape && want < fewest ? ' Untick "Space points evenly" to go lower.' : ''));
+      : `${want} isn't one it can reach — the closest is ${got}.`);
     go(i);
   };
   const cur = opts && opts.length ? opts[optIdx] : null;
@@ -97,7 +81,7 @@ function ResampleSlider({ method, tol, onMethod, onTol, busy, scope, counts, lab
       <div className="row">
         <button className="btn sm primary" disabled={busy}
           title="fewer points, none bunched together — the outline barely moves, borders stay joined, no gap opens"
-          onClick={() => { setAsk(null); setTypedNote(null); if (onTidy) onTidy(); }}>
+          onClick={() => { setTypedNote(null); if (onTidy) onTidy(); }}>
           {loading && shape ? 'Tidy (getting ready…)' : 'Tidy'}
         </button>
         <button className="btn sm" onClick={() => setAdjust((v) => !v)}
@@ -153,21 +137,10 @@ function ResampleSlider({ method, tol, onMethod, onTol, busy, scope, counts, lab
           )}
         </>
       )}
-      {ask != null && opts && opts[ask] && (
+      {cur && cur.deform && (
         <div className="hint warn">
-          The shape will deform. Do you want fewer vertices?
-          <div className="row">
-            <button className="btn sm danger" disabled={busy}
-              onClick={() => { const i = ask; setDeformOk(true); setAsk(null); if (onTol) onTol(opts[i].tol); }}>
-              Yes, {opts[ask].points} points
-            </button>
-            <button className="btn sm" onClick={() => setAsk(null)}>No</button>
-          </div>
-        </div>
-      )}
-      {cur && cur.deform && ask == null && (
-        <div className="hint warn">
-          This deforms the shape — check it before you press Keep.
+          The shape will deform — check it before you press Keep.
+          {cur.tol < 0 && ' Only this region changes, so its borders won\'t meet its neighbours\' exactly (Share borders joins them again).'}
         </div>
       )}
     </>
