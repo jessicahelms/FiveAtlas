@@ -106,6 +106,16 @@ ITEMS = [
     "file and damage-only files (like separation.4.geojson) in the same folder. "
     "Ctrl+Z undoes the load, and nothing is written until you Save.",
 
+    "If a region file uses one name for more than one shape, FiveAtlas asks "
+    "about it as soon as the dataset opens (and after Replace the map or "
+    "Reset): it lists each such name, with whether the shapes are identical or "
+    "how much they differ. Rename them keeps the name on the first shape and "
+    "makes each other one its own region, numbered .1, .2 … (PAL becomes "
+    "PAL.1). Keep the same name makes each name one region: identical shapes "
+    "become one, and shapes that differ are combined into one outline covering "
+    "the ground either of them covered. Not now leaves everything as it is. "
+    "Ctrl+Z undoes either answer, and nothing is written until you Save.",
+
     "If you are ever unsure about how to use certain features, there are "
     "instructions that pop up after you click on a feature. The sidebar is in "
     "sections — What loaded, Regions, Edit regions, Files &amp; export and "
@@ -215,10 +225,13 @@ ITEMS = [
     "Untick Tidy automatically (under Adjust…) to only ever tidy by hand. "
     "Adjust… lets you choose the number yourself: drag the slider from more to "
     "fewer or type a number and press Enter (a number it can't reach goes to "
-    "the closest one), and tick Space points evenly for evenly spaced points. "
-    "Whenever a count would change the shape, it stops and asks “The shape "
-    "will deform. Do you want fewer vertices?” — answer yes and it goes on; "
-    "check the outline before you press Keep.",
+    "the closest one), and tick Space points evenly to put the points the same "
+    "distance apart all the way round. The slider goes all the way down to 3 "
+    "points. When a count would change the shape it says “The shape will "
+    "deform” — check the outline, then press Keep to keep it or Cancel to put "
+    "the old points back. Below the fewest points that keep every border "
+    "joined, only that region changes, so its borders no longer meet its "
+    "neighbours' exactly; Share borders joins them again.",
 
     # -- move region -----------------------------------------------------------------------
     "Move region drags a whole region to a new place without changing its "

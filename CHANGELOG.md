@@ -11,6 +11,67 @@ The first `### ` title of a section is also what the app's update banner
 shows ("FiveAtlas 1.3.2 is out — Faster on laptops"), so lead with the change
 people will care about most and keep that title short.
 
+## v1.4.2
+
+### Points tidy themselves: no more points bunched together
+
+- Open **Edit points** on a region and its points are **tidied
+  automatically**: fewer points, none bunched together, the outline barely
+  moves, borders with neighbours stay joined and no gap opens. Points still
+  sitting right next to another are then deleted just as right-click
+  **Delete point** would — from both regions on a shared border — except
+  where regions meet. A note over the map says what changed ("Tidied TH:
+  127 → 51 points") with **Undo** (Ctrl+Z works too).
+- It also happens by itself right after **Share borders**, **Merge**, **Fix a
+  gap**, **Clean up stray lines**, **Build the outline** and drawing a new
+  region — the steps that used to leave dense points behind — each as its
+  own Undo step. Never in the middle of a drag.
+- Points that still sit right next to another are shown **orange**. **Tidy**
+  in the Tidy points box runs it by hand; untick **Tidy automatically** under
+  **Adjust…** if you'd rather press it yourself. Edit shared borders has the
+  same **Tidy** for a border.
+- It works on regions drawn inside another one too (Caudoputamen_672 inside
+  CP, a field inside HPF), and tidying never pushes a region out of the one
+  it sits in.
+- On a real section TH went from 132 points (40 of them bunched) to 53, CP
+  from 141 to 60, and after Share borders dft from 305 to 91.
+
+### Pick the number of points, all the way down to 3
+
+- **Adjust…** next to **Tidy** has a slider that goes by the **number of
+  points** — or type the number you want — all the way **down to 3**. It
+  never jumps back up to more points.
+- No more question first: when a count would change the shape it just says
+  **"The shape will deform"**, and you decide with **Keep** or **Cancel**.
+- Below the fewest points that keep every border joined, only that region
+  changes, so its borders no longer meet its neighbours' exactly; **Share
+  borders** joins them again.
+- **Space points evenly** now really spaces them evenly all the way round.
+  Before, some stretches of the outline kept one long edge while the points
+  bunched along another.
+
+### Share borders no longer shreds regions stored twice
+
+- Some region files store a region twice — two copies of the same shape
+  (XETG files do this for their large regions). **Share borders** and
+  dragging a border used to break such a region into hundreds of pieces
+  (lft ended up in 222). The copies are now treated as one region and come
+  out whole.
+
+### A question when two shapes share a name
+
+- When a dataset opens (and after **Replace the map** or **Reset**), FiveAtlas
+  checks whether any name is used by more than one shape. If so it lists
+  them — and whether the shapes are identical or how much they differ — and
+  asks:
+  - **Rename them**: the first shape keeps the name and each other one
+    becomes its own region, numbered .1, .2 … (PAL → PAL.1).
+  - **Keep the same name**: each name becomes one region. Identical copies
+    become one; shapes that differ are combined into one outline covering
+    the ground either of them covered.
+  - **Not now**: nothing changes.
+- Ctrl+Z undoes either answer, and nothing is written until you **Save**.
+
 ## v1.4.1
 
 ### You can now delete pieces of regions
@@ -25,36 +86,22 @@ people will care about most and keep that title short.
   keeps the name. Before, that line was refused with "the cut line doesn't
   touch the region".
 
-### Points tidy themselves: no more points bunched together
+### Far fewer points, same shape
 
-- Open **Edit points** on a region and its points are **tidied
-  automatically**: fewer points, none bunched together, the outline barely
-  moves, borders with neighbours stay joined and no gap opens. Points still
-  sitting right next to another are then deleted just as right-click
-  **Delete point** would — from both regions on a shared border — except
-  where regions meet. A note over the map says what changed ("Tidied: TH
-  127 → 51 points") with **Undo** (Ctrl+Z works too).
-- It also happens by itself right after **Share borders**, **Merge**, **Fix a
-  gap**, **Clean up stray lines**, **Build the outline** and drawing a new
-  region — the steps that used to leave dense points behind — as its own
-  Undo step. Never in the middle of a drag.
-- On a real section TH went from 132 points (40 of them bunched) to 53 (2),
-  CP from 141 to 60 (none), and after Share borders dft from 305 to 91.
-  Regions drawn inside another (Caudoputamen_672 inside CP) work too, and
-  tidying never pushes a region out of the one it sits in.
-- Points that still sit right next to another are shown **orange**. **Tidy**
-  in the box runs it by hand; untick **Tidy automatically** under
-  **Adjust…** if you'd rather press it yourself.
-- It works on regions drawn inside another one too (Caudoputamen_672 inside
-  CP, a field inside HPF) — before, those were left exactly as dense as
-  they were.
-- **Adjust…** lets you pick the number of points yourself: a slider or a
-  number you type, all the way **down to 3**, and **Space points evenly** if
-  you want them evenly spaced. When a count would change the shape it just
-  says so — "The shape will deform" — and you decide with **Keep**. Below the
-  fewest that keep every border joined, only that region changes; **Share
-  borders** joins it to its neighbours again.
-- The same **Tidy** is there for a shared border in Edit shared borders.
+- **Resample points** now goes by the **number of vertices**, in Edit points
+  and on a shared border: drag the slider or type the number you want, and
+  the readout shows e.g. **81 → 29**. The slider steps through the counts
+  the region (or border) can actually reach.
+- New **Fewest points** choice next to Even spacing: it keeps only the points
+  the shape needs — corners stay, straight runs lose theirs. On a real
+  section CP goes from 141 to 28 and TH from 132 to 34 while keeping their
+  shape. Borders with neighbours stay joined.
+- Whenever a count would change the shape, it asks first: **"The shape will
+  deform. Do you want fewer vertices?"** — say yes and it goes lower still
+  (CP: 17).
+- Resample points no longer opens a gap where a region runs close to a
+  neighbour without touching it, and a border with a thin neighbour (like
+  V3) is thinned too instead of being left as a dense bunch of points.
 
 ### Split finds the region by itself
 
