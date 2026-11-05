@@ -3,7 +3,7 @@
 # This exists so you can ship a Mac build without owning a Mac: PyInstaller
 # cannot cross-compile, so the app has to be built on the OS *and* the CPU
 # architecture it will run on:
-#   macos-14 -> Apple Silicon (arm64)   -- what every Mac sold since 2021 is
+#   macos-15 -> Apple Silicon (arm64)   -- what every Mac sold since 2021 is
 # (Intel is not built; see the matrix comment below.)
 #
 # Run it from the Actions tab ("Run workflow"), or push a tag like v0.2.0.
@@ -31,7 +31,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-14
+          # macos-15, not 14: GitHub retired the macos-14 image on 2 Nov 2026
+          # (a job asking for it is cancelled before any step runs).
+          - runner: macos-15
             arch: arm64
           # Intel (macos-13) is deliberately NOT built.
           #
@@ -81,8 +83,8 @@ jobs:
       # one, and it lists rasterio, which nothing imports -- it would drag in
       # GDAL for nothing).
       # numpy FIRST, as the explicit macosx_11_0_arm64 wheel. PyPI has both an
-      # 11.0 (OpenBLAS) and a 14.0 (Accelerate) wheel for it, and pip on this
-      # macos-14 runner prefers the 14.0 one -- which made v0.5.1 the only
+      # 11.0 (OpenBLAS) and a 14.0 (Accelerate) wheel for it, and pip on a
+      # macos-14+ runner prefers the 14.0 one -- which made v0.5.1 the only
       # build whose numpy needed Sonoma while its plist promised Big Sur, so
       # on macOS 11-13 it launched and died importing numpy. Installing the
       # 11.0 wheel by name means `-r requirements.txt` sees numpy satisfied and
