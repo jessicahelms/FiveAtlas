@@ -11,6 +11,39 @@ The first `### ` title of a section is also what the app's update banner
 shows ("FiveAtlas 1.3.2 is out — Faster on laptops"), so lead with the change
 people will care about most and keep that title short.
 
+## v1.5.0
+
+### Predict regions
+
+- New **Predict regions** button in the top bar, beside the dataset. One
+  click draws the brain regions of the open section from its transcripts,
+  using the region model (idx=22) and the same clean-up rules as the
+  validated prediction batch. The model comes with the app.
+- Regions come out under the names annotators use: **ISO, HPF, TH, CP, HY,
+  PAL, OLF, CTXsp, sAMY, VL, V3, opt**, plus **ft** for the other fiber
+  tracts (dft and lft together: cut it into the two by hand).
+- It never overwrites anything by itself: when the prediction is ready you
+  choose **Replace** the regions on screen or **Add alongside** them, and
+  Ctrl+Z undoes it. Your hemi outline and damage shapes are kept.
+- Options under **▾**: predict inside an outline, which side is medial and
+  which way is up, trim to the outline.
+- The transcripts start loading as soon as a dataset opens, so the button is
+  quick when you get to it.
+
+### Faster
+
+- **Tidy points** on opening **Edit points** is about a quarter faster, and
+  the Tidy box's counts are worked out once instead of twice.
+- The map no longer freezes while Tidy runs: image tiles keep loading.
+- Image tiles you've already looked at are kept on disk, so after closing
+  and reopening FiveAtlas the image comes back sharp straight away (about
+  15× faster) instead of loading again from the network drive.
+
+### Mac
+
+- FiveAtlas for Mac now needs **macOS 12.3 (Monterey) or newer**. Region
+  prediction's maths libraries don't run on macOS 11.
+
 ## v1.4.3
 
 ### Tidy a shared border straight away

@@ -81,7 +81,9 @@ hiddenimports = (
     BACKEND_MODULES
     + UVICORN_HIDDEN
     + collect_submodules("imagecodecs")     # JPEG2000 decode for the morphology pyramid
+    + collect_submodules("onnxruntime.capi")  # region prediction; backend/predict.py imports it lazily
     + [
+        "scipy.ndimage",
         "anyio", "click", "h11",
         "shapely", "shapely.geometry", "shapely.ops", "shapely.strtree",
         "shapely.validation", "shapely._geos",
@@ -104,18 +106,21 @@ except Exception:
     pass
 
 # shapely ships GEOS as bundled DLLs/dylibs; imagecodecs ships a pile of codecs.
-binaries = collect_dynamic_libs("shapely") + collect_dynamic_libs("imagecodecs")
+binaries = (collect_dynamic_libs("shapely") + collect_dynamic_libs("imagecodecs")
+            + collect_dynamic_libs("onnxruntime"))
 
 a = Analysis(
     [str(APP_DIR / "launcher.py")],
     pathex=[str(BACKEND), str(APP_DIR)],
     binaries=binaries,
-    datas=[(str(DIST_UI), "frontend_dist")],
+    # The weights only go in when a build asks for them: the releases of this repo are public.
+    datas=[(str(DIST_UI), "frontend_dist")]
+    + ([(os.environ["FIVEATLAS_REGION_MODEL"], "models")] if os.environ.get("FIVEATLAS_REGION_MODEL") else []),
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["matplotlib", "scipy", "pandas", "IPython", "notebook", "pytest"],
+    excludes=["matplotlib", "pandas", "IPython", "notebook", "pytest"],
     # Our backend/datasets.py shares its name with the HuggingFace `datasets`
     # package, and pyinstaller-hooks-contrib's hook for THAT package tells
     # PyInstaller to ship the module as plain source beside the bytecode. It
@@ -175,7 +180,8 @@ if MACOS:
             "NSHighResolutionCapable": True,
             # 11.0 is only honest if every binary inside agrees -- CI runs
             # tests/check_min_os.py against the built bundle to make sure.
-            "LSMinimumSystemVersion": "11.0",
+            # 12.3: scipy's oldest arm64 wheel (region prediction) is built for Monterey 12.3
+            "LSMinimumSystemVersion": "12.3",
             # An agent app: no Dock icon, no Dock menu. The process has no
             # Cocoa event loop (it is a uvicorn server that opens your browser),
             # so with a Dock icon it would bounce, then read "Not Responding",

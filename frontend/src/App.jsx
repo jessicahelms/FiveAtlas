@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useState, useCallback, useRef, useMemo } from 'react';
 import Viewer, { regionRgb, rgbToPacked } from './Viewer';
 import Sidebar from './Sidebar';
+import PredictPanel from './PredictPanel';
 import ChannelPanel from './ChannelPanel';
 import DatasetBar from './DatasetBar';
 import * as api from './api';
@@ -2869,14 +2870,23 @@ export default function App() {
   const resampleBase = resampleWhich === 'region'
     ? (regionResample && regionResample.name === selectedName ? regionResample.baseFc : fc)
     : (resample && resample.baseFc ? resample.baseFc : fc);
+  // Opening Edit points on a region with bunched points tidies it by itself
+  // (below). The counts are for the map Tidy leaves, so they wait for it:
+  // worked out first, they were thrown away when it landed and worked out
+  // again -- every one of the 28 settings twice, 12 s on dft, the map stalled.
+  const tidyWorking = !!(tidyNotice && tidyNotice.working);
+  const tidyPending = uiSettings.autoTidy !== false && mode === 'modify' && !!selectedName
+    && bunchedCount > 0 && !regionResample   // a preview up: no tidy comes, so don't wait for one
+    && !autoTidied.current.has(`${dsId}|region:${selectedName}`);
   useEffect(() => {
     if (!resampleWhich) return;
+    if (resampleWhich === 'region' && (tidyPending || tidyWorking)) return;
     const o = resampleOpts;
     if (o && o.scope === resampleScope && o.dsId === dsId && o.method === resampleMethod
         && o.source === resampleBase) return;
     loadResampleOptions(resampleWhich, resampleMethod, false);
   }, [resampleWhich, resampleScope, resampleMethod, dsId, resampleOpts, resampleBase,
-    loadResampleOptions]);
+    loadResampleOptions, tidyPending, tidyWorking]);
   const shownResampleOpts = resampleOpts && resampleOpts.scope === resampleScope
     && resampleOpts.dsId === dsId && resampleOpts.method === resampleMethod
     && resampleOpts.source === resampleBase ? resampleOpts : null;
@@ -2937,8 +2947,8 @@ export default function App() {
     setLoadAsk((a) => (a && a.fc ? { ...a, withDamage: yes } : a));
   }, []);
 
-  const answerLoad = useCallback((choice) => {
-    const ask = loadAsk;
+  const answerLoad = useCallback((choice, given) => {
+    const ask = given || loadAsk;
     if (!choice || !ask || !ask.fc) { setLoadAsk(null); return; }
     const aliases = designations && designations.aliases;
     // With the damage tools hidden there is no question: the file loads exactly
@@ -2956,9 +2966,16 @@ export default function App() {
       delete c._readFrom; delete c._hasHemi; delete c._damageBeside;
       return c;
     };
+    // A resample preview goes first, and the map it was built on comes back. Left
+    // open, it is on the map as `cur` (unapproved), and "leave Edit points" /
+    // "another region selected" cancels it AFTER this commit -- putting the map from
+    // before the preview back over the file just loaded.
+    dropRegionPreview(true);
+    cancelResample();
     const cur = fcRef.current || { type: 'FeatureCollection', features: [] };
     let next;
     let renamed = 0;
+    let addedFeats = [];
     if (choice === 'replace') {
       next = stampFc({ ...withoutReadInfo(ask.fc), type: 'FeatureCollection', features: incoming },
         identityRef.current, 'load-regions', `${ask.name}, replacing the map`,
@@ -2984,8 +3001,19 @@ export default function App() {
         renamed += 1;
         return { ...f, properties: renameFeatureProperties(f, idProp, { [idProp]: fresh }).props };
       });
-      next = stampFc({ ...cur, features: [...cur.features, ...added] }, identityRef.current,
-        'add-regions-file', `${added.length} from ${ask.name}`, added.map((f) => featureName(f, idProp)));
+      addedFeats = added;
+      const addedNames = added.map((f) => featureName(f, idProp));
+      if (ask.entry) {
+        // a server-stamped entry (a prediction): that one goes on the trail, naming
+        // the regions as they were added
+        const trail = Array.isArray(cur._provenance) ? cur._provenance : [];
+        next = { ...cur, features: [...cur.features, ...added],
+          _provenance: [...trail, { ...ask.entry, regions: addedNames }] };
+      } else {
+        next = stampFc({ ...cur, features: [...cur.features, ...added] }, identityRef.current,
+          ask.action || 'add-regions-file', ask.detail || `${added.length} from ${ask.name}`,
+          addedNames);
+      }
     }
     commit(next); setBaseline(next);
     setSelected([]); selAnchorRef.current = null;
@@ -2997,11 +3025,14 @@ export default function App() {
         if (d.groups && d.groups.length) setDupAsk({ groups: d.groups });
       }).catch(() => { /* a courtesy */ });
     }
+    // a caller with its own confirmation (the prediction panel) says it there
+    if (ask.quiet) return { added: addedFeats, renamed };
     const dmgNote = damageQuestion ? (ask.withDamage ? ', damage included' : ', damage left out') : '';
     setLoadAsk({ done: choice === 'replace'
       ? `The map now holds the ${incoming.length} regions from ${ask.name}${dmgNote}. Ctrl+Z brings back what was there; Save to keep it.`
       : `Added ${incoming.length} regions from ${ask.name}${dmgNote}${renamed ? ` (${renamed} renamed so no name is used twice)` : ''}. Ctrl+Z undoes it; Save to keep it.` });
-  }, [loadAsk, designations, idProp, commit, clearBorder, uiSettings, dsId]);
+  }, [loadAsk, designations, idProp, commit, clearBorder, uiSettings, dsId,
+      dropRegionPreview, cancelResample]);
 
   useEffect(() => {
     setSaveTarget(null);
@@ -3311,6 +3342,103 @@ export default function App() {
     } finally { setBusy(false); }
   }, [dsId, designations, idProp]);
 
+  // A prediction goes straight onto the map, and Ctrl+Z takes it back. The outline it
+  // ran inside and any damage shapes stay, and an earlier prediction nobody has edited
+  // is replaced. Regions from anywhere else are never swept away unasked: with no
+  // `choice` this then returns { others } (how many there are), and the top bar asks.
+  // choice 'count' only counts (the question keeps its number live); 'replace' and
+  // 'add' place it. A result made before the section was turned is refused: its
+  // coordinates are in the old frame. Returns { others } | { placed } | { error }.
+  // name -> geometry key of the regions the last prediction(s) put on the map, as
+  // they were placed. The keys are cached per geometry object, so counting again
+  // (the question does it on every map change) costs a lookup, not a stringify.
+  const lastPredictionRef = useRef(new Map());
+  useEffect(() => { lastPredictionRef.current = new Map(); }, [dsId]);
+  const geomKeys = useRef(new WeakMap());
+  const geomKey = useCallback((g) => {
+    if (!g || typeof g !== 'object') return String(g);
+    let k = geomKeys.current.get(g);
+    if (k === undefined) { k = JSON.stringify(g); geomKeys.current.set(g, k); }
+    return k;
+  }, []);
+  // The panel's polling loop can call this long after the render that handed it
+  // over: the dataset's info is read from a ref, never from a stale closure.
+  const infoRef = useRef(info);
+  infoRef.current = info;
+  const placePrediction = useCallback((r, choice) => {
+    // the dataset is still loading: the result can't be judged yet, ask again later
+    const nowInfo = infoRef.current;
+    if (!nowInfo || !fcRef.current) return { wait: true };
+    const orientKey = (o) => {
+      const n = o || {};
+      return `${(((+n.rot || 0) % 360) + 360) % 360}${n.flipH ? 'h' : ''}${n.flipV ? 'v' : ''}`;
+    };
+    if (r.fc && r.fc._orientation
+        && orientKey(r.fc._orientation) !== orientKey(nowInfo.orientation)) {
+      return { error: 'The section was turned while predicting — run Predict again.' };
+    }
+    const aliases = designations && designations.aliases;
+    const outline = r.report.outline;
+    // a resample preview on the map is not the map: count against what it was built on
+    const rr = regionResampleRef.current;
+    const base = (rr && rr.baseFc) || fcRef.current;
+    const cur = (base && base.features) || [];
+    const last = lastPredictionRef.current;
+    const stays = (f) => {
+      const n = featureName(f, idProp);
+      return n === outline || isDamage(n, aliases);
+    };
+    const fromLast = (f) => {
+      const k = last.get(featureName(f, idProp));
+      return k !== undefined && k === geomKey(f.geometry);
+    };
+    const others = cur.filter((f) => !stays(f) && !fromLast(f));
+    if (choice === 'count' || (others.length && !choice)) return { others: others.length };
+    const incoming = r.fc.features || [];
+    // Drop any resample preview BEFORE committing, putting back the map it was built
+    // on. Left open, "leave Edit points" cancels it after the commit below and puts
+    // the pre-preview map back over the prediction.
+    dropRegionPreview(true);
+    cancelResample();
+    // The prediction adds ONE entry to the map's trail: the one the server stamped
+    // on it, or a client stamp if it carried none.
+    const theirs = (Array.isArray(r.fc._provenance) ? r.fc._provenance : [])
+      .filter((e) => e && e.action === 'predict-regions');
+    const serverEntry = theirs.length ? theirs[theirs.length - 1] : null;
+    if (choice === 'add') {
+      const res = answerLoad('add', {
+        fc: r.fc, name: 'Region prediction', hasHemi: false, damageInFile: 0, damageBeside: [],
+        besideFiles: [], withDamage: null, quiet: true, entry: serverEntry,
+        action: 'predict-regions', detail: `${r.report.model}, inside ${outline}, added alongside`,
+      });
+      const added = (res && res.added) || [];
+      // remembered (under the names they got) so a later Replace knows they are its own
+      lastPredictionRef.current = new Map([...last,
+        ...added.map((f) => [featureName(f, idProp), geomKey(f.geometry)])]);
+      return { placed: added.length, renamed: (res && res.renamed) || 0 };
+    }
+    const now = fcRef.current || { type: 'FeatureCollection', features: [] };
+    const names = new Set(incoming.map((f) => featureName(f, idProp)));
+    const kept = (now.features || []).filter((f) => stays(f) && !names.has(featureName(f, idProp)));
+    // The map's own file-level members (its edit trail, _orientation, ...) stay: the
+    // damage kept here keeps its history.
+    const fileLevel = Object.fromEntries(Object.entries(now)
+      .filter(([k]) => k !== 'type' && k !== 'features'));
+    let next = { ...fileLevel, type: 'FeatureCollection', features: [...kept, ...incoming] };
+    if (!next._orientation && r.fc._orientation) next._orientation = r.fc._orientation;
+    if (serverEntry) {
+      const trail = Array.isArray(now._provenance) ? now._provenance : [];
+      next._provenance = [...trail, serverEntry];
+    } else {
+      next = stampFc(next, identityRef.current, 'predict-regions', `${r.report.model}, inside ${outline}`, [...names]);
+    }
+    commit(next); setBaseline(next);
+    setSelected([]); selAnchorRef.current = null;
+    setMoved(new Set()); setMode('view'); clearBorder();
+    lastPredictionRef.current = new Map(incoming.map((f) => [featureName(f, idProp), geomKey(f.geometry)]));
+    return { placed: incoming.length };
+  }, [designations, idProp, answerLoad, commit, clearBorder, dropRegionPreview, cancelResample, geomKey]);
+
   // Export refuses to write broken geometry. On a block we surface the problem
   // list and let the user Repair, force it through, or go fix it by hand.
   const doExportAnnData = useCallback(async () => {
@@ -3492,6 +3620,10 @@ export default function App() {
             ? updateInfo.headline : null,
         } : null}
         onApplyUpdate={applySelfUpdate} updateApplyState={updateApplyState}
+        predict={(
+          <PredictPanel key={dsId || 'none'} dsId={dsId} fc={fc} idProp={idProp} busy={busy}
+            aliases={designations && designations.aliases} onResult={placePrediction} />
+        )}
       />
       <div className="app">
         {pendingDs && (

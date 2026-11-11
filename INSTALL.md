@@ -16,7 +16,7 @@ both downloads, always the newest version:
 | You are on | Download |
 |---|---|
 | **Windows** 10 / 11 | `FiveAtlas-<version>-win64.zip` |
-| **Mac** (Apple Silicon, macOS 11+) | `FiveAtlas-<version>-macos-arm64.dmg` |
+| **Mac** (Apple Silicon, macOS 12.3+) | `FiveAtlas-<version>-macos-arm64.dmg` |
 | **How to use every feature** | `FiveAtlas-instructions.pdf` |
 
 No Python and no Node.js needed for these. The sections below say how to
@@ -71,7 +71,7 @@ window.
 
 ### Requirements
 
-- **Windows**, or **macOS 11+ on Apple Silicon**
+- **Windows**, or **macOS 12.3+ on Apple Silicon**
 - **Python 3.10–3.12** — install from <https://www.python.org/downloads/> and tick
   *"Add python.exe to PATH"* during install.
 
@@ -99,7 +99,7 @@ every feature works identically. Only the install differs.
 
 **From a packaged `.dmg`:**
 
-0. It needs an **Apple Silicon** Mac (M1 or later) on **macOS 11 or newer**.
+0. It needs an **Apple Silicon** Mac (M1 or later) on **macOS 12.3 or newer**.
    There is no Intel build. Download the `.dmg` **on the Mac itself** — a copy
    that has been through a Windows machine or a shared drive can lose the
    symlinks and permissions the app needs and macOS will call it "damaged".

@@ -29,7 +29,7 @@ ITEMS = [
     "to your own computer first — do not run it straight from the shared drive.",
 
     # -- getting it running: Mac -----------------------------------------------------
-    "On a Mac: it needs an Apple Silicon Mac (M1, M2, M3, M4…) on macOS 11 "
+    "On a Mac: it needs an Apple Silicon Mac (M1, M2, M3, M4…) on macOS 12.3 "
     "or newer — click the Apple menu, About This Mac, and check it says "
     "“Chip: Apple M…”; if it says Intel it will not open. Download "
     "FiveAtlas-…-macos-arm64.dmg on the Mac itself (passing it through a "
@@ -105,6 +105,20 @@ ITEMS = [
     "damage with it — Yes or No — which covers damage shapes inside that "
     "file and damage-only files (like separation.4.geojson) in the same folder. "
     "Ctrl+Z undoes the load, and nothing is written until you Save.",
+
+    # -- predict regions -----------------------------------------------------------------
+    "Predict regions (top bar, beside the dataset) draws the brain regions of "
+    "the open section from its transcripts, with the region model that comes "
+    "with the app. Under ▾ say which side of the section is medial and which "
+    "way is up as it lies on screen, and pick an outline (usually hemi) to "
+    "predict inside. It takes a few seconds to a minute; the transcripts start "
+    "loading as soon as the dataset opens, so it is quicker if you open the "
+    "dataset first and look around. When it is done you choose Replace (the "
+    "regions on screen go, your hemi outline and damage stay) or Add alongside. "
+    "Ctrl+Z undoes it. The regions are named the way annotators name them "
+    "(ISO, HPF, TH, CP, HY, PAL, OLF, CTXsp, sAMY, VL, V3, opt); ft is every "
+    "other fiber tract, dft and lft together, for you to cut in two with "
+    "Split. It is a starting point to check and edit, not a finished map.",
 
     "If a region file uses one name for more than one shape, FiveAtlas asks "
     "about it as soon as the dataset opens (and after Replace the map or "

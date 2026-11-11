@@ -8,7 +8,7 @@ export default function DatasetBar({
   working, error, onDismissError,
   saveResult, onDismissSave, onRevealSave, onSaveAs, saveTarget,
   version, installedVersion, canRestart, onRestart, restartState,
-  updateReady, onApplyUpdate, updateApplyState,
+  updateReady, onApplyUpdate, updateApplyState, predict,
 }) {
   const shown = saveResult && (saveResult.exported || saveResult.path);
   const warn = saveResult && (saveResult.refused || saveResult.failed || saveResult.exportError);
@@ -39,6 +39,8 @@ export default function DatasetBar({
         onKeyDown={(e) => { if (e.key === 'Enter' && path.trim()) onOpenPath(path.trim()); }}
       />
       {busy && <span className="dsbar-busy">scanning…</span>}
+
+      {predict}
 
       {/* The things you reach for constantly live here, in one place that never
           scrolls away: undo, redo, and Save -- which used to be at the bottom of

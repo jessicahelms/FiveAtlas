@@ -160,7 +160,7 @@ cat > "$RELEASE/README.txt" <<EOF
 FiveAtlas $VERSION  (macOS, Apple Silicon / $ARCH)
 
 WHAT IT RUNS ON
-  An Apple Silicon Mac (M1, M2, M3, M4...) on macOS 11 Big Sur or newer.
+  An Apple Silicon Mac (M1, M2, M3, M4...) on macOS 12.3 Monterey or newer.
   Check: Apple menu -> About This Mac -> "Chip". If it says Intel, this build
   will not open -- there is no Intel build.
   Download the .dmg ON THE MAC ITSELF. Passing it through a Windows computer or

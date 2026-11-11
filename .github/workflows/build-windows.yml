@@ -62,6 +62,22 @@ jobs:
           pip install "pyinstaller==6.21.0"
           pip freeze > "${{ runner.temp }}/requirements-built.txt"
 
+      # The region model (77 MB) is not in the repo: it is an asset of its own
+      # pre-release (tag region-model-idx22), pinned by its SHA-256, and
+      # FiveAtlas.spec bundles it. The smoke test's selftest then runs it.
+      - name: Fetch the region model
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          M="$(cygpath -m "$RUNNER_TEMP")/model"
+          mkdir -p "$M"
+          gh release download region-model-idx22 -R "$GITHUB_REPOSITORY" \
+              -p region_model_idx22.onnx -D "$M"
+          echo "7875556680c55f0824140976b57c39ea7b009dd8e2b167007e29352c45a2ff34  $M/region_model_idx22.onnx" \
+              | sha256sum -c -
+          echo "FIVEATLAS_REGION_MODEL=$M/region_model_idx22.onnx" >> "$GITHUB_ENV"
+
       - name: Resolve version
         id: ver
         shell: bash

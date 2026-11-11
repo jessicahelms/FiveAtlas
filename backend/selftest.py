@@ -126,6 +126,32 @@ def _tk():
     return f"tk {tkinter.TkVersion}"
 
 
+def _region_model():
+    # Region prediction imports onnxruntime and scipy only when someone predicts,
+    # so a bundle missing either would pass every other row. Run the real thing:
+    # the bundled model on a blank canvas, through the production rules. A release
+    # build must carry the model; a source checkout without one only checks imports.
+    import numpy as np
+    import onnxruntime as ort
+    from scipy import ndimage
+    import config
+    import predict
+
+    if "CPUExecutionProvider" not in ort.get_available_providers():
+        raise RuntimeError(f"onnxruntime has no CPU provider: {ort.get_available_providers()}")
+    if ndimage.label(np.array([[1, 1, 0, 1]], dtype=bool))[1] != 2:
+        raise RuntimeError("scipy.ndimage.label gave the wrong count")
+    if not predict._model_files():
+        if config.FROZEN:
+            raise RuntimeError("no region model bundled in this build")
+        return f"onnxruntime {ort.__version__}, scipy ok, no model installed (source checkout)"
+    _, meta = predict._load()
+    size = int(meta["img_size"])
+    ids = predict.segment(np.zeros((size, size, len(meta["channel_names"])), np.uint16))
+    lab, _, _ = predict.apply_rules(ids)
+    return f"onnxruntime {ort.__version__}, model {meta['model_id'][:40]} ran ({lab.shape[0]} px canvas)"
+
+
 def run():
     import config
     rows = {
@@ -137,6 +163,7 @@ def run():
         "pillow": _check("pillow", _pillow),
         "h5ad": _check("h5ad", _h5ad),
         "tkinter": _check("tkinter", _tk),
+        "region_model": _check("region_model", _region_model),
     }
     return {
         "ok": all(r["ok"] for r in rows.values()),

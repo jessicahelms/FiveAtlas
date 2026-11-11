@@ -5006,8 +5006,13 @@ def _ring_flaws(cs, max_deg=2.0, min_len=3.0, needle_tol=0.01, window=8):
     n = len(pts)
     if n < 3:
         return 0
+    # numpy only rules things OUT: a corner or an edge pair it lets through is
+    # tested below exactly as before, so the count can't change. Tidy ran this
+    # on every Fewest points setting, every try -- half its time in Python loops
+    # (Fiber Tracts 2.4 of 5.7 s).
+    spikes, pairs = _ring_flaw_candidates(pts, n, max_deg, min_len, needle_tol, window)
     flaws = 0
-    for i in range(n):
+    for i in spikes:
         p0, p1, p2 = pts[i - 1], pts[i], pts[(i + 1) % n]
         ax, ay = p0[0] - p1[0], p0[1] - p1[1]
         bx, by = p2[0] - p1[0], p2[1] - p1[1]
@@ -5021,23 +5026,55 @@ def _ring_flaws(cs, max_deg=2.0, min_len=3.0, needle_tol=0.01, window=8):
     # time. Same tests, same answers (test_resample_fewest checks them against
     # the shapely version).
     ring = [(float(p[0]), float(p[1])) for p in pts] + [(float(pts[0][0]), float(pts[0][1]))]
-    for k in range(n):
+    for k, m in pairs:
         a, b = ring[k], ring[k + 1]
         la = math.hypot(b[0] - a[0], b[1] - a[1])
         if la < 2.0:
             continue
-        for m in range(k + 2, min(k + window, n)):
-            c, d = ring[m], ring[m + 1]
-            if a == c or a == d or b == c or b == d:
-                continue
-            lb = math.hypot(d[0] - c[0], d[1] - c[1])
-            if lb < 2.0 or _seg_seg_dist(a, b, c, d) >= needle_tol:
-                continue
-            (s0, s1), (o0, o1) = ((a, b), (c, d)) if la <= lb else ((c, d), (a, b))
-            mid = ((s0[0] + s1[0]) / 2.0, (s0[1] + s1[1]) / 2.0)
-            if _pt_seg_dist(mid, o0, o1) < needle_tol:
-                flaws += 1
+        c, d = ring[m], ring[m + 1]
+        if a == c or a == d or b == c or b == d:
+            continue
+        lb = math.hypot(d[0] - c[0], d[1] - c[1])
+        if lb < 2.0 or _seg_seg_dist(a, b, c, d) >= needle_tol:
+            continue
+        (s0, s1), (o0, o1) = ((a, b), (c, d)) if la <= lb else ((c, d), (a, b))
+        mid = ((s0[0] + s1[0]) / 2.0, (s0[1] + s1[1]) / 2.0)
+        if _pt_seg_dist(mid, o0, o1) < needle_tol:
+            flaws += 1
     return flaws
+
+
+def _ring_flaw_candidates(pts, n, max_deg, min_len, needle_tol, window):
+    """The corners that could be spikes and the edge pairs (k, m) that could be
+    needles in _ring_flaws, with slack: a spike needs both arms >= min_len and
+    an angle < max_deg; a needle needs two edges no further apart than
+    needle_tol, and edges whose bounding boxes are further apart than that
+    can't be. Everything else is certainly not a flaw."""
+    import numpy as np
+
+    P = np.asarray([(float(p[0]), float(p[1])) for p in pts], dtype=float)
+    A = np.roll(P, 1, axis=0) - P                    # to the point before
+    B = np.roll(P, -1, axis=0) - P                   # to the point after
+    la, lb = np.hypot(A[:, 0], A[:, 1]), np.hypot(B[:, 0], B[:, 1])
+    arms = (la >= min_len * (1 - 1e-9)) & (lb >= min_len * (1 - 1e-9))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        cos = (A * B).sum(axis=1) / (la * lb)
+    sharp = cos >= math.cos(math.radians(max_deg)) - 1e-6
+    spikes = np.flatnonzero(arms & sharp).tolist()
+
+    Q = np.roll(P, -1, axis=0)                       # edge k runs P[k] -> Q[k]
+    lo, hi = np.minimum(P, Q), np.maximum(P, Q)
+    slack = 2.0 * needle_tol + 1e-6
+    pairs = []
+    for off in range(2, window):
+        if off >= n:
+            break
+        k = np.arange(n - off)
+        m = k + off
+        gap = np.maximum(np.maximum(lo[m] - hi[k], lo[k] - hi[m]), 0.0).max(axis=1)
+        for kk in k[gap <= slack].tolist():
+            pairs.append((kk, kk + off))
+    return spikes, pairs
 
 
 def _pt_seg_dist(p, a, b):
@@ -6326,6 +6363,18 @@ _EVEN_GRID = (20, 30, 40, 50, 60, 80, 100, 120, 150, 200, 250, 300, 400, 500, 60
 EVEN_LOOSE = 600.0
 _resample_cache = {}          # (features digest, names, method, tol) -> result
 _RESAMPLE_CACHE_MAX = 48
+# The server runs Tidy and the Tidy box's counts on worker threads (so the map
+# keeps loading): two can reach these caches at once, and evicting the oldest
+# walks the dict. Only the cache reads and writes are held, never the work.
+_cache_lock = __import__("threading").Lock()
+
+
+def _cache_put(cache, key, value):
+    with _cache_lock:
+        cache.pop(key, None)
+        cache[key] = value                        # most recent last
+        while len(cache) > _RESAMPLE_CACHE_MAX:
+            cache.pop(next(iter(cache)))
 
 
 def _features_digest(features):
@@ -6343,7 +6392,8 @@ def resample_at(features, id_prop, names, tol, method="shape", digest=None):
     tol = float(tol)
     digest = digest or _features_digest(features)
     key = (digest, tuple(names), method, tol)
-    hit = _resample_cache.pop(key, None)
+    with _cache_lock:
+        hit = _resample_cache.get(key)
     if hit is None:
         if tol < 0:
             # a count below the guarded fewest: -tol points, this region alone
@@ -6360,9 +6410,7 @@ def resample_at(features, id_prop, names, tol, method="shape", digest=None):
                                   method=method)
         else:
             hit = resample_regions(features, id_prop, names, tol=tol, method=method)
-    _resample_cache[key] = hit                    # most recent last
-    while len(_resample_cache) > _RESAMPLE_CACHE_MAX:
-        _resample_cache.pop(next(iter(_resample_cache)))
+    _cache_put(_resample_cache, key, hit)
     return hit
 
 
@@ -6423,9 +6471,7 @@ def resample_options(features, id_prop, names, method="shape"):
                                digest)["features"]
         top = options[-1]["points"] if options else before
         ladder = _count_ladder(base, id_prop, nm, method)
-        _count_cache[(digest, nm, method)] = (base, ladder)
-        while len(_count_cache) > _RESAMPLE_CACHE_MAX:
-            _count_cache.pop(next(iter(_count_cache)))
+        _cache_put(_count_cache, (digest, nm, method), (base, ladder))
         for n in sorted(ladder, reverse=True):
             if n >= top:
                 continue
@@ -6685,9 +6731,15 @@ def resample_to_count(features, id_prop, name, n, method="shape", digest=None):
     name = str(name)
     digest = digest or _features_digest(features)
     key = (digest, name, method)
-    if key not in _count_cache:
+    with _cache_lock:
+        got_ladder = _count_cache.get(key)
+    if got_ladder is None:
         resample_options(features, id_prop, [name], method)
-    base, ladder = _count_cache[key]
+        with _cache_lock:
+            got_ladder = _count_cache.get(key)
+    if got_ladder is None:                        # pushed out meanwhile by other work
+        raise ValueError("the point counts changed meanwhile -- move the slider again")
+    base, ladder = got_ladder
     if not ladder:
         raise ValueError(f"{name} has no outline to take points from")
     got = min(ladder, key=lambda c: (abs(c - int(n)), c))

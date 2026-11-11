@@ -250,6 +250,41 @@ export async function readRegionsFile(ds, path) {
   return r.json();
 }
 
+// Region prediction. Starting it returns at once; poll predictState for
+// {state: running|done|failed|idle, stage, fc, report, error}.
+export async function predictStatus() {
+  const r = await fetch(`${API}/predict/status`);
+  if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+  return r.json();
+}
+
+export async function startPredict(ds, body) {
+  const r = await fetch(`${API}/datasets/${ds}/regions/predict`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+  return r.json();
+}
+
+// Reads the dataset's transcripts ahead of time; a courtesy, nothing waits on it.
+export async function preparePredict(ds, model) {
+  const r = await fetch(`${API}/datasets/${ds}/regions/predict/prepare`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model }),
+  });
+  if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+  return r.json();
+}
+
+export async function predictState(ds) {
+  const r = await fetch(`${API}/datasets/${ds}/regions/predict`);
+  if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+  return r.json();
+}
+
 // One or several region files combined into the working copy (the pre-load
 // checklist's region rows).
 export async function loadRegionsMulti(ds, paths) {

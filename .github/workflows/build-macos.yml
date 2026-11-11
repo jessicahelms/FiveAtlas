@@ -97,10 +97,33 @@ jobs:
               --platform macosx_11_0_arm64 --python-version 3.11 \
               --implementation cp --abi cp311 -d "$RUNNER_TEMP/wheels"
           pip install "$RUNNER_TEMP"/wheels/numpy-*.whl
+          # scipy (region prediction) has the same trap: a 12.0 and a 14.0 arm64
+          # wheel, and pip would pick the 14.0 one. 12.0 is the oldest there is,
+          # so it sets the app's floor (LSMinimumSystemVersion in FiveAtlas.spec).
+          SCIPY_PIN="$(grep -E '^scipy==' requirements.txt)"
+          pip download "$SCIPY_PIN" --no-deps --only-binary=:all: \
+              --platform macosx_12_0_arm64 --python-version 3.11 \
+              --implementation cp --abi cp311 -d "$RUNNER_TEMP/wheels"
+          pip install --no-deps "$RUNNER_TEMP"/wheels/scipy-*.whl
           pip install -r requirements.txt
           pip install "pyinstaller==6.21.0"
           pip freeze > "$RUNNER_TEMP/requirements-built.txt"
           echo "---- resolved set ----"; cat "$RUNNER_TEMP/requirements-built.txt"
+
+      # The region model (77 MB) is not in the repo. It is an asset of its own
+      # release (tag region-model-idx22, a pre-release so /releases/latest still
+      # means the app), pinned here by its SHA-256, and FiveAtlas.spec puts it in
+      # the app's models/ folder. The smoke test's selftest then runs it.
+      - name: Fetch the region model
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/model"
+          gh release download region-model-idx22 -R "$GITHUB_REPOSITORY" \
+              -p region_model_idx22.onnx -D "$RUNNER_TEMP/model"
+          echo "7875556680c55f0824140976b57c39ea7b009dd8e2b167007e29352c45a2ff34  $RUNNER_TEMP/model/region_model_idx22.onnx" \
+              | shasum -a 256 -c -
+          echo "FIVEATLAS_REGION_MODEL=$RUNNER_TEMP/model/region_model_idx22.onnx" >> "$GITHUB_ENV"
 
       - name: Resolve version
         id: ver

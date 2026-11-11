@@ -42,6 +42,7 @@ import scan
 import tilecache
 import damage as DMG
 import notes
+import predict as PRED
 import provenance
 import topology
 from transcripts import GeneDensity
@@ -898,6 +899,50 @@ def _okey(o) -> tuple:
     return (o["rot"], bool(o["flipH"]), bool(o["flipV"]))
 
 
+def _disk_src(p) -> Optional[str]:
+    """The image file's identity for the on-disk tile cache, worked out once per
+    open reader (a stat on a network drive is a round trip per tile otherwise)."""
+    if not hasattr(p, "_tile_disk_src"):
+        p._tile_disk_src = tilecache.disk_source(p.path)
+    return p._tile_disk_src
+
+
+_PNG_HEAD, _PNG_TAIL = b"\x89PNG\r\n\x1a\n", b"IEND\xaeB`\x82"
+
+
+def _whole_tile(data: bytes, p, kind: str) -> bool:
+    """A tile read back from disk is served only if it is whole: a crash right after
+    the rename can leave an empty or cut-off file, which must not live on."""
+    if not data:
+        return False
+    if kind == "raw":
+        return len(data) == int(p.tile) * int(p.tile) * 2      # always padded to tile x tile
+    return data.startswith(_PNG_HEAD) and data.endswith(_PNG_TAIL)
+
+
+def _cached_tile(key: tuple, p, disk_key: tuple, make):
+    """memory -> local disk -> decode. Decoded tiles go into both."""
+    data = tilecache.get(key)
+    if data is not None:
+        return data
+    # what else decides the bytes: the tile size, the contrast the PNGs bake in, and
+    # the app version (a fix to how tiles are drawn must not be hidden by old copies)
+    disk_key = ("v1", config.VERSION, int(p.tile), float(p.lo), float(p.hi)) + tuple(disk_key)
+    src = _disk_src(p)
+    kind = "raw" if key[2] == "morphraw" else "png"
+    data = tilecache.disk_get(src, disk_key)
+    if data is not None and not _whole_tile(data, p, kind):
+        tilecache.disk_drop(src, disk_key)
+        data = None
+    if data is None:
+        data = make()
+        if data is None:
+            return None
+        tilecache.disk_put(src, disk_key, data)
+    tilecache.put(key, data)
+    return data
+
+
 @app.get("/api/datasets/{ds_id}/tiles/{z}/{x}/{y}.png")
 def tile(ds_id: str, z: int, x: int, y: int, plane: Optional[int] = None):
     gen = tilecache.generation(ds_id)      # before the reader -- see _evict
@@ -910,15 +955,12 @@ def tile(ds_id: str, z: int, x: int, y: int, plane: Optional[int] = None):
     level = (p.nlevels - 1) - z
     o = ORI.get(ds_id)
     key = (ds_id, gen, "morph", level, x, y, plane, _okey(o))
-    png = tilecache.get(key)
+    try:
+        png = _cached_tile(key, p, key[2:], lambda: p.tile_png(level, x, y, plane, orient=o))
+    except KeyError:
+        raise HTTPException(404, "dataset closed while reading")
     if png is None:
-        try:
-            png = p.tile_png(level, x, y, plane, orient=o)
-        except KeyError:
-            raise HTTPException(404, "dataset closed while reading")
-        if png is None:
-            return Response(status_code=204)
-        tilecache.put(key, png)
+        return Response(status_code=204)
     return Response(content=png, media_type="image/png",
                     headers={"Cache-Control": "max-age=3600"})
 
@@ -947,19 +989,16 @@ def tile_raw(ds_id: str, z: int, x: int, y: int, plane: Optional[int] = None):
         return Response(status_code=204)
     o = ORI.get(ds_id)
     key = (ds_id, gen, "morphraw", level, x, y, plane, _okey(o))
-    data = tilecache.get(key)
+    try:
+        data = _cached_tile(key, p, key[2:], lambda: p.tile_raw_bytes(level, x, y, plane, orient=o))
+    except KeyError:
+        raise HTTPException(404, "dataset closed while reading")
+    except Exception as e:
+        print(f"[tiles] {ds_id} raw z={z} x={x} y={y}: {type(e).__name__}: {e}",
+              file=sys.stderr)
+        raise HTTPException(503, "reading the tile failed -- try again")
     if data is None:
-        try:
-            data = p.tile_raw_bytes(level, x, y, plane, orient=o)
-        except KeyError:
-            raise HTTPException(404, "dataset closed while reading")
-        except Exception as e:
-            print(f"[tiles] {ds_id} raw z={z} x={x} y={y}: {type(e).__name__}: {e}",
-                  file=sys.stderr)
-            raise HTTPException(503, "reading the tile failed -- try again")
-        if data is None:
-            return Response(status_code=204)
-        tilecache.put(key, data)
+        return Response(status_code=204)
     return Response(content=data, media_type="application/octet-stream",
                     headers={"Cache-Control": "max-age=3600",
                              "X-Tile-Size": str(p.tile)})
@@ -2032,31 +2071,11 @@ async def regions_tidy(ds_id: str, request: Request):
         raise HTTPException(400, "need 'regions'")
     fc = body.get("fc") or geo.load_regions(ds_id)[0]
     idp = d["id_prop"]
-    feats = fc["features"]
-    present = {str((f.get("properties") or {}).get(idp)) for f in feats}
-    summary = []
+    # on a worker thread: a few seconds of shape work held up every other
+    # request, the map's tiles too, until it was done
     try:
-        for nm in names:
-            if nm not in present:
-                continue
-            before = topology.point_count(feats, idp, nm)
-            b0 = topology.bunched_count(feats, idp, nm)
-            if b0 == 0 and not body.get("always"):
-                summary.append({"region": nm, "changed": False, "before": before,
-                                "after": before, "bunchedBefore": 0, "bunchedAfter": 0,
-                                "stuck": 0})
-                continue
-            f1, pick = topology.tidy_region(feats, idp, nm)
-            fin = topology.tidy_finish(f1, idp, nm, respace=False, original=feats,
-                                       merge_fixed=True)
-            after = topology.point_count(fin["features"], idp, nm)
-            changed = pick is not None or fin["deleted"] or fin["merged"]
-            if changed:
-                feats = fin["features"]
-            summary.append({"region": nm, "changed": bool(changed), "before": before,
-                            "after": after if changed else before, "bunchedBefore": b0,
-                            "bunchedAfter": topology.bunched_count(feats, idp, nm),
-                            "stuck": len(fin["stuck"])})
+        feats, summary = await run_in_threadpool(_tidy_work, fc["features"], idp, names,
+                                                 bool(body.get("always")))
     except ValueError as e:
         raise HTTPException(422, str(e))
     except Exception as e:
@@ -2067,6 +2086,34 @@ async def regions_tidy(ds_id: str, request: Request):
                                            for s in summary if s["changed"]) or "nothing to tidy",
                                  done),
             "summary": summary}
+
+
+def _tidy_work(feats, idp, names, always):
+    """The tidy itself, for regions_tidy: (features, summary per region)."""
+    present = {str((f.get("properties") or {}).get(idp)) for f in feats}
+    summary = []
+    for nm in names:
+        if nm not in present:
+            continue
+        before = topology.point_count(feats, idp, nm)
+        b0 = topology.bunched_count(feats, idp, nm)
+        if b0 == 0 and not always:
+            summary.append({"region": nm, "changed": False, "before": before,
+                            "after": before, "bunchedBefore": 0, "bunchedAfter": 0,
+                            "stuck": 0})
+            continue
+        f1, pick = topology.tidy_region(feats, idp, nm)
+        fin = topology.tidy_finish(f1, idp, nm, respace=False, original=feats,
+                                   merge_fixed=True)
+        after = topology.point_count(fin["features"], idp, nm)
+        changed = pick is not None or fin["deleted"] or fin["merged"]
+        if changed:
+            feats = fin["features"]
+        summary.append({"region": nm, "changed": bool(changed), "before": before,
+                        "after": after if changed else before, "bunchedBefore": b0,
+                        "bunchedAfter": topology.bunched_count(feats, idp, nm),
+                        "stuck": len(fin["stuck"])})
+    return feats, summary
 
 
 @app.post("/api/datasets/{ds_id}/regions/resample-options")
@@ -2088,8 +2135,10 @@ async def regions_resample_options(ds_id: str, request: Request):
         raise HTTPException(422, f"unknown resample method {method!r}")
     fc = body.get("fc") or geo.load_regions(ds_id)[0]
     try:
-        return topology.resample_options(fc["features"], d["id_prop"],
-                                         [str(n) for n in names], method)
+        # on a worker thread: every one of the settings, seconds on a big
+        # region, and nothing else (the map's tiles) was answered meanwhile
+        return await run_in_threadpool(topology.resample_options, fc["features"],
+                                       d["id_prop"], [str(n) for n in names], method)
     except ValueError as e:
         raise HTTPException(422, str(e))
     except Exception as e:
@@ -2307,6 +2356,105 @@ async def regions_read_file(ds_id: str, request: Request):
                 beside["features"].extend(sf)
     return JSONResponse({**fc, "_readFrom": str(path), "_hasHemi": has_hemi,
                          "_damageBeside": beside})
+
+
+@app.get("/api/predict/status")
+def predict_status():               # a plain def: FastAPI already runs it on a worker thread
+    """Can this install predict regions? Says why not, when not."""
+    return PRED.status()
+
+
+@app.post("/api/datasets/{ds_id}/regions/predict")
+async def regions_predict_start(ds_id: str, request: Request):
+    """Predict regions from the transcripts (the production rules; model idx=22 by default).
+    Body: {roiName, roiGeometries, medial: right|left, dorsal: up|down, trim, pieces, model, smooth}.
+
+    Takes a while, so it runs on a worker thread and the client polls. It changes
+    NOTHING: the result is handed back like a file that was just read, and the
+    annotator chooses Add or Replace."""
+    try:
+        d = ds.get_dataset(ds_id)
+    except KeyError:
+        raise HTTPException(404, "unknown dataset")
+    src = (d.get("sources") or {}).get("transcripts")
+    if not src:
+        raise HTTPException(422, "This dataset has no transcripts file to predict from.")
+    # opening a model can wait on another thread loading one: never on the event loop
+    st = await run_in_threadpool(PRED.status)
+    if not st["available"]:
+        raise HTTPException(422, st["reason"])
+    body = await request.json()
+    medial, dorsal = body.get("medial"), body.get("dorsal")
+    if medial not in ("right", "left") or dorsal not in ("up", "down"):
+        raise HTTPException(400, "need 'medial' (right|left) and 'dorsal' (up|down)")
+    pixel_size = float(d.get("pixel_size_um") or 0.2125)
+    roi_name, roi_um = body.get("roiName"), None
+    if body.get("roiGeometries"):
+        from shapely.affinity import scale as sh_scale
+        from shapely.geometry import shape as sh_shape
+        from shapely.ops import unary_union
+        try:
+            roi_px = unary_union([sh_shape(g).buffer(0) for g in body["roiGeometries"]])
+        except Exception as e:
+            raise HTTPException(400, f"could not read that outline: {e}")
+        if roi_px.is_empty:
+            raise HTTPException(422, "That outline is empty.")
+        roi_um = sh_scale(roi_px, pixel_size, pixel_size, origin=(0, 0))
+    orient = ORI.get(ds_id)
+    W0, H0 = 0, 0
+    if not ORI.is_identity(orient):
+        try:
+            p = pyramid(ds_id)
+            W0, H0 = p.info()["width"], p.info()["height"]
+        except Exception as e:
+            raise HTTPException(422, f"This dataset is turned, and its image size could not be read: {e}")
+    trim, pieces = bool(body.get("trim")), bool(body.get("pieces"))
+    model, smooth = body.get("model") or None, body.get("smooth", True) is not False
+    try:
+        await run_in_threadpool(PRED._load, model)
+    except PRED.PredictError as e:
+        raise HTTPException(422, str(e))
+
+    def work(stage):
+        out = PRED.predict_section(src["path"], pixel_size, orient, W0, H0, roi_um, roi_name,
+                                   medial, dorsal, trim, pieces, d["id_prop"], stage, model, smooth)
+        out.pop("canvas", None)
+        out.pop("labels", None)
+        fc = out["fc"]
+        fc["_orientation"] = orient
+        provenance.stamp(fc, "predict-regions", f"{out['report']['model']}, {out['report']['outline']}",
+                         [(f.get("properties") or {}).get(d["id_prop"]) for f in fc["features"]])
+        return out
+
+    if not PRED.submit(ds_id, work):
+        raise HTTPException(409, "A prediction is already running on this dataset.")
+    return {"state": "running"}
+
+
+@app.get("/api/datasets/{ds_id}/regions/predict")
+def regions_predict_state(ds_id: str):
+    return PRED.job_state(ds_id)
+
+
+@app.post("/api/datasets/{ds_id}/regions/predict/prepare")
+async def regions_predict_prepare(ds_id: str, request: Request):
+    """Start reading this dataset's transcripts in the background, so Predict is quick."""
+    try:
+        d = ds.get_dataset(ds_id)
+    except KeyError:
+        raise HTTPException(404, "unknown dataset")
+    src = (d.get("sources") or {}).get("transcripts")
+    if not src:
+        return {"state": "none"}
+    body = await request.json()
+    try:
+        # stats the transcript file on its share and may open the model: off the event loop
+        await run_in_threadpool(PRED.prepare, src["path"], body.get("model") or None)
+    except PRED.PredictError as e:
+        return {"state": "none", "reason": str(e)}
+    except Exception as e:          # only a head start: never an error the annotator sees
+        return {"state": "none", "reason": f"{type(e).__name__}: {e}"}
+    return {"state": "reading"}
 
 
 @app.post("/api/datasets/{ds_id}/regions/load-multi")

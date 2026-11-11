@@ -28,3 +28,11 @@ h5py==3.12.1
 # by several people, and only a round-tripper preserves their comments, key
 # order, quoting and ---/... markers. PyYAML would reformat every file it wrote.
 ruamel.yaml==0.18.6
+# Region prediction: the model runs through ONNX Runtime so the app needs no PyTorch.
+# scipy.ndimage is the prediction rules' arithmetic (the same functions the validated
+# batch used), and 1.14.1 is the release built against numpy 2.0.
+# 1.19.2, not newer: its Mac wheel runs on macOS 11 (1.20+ need 13). On the idx=22
+# model it gives the same labels as 1.23.2 on 20 of 20 sections (logits within 3e-6).
+# It has no Python 3.13 wheel: builds stay on 3.11.
+onnxruntime==1.19.2
+scipy==1.14.1
