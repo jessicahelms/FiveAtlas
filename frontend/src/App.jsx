@@ -6,7 +6,6 @@ import ChannelPanel from './ChannelPanel';
 import DatasetBar from './DatasetBar';
 import * as api from './api';
 import { parseName, isDamage, nextNumber, formatName } from './damage';
-import { bunchedPoints } from './bunched';
 
 const MOVE_EDITS = new Set([
   'addPosition', 'removePosition', 'movePosition', 'finishMovePosition',
@@ -199,22 +198,6 @@ function featureName(feature, idProp = 'name') {
   const props = (feature && feature.properties) || {};
   const value = props[idProp] ?? props.name;
   return value == null ? '' : String(value);
-}
-
-// Names of the regions whose outline differs between two FCs (new ones too).
-function changedRegionNames(a, b, idProp) {
-  const geo = (fc) => {
-    const m = new Map();
-    for (const f of (fc && fc.features) || []) {
-      const n = featureName(f, idProp);
-      m.set(n, (m.get(n) || '') + JSON.stringify(f.geometry));
-    }
-    return m;
-  };
-  const A = geo(a);
-  const out = [];
-  for (const [n, g] of geo(b)) if (n && A.get(n) !== g) out.push(n);
-  return out;
 }
 
 function featureByName(fc, name, idProp = 'name') {
@@ -492,17 +475,15 @@ export default function App() {
                // damage + annotation-notes tools: off unless asked for (damage
                // annotation is being phased out; the backend is unchanged)
                showDamage: v.showDamage === true,
-               // Tidy points runs by itself when Edit points opens (or after
-               // Share borders): on unless switched off in the Tidy box
-               autoTidy: v.autoTidy !== false };
-    } catch (e) { return { zoom: 1, collapsed: new Set(), showDamage: false, autoTidy: true }; }
+             };
+    } catch (e) { return { zoom: 1, collapsed: new Set(), showDamage: false }; }
   });
   const applyUiSettings = useCallback((next) => {
     setUiSettings(next);
     try {
       localStorage.setItem('fiveatlas.settings',
         JSON.stringify({ zoom: next.zoom, collapsed: [...next.collapsed],
-                         showDamage: !!next.showDamage, autoTidy: next.autoTidy !== false }));
+                         showDamage: !!next.showDamage }));
     } catch (e) { /* ok */ }
     // hiding the damage tools while a damage kind was picked would keep
     // drawing damage with no visible selector
@@ -637,15 +618,8 @@ export default function App() {
   // are kept -- even spacing at its coarsest still left 45-130 points a region
   // and moved corners by ~200 px on the real files. A ref too, for the
   // debounced previews.
-  // Fewest points is the default: it is what Tidy points uses, so its counts
-  // are the ones worked out in the background while a region is selected
-  const [resampleMethod, setResampleMethod] = useState('shape');
-  const resampleMethodRef = useRef('shape');
-  // scopes ("region:HPF", "border:A|B") already tidied automatically this session
-  // -- once each, so an Undo is not undone again a moment later
-  const autoTidied = useRef(new Set());
-  // set once autoTidyAfter exists (below): the operations above it call it through this
-  const autoTidyAfterRef = useRef(() => {});
+  const [resampleMethod, setResampleMethod] = useState('even');
+  const resampleMethodRef = useRef('even');
   const [snapTol, setSnapTol] = useState(40);       // px reach for Share borders / Merge gap bridging
   // On (the default): every free pixel in the gap is filled. Off: a gap pixel
   // is filled only if its line to BOTH picks is clear, so the strips beside a
@@ -797,6 +771,9 @@ export default function App() {
   // newest is dropped (Cancel within the 300 ms debounce used to bring the
   // preview back, and leaving Edit points left one on the map)
   const regionResampleSeq = useRef(0);
+  // bumped by every Undo/Redo (afterHistoryMove): the shared-border line is
+  // found again on the restored map (see below)
+  const [histMoveTick, setHistMoveTick] = useState(0);
   // Drop a single-region resample preview: no pending timer, no late reply, and
   // (restore) the map put back to the outline the preview was built on. Returns
   // that outline, or null if there was no preview. Save and Reset use it too: a
@@ -861,6 +838,7 @@ export default function App() {
     if (rs && histIdxRef.current === rs.idx) setMoved(new Set(rs.moved));
     else if (rs && histIdxRef.current === rs.idx + 1) setMoved(new Set());
     setHistTick((t) => t + 1);
+    setHistMoveTick((t) => t + 1);
   };
   const undo = useCallback(() => {
     if (busyRef.current) return;         // an operation is about to land on this map
@@ -1071,6 +1049,7 @@ export default function App() {
     (async () => {
       setInfo(null); setFc(null); setError(null); setDupAsk(null);
       setGeneInfo(null); setChannels(null); setGeneBitmap(null); setGeneBounds(null);
+      setGeneError(null);
       setStainInfo(null); setStainChannels(null);
       const offPref = readSrcOff(dsId);
       try {
@@ -1128,18 +1107,47 @@ export default function App() {
   const geneOrientKey = info && info.orientation
     ? `${info.orientation.rot}${info.orientation.flipH ? 'h' : ''}${info.orientation.flipV ? 'v' : ''}`
     : '';
+  // A failed composite used to be dropped without a word: the Heat map button
+  // lit up, the old picture stayed, and clicking Heat map again changed nothing
+  // (the mode was already 'ink', so nothing was asked again) -- heat maps looked
+  // switched off for good. Now it is asked again by itself a few times, then
+  // says so with a Try again; clicking the lit mode button asks again too.
+  const [geneRetry, setGeneRetry] = useState(0);
+  const [geneError, setGeneError] = useState(null);
   useEffect(() => {
     if (!channels) return;
+    // a note about the last request is not about this one
+    setGeneError(null);
     let cancel = false;
-    const t = setTimeout(async () => {
-      try {
-        const bmp = await api.compositeBitmap(dsId, channels,
-          { mode: geneMode, binUm: geneBin, palette: genePalette });
-        if (!cancel) setGeneBitmap(bmp);
-      } catch (e) { /* ignore */ }
-    }, 120);
-    return () => { cancel = true; clearTimeout(t); };
-  }, [channels, dsId, geneOrientKey, geneMode, geneBin, genePalette]);
+    let t = null;
+    // superseded (another gene, mode or bin picked): the request is dropped,
+    // not left holding a connection and a server worker
+    const ctl = new AbortController();
+    const waits = [120, 1000, 3000, 8000];
+    const attempt = (n) => {
+      t = setTimeout(async () => {
+        try {
+          const bmp = await api.compositeBitmap(dsId, channels,
+            { mode: geneMode, binUm: geneBin, palette: genePalette, signal: ctl.signal });
+          if (!cancel) { setGeneBitmap(bmp); setGeneError(null); }
+        } catch (e) {
+          if (cancel) return;
+          if (n + 1 < waits.length) attempt(n + 1);
+          else setGeneError(`The ${geneMode === 'ink' ? 'heat map' : 'gene layer'} didn't load (${e && e.message ? e.message : 'no answer'}).`);
+        }
+      }, waits[n]);
+    };
+    attempt(0);
+    return () => { cancel = true; clearTimeout(t); ctl.abort(); };
+  }, [channels, dsId, geneOrientKey, geneMode, geneBin, genePalette, geneRetry]);
+  const geneModeRef = useRef(geneMode);
+  geneModeRef.current = geneMode;
+  const onGeneMode = useCallback((m) => {
+    setGeneError(null);
+    if (geneModeRef.current === m) setGeneRetry((r) => r + 1);   // the lit button: ask again
+    else setGeneMode(m);
+  }, []);
+  const retryGenes = useCallback(() => { setGeneError(null); setGeneRetry((r) => r + 1); }, []);
 
   // The pre-load gate: picking a dataset shows WHAT it contains first, and
   // nothing -- imagery, stains, genes, regions -- is fetched until Load is
@@ -1266,7 +1274,7 @@ export default function App() {
   const onEdit = useCallback(({ updatedData, editType, editContext }) => {
     // A point is held while it moves. Set here too: the point-drag handler
     // stops deck's own drag-start event, so onGrabVertex never saw a point drag
-    // and a tidy (or the H peek) could land mid-drag.
+    // and the H peek could land mid-drag.
     if (editType === 'movePosition') vertexDragRef.current = true;
     else if (editType === 'finishMovePosition') vertexDragRef.current = false;
     // Dragging a point of a resample PREVIEW builds on the previewed outline, so
@@ -1756,9 +1764,7 @@ export default function App() {
       // border out by hand.
       const repointed = null;
 
-      const prevForTidy = fcRef.current;
       commit(newFc); setBaseline(newFc);
-      autoTidyAfterRef.current(prevForTidy, newFc, 'Share borders');   // tidy what it changed
       setMoved((prev) => { const n = new Set(prev); borderPicks.forEach((x) => n.add(x)); return n; });
       setBorderShared(true);          // done sharing -> hide Share/Merge (fine-tune phase)
       if (borderPicks.length === 2) {
@@ -1773,7 +1779,7 @@ export default function App() {
             arcs = normalizeBorderArcs(sb.arcs);
           } catch (e) { /* ignore */ }
         }
-        // a tidy that landed meanwhile drew the line from ITS outlines
+        // an edit that landed meanwhile drew the line from ITS outlines
         if (arcs.length && fcRef.current === newFc) {
           setBorderSegments(arcs); setBorderSegmentIndex(0); setBorderArc(borderArcsFc(arcs));
         }
@@ -1842,7 +1848,7 @@ export default function App() {
         const res = await api.resampleRegions(dsId, borderPicks, source, tolValue, method,
           false, true);
         if (seq !== resampleSeq.current) return;   // cancelled or superseded
-        if (fcRef.current !== source) return;      // the map changed under it (a tidy landed)
+        if (fcRef.current !== source) return;      // the map changed under it
         // Draw the previewed handles straight away -- the whole point is to see
         // the density change while dragging the slider, not after Apply.
         const arcs = normalizeBorderArcs(res.arcPoints);
@@ -1931,9 +1937,7 @@ export default function App() {
       }
       setMergeAsk(null);
       const newFc = asFc(res, fc);
-      const prevForTidy = fcRef.current;
       commit(newFc); setBaseline(newFc);
-      autoTidyAfterRef.current(prevForTidy, newFc, 'Merge');   // tidy what it changed
       // merged features are dropped, which shifts every index after them -- an
       // old selection could then point at a different region (and "Delete
       // selected" would delete it)
@@ -2210,6 +2214,8 @@ export default function App() {
   // ---- arrow-key vertex density on the single selected region ----
   const selectedName = (selected.length === 1 && fc && fc.features[selected[0]])
     ? featureName(fc.features[selected[0]], idProp) : null;
+  const selectedNameRef = useRef(selectedName);
+  selectedNameRef.current = selectedName;
   // vertex-count control disabled (paused):
   // useEffect(() => {
   //   if (selectedName == null) { resampleRef.current = null; return; }
@@ -2298,9 +2304,7 @@ export default function App() {
     try {
       const res = await api.fillGap(dsId, fc, gapFind.point, { exclude: offList() });
       const newFc = asFc(res, fc);
-      const prevForTidy = fcRef.current;
       commit(newFc); setBaseline(newFc);
-      autoTidyAfterRef.current(prevForTidy, newFc, 'Fill the gap');   // tidy what it changed
       setMoved((prev) => { const n = new Set(prev); n.add(res.name); return n; });
       setGapFind(null);
       setGapMsg(`Gap became “${res.name}” ✓ — right-click it to rename.`);
@@ -2311,9 +2315,7 @@ export default function App() {
 
   const applyDissolve = useCallback(() => {
     if (!gapFind || !gapFind.fc) return;
-    const prevForTidy = fcRef.current;
     commit(gapFind.fc); setBaseline(gapFind.fc);
-    autoTidyAfterRef.current(prevForTidy, gapFind.fc, 'Fix a gap');   // tidy what it changed
     setMoved((prev) => {
       const n = new Set(prev);
       (gapFind.regions || []).forEach((x) => n.add(x));
@@ -2344,9 +2346,7 @@ export default function App() {
       }
       setOverlapAsk(null);
       const newFc = asFc(res, fc);
-      const prevForTidy = fcRef.current;
       commit(newFc); setBaseline(newFc);
-      autoTidyAfterRef.current(prevForTidy, newFc, 'drawing');   // tidy what it changed
       setMoved((prev) => {
         const n = new Set(prev);
         n.add(res.name);
@@ -2462,9 +2462,7 @@ export default function App() {
   const applyClean = useCallback(() => {
     if (!cleanFound) return;
     const { res, next } = cleanFound;
-    const prevForTidy = fcRef.current;
     commit(next); setBaseline(next);
-    autoTidyAfterRef.current(prevForTidy, next, 'Clean up');   // tidy what it changed
     setMoved((prev) => {
       const n = new Set(prev);
       res.removed.forEach((r) => n.add(r.region));
@@ -2649,6 +2647,33 @@ export default function App() {
     } finally { setBusy(false); }
   }, [dsId, commit, borderPicks]);
 
+  // Undo/Redo clears the shared-border line (it was drawn from the old map). With
+  // two regions still picked in Edit shared borders, find it again on the
+  // restored map, so the line and its Resample points box come back -- they
+  // used to vanish until both picks were cleared and made again.
+  // The pair on screen now ('' outside Edit shared borders): a reply for a pair
+  // that was changed, or a mode that was left, while it was on its way is dropped.
+  const borderPairNowRef = useRef('');
+  borderPairNowRef.current = mode === 'border' ? borderPicks.join('|') : '';
+  useEffect(() => {
+    if (!histMoveTick || mode !== 'border' || borderPicks.length !== 2 || !dsId) return;
+    const base = fcRef.current;
+    const pair = borderPicks.join('|');
+    let stale = false;
+    (async () => {
+      try {
+        const res = await api.sharedBorder(dsId, borderPicks[0], borderPicks[1], base, { bridge: false });
+        if (stale || fcRef.current !== base || borderPairNowRef.current !== pair) return;
+        if (res && res.touching === false && !res.contained) return;
+        const arcs = normalizeBorderArcs(res && res.arcs);
+        if (!arcs.length) return;
+        setBorderSegments(arcs); setBorderSegmentIndex(0); setBorderArc(borderArcsFc(arcs));
+      } catch (e) { /* picking the pair again finds it */ }
+    })();
+    return () => { stale = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [histMoveTick]);
+
   // ---- Resample points for ONE region (Edit points) ----------------------------
   const cancelRegionResample = useCallback(() => { dropRegionPreview(true); },
     [dropRegionPreview]);
@@ -2661,9 +2686,13 @@ export default function App() {
     regionResampleTimer.current = setTimeout(async () => {
       regionResampleTimer.current = null;
       if (!name || !dsId || seq !== regionResampleSeq.current) return;
+      if (name !== selectedNameRef.current) return;       // another region picked since
       const prev = regionResampleRef.current;
+      // a preview of ANOTHER region on the map: building on it would keep that
+      // preview too with this one's Keep
+      if (prev && (prev.name !== name || prev.dsId !== dsId)) return;
       // always from the outline as it was before any preview, never a preview
-      const source = prev && prev.name === name && prev.dsId === dsId ? prev.baseFc : fcRef.current;
+      const source = prev ? prev.baseFc : fcRef.current;
       const onScreen = fcRef.current;    // the map (or preview) this one will replace
       setBusy(true);
       try {
@@ -2673,6 +2702,7 @@ export default function App() {
           false, true);
         if (seq !== regionResampleSeq.current) return;   // cancelled or superseded
         if (fcRef.current !== onScreen) return;          // the map changed under it
+        if (name !== selectedNameRef.current) return;    // another region picked meanwhile
         const previewFc = asFc(res, source);
         const state = { name, dsId, tol: res.tol, counts: res.counts, handles: res.handles,
                         kept: res.kept || [], used: res.used, baseFc: source, fc: previewFc };
@@ -2734,130 +2764,14 @@ export default function App() {
   }, [dsId, selectedName, borderPicks, regionScope, borderScope, resample,
     previewRegionResample, previewResample]);
 
-  // Even spacing <-> Fewest points: different counts, so they are worked out
-  // again and the preview is redrawn at once.
-  const chooseResampleMethod = useCallback((method, which) => {
-    resampleMethodRef.current = method;
-    setResampleMethod(method);
-    loadResampleOptions(which, method, true);
-  }, [loadResampleOptions]);
 
-  // Tidy points, one click or by itself: the server tidies the regions (the
-  // gentlest Fewest points setting, outline moves <= 40 px) and then deletes
-  // every point still bunched up the way right-click Delete point does -- from
-  // both regions on a shared border, never a junction or the end of a shared
-  // border, each kept only if no gap, overlap or drift rule breaks. The result
-  // is kept as ONE undo step and the notice says what changed, with Undo.
-  // Never applied to an outline edited while it was on its way.
-  // {text, working?, fc?: the map it left -- its Undo is offered only while
-  // that is still the map, so it can never undo some other, later edit}
-  const [tidyNotice, setTidyNotice] = useState(null);
-  const tidySeq = useRef(0);
-  const modeRef = useRef(mode);
-  modeRef.current = mode;
-  const borderPicksRef = useRef(borderPicks);
-  borderPicksRef.current = borderPicks;
-  const resampleStateRef = useRef(resample);
-  resampleStateRef.current = resample;
-  // Any other step starting (an operation, a preview) wins over a tidy still on
-  // its way: landing afterwards it would be built on the map before that step.
-  useEffect(() => {
-    if (!busy) return;
-    tidySeq.current += 1;
-    setTidyNotice((n) => (n && n.working ? null : n));
-  }, [busy]);
-  // a notice is about one map: gone with another dataset, or once the map moves on
-  useEffect(() => { tidySeq.current += 1; setTidyNotice(null); }, [dsId]);
-  useEffect(() => {
-    setTidyNotice((n) => (n && n.fc && n.fc !== fc ? null : n));
-  }, [fc]);
-  const runTidy = useCallback(async (names, baseFc, label, always = false) => {
-    const list = [...new Set((names || []).filter(Boolean))];
-    if (!list.length || !dsId || !baseFc) return null;
-    const seq = ++tidySeq.current;
-    setTidyNotice({ working: true, text: `Tidying ${list.length === 1 ? list[0] : `${list.length} regions`}…` });
-    try {
-      const res = await api.tidyRegions(dsId, list, baseFc, always);
-      if (seq !== tidySeq.current) return null;
-      // never under the person: the map edited since, a point or border held
-      // (a border drag changes nothing until it is let go), or a preview up
-      if (fcRef.current !== baseFc || vertexDragRef.current || regionResampleRef.current
-          || resampleStateRef.current) {
-        setTidyNotice(null);
-        return null;
-      }
-      const done = (res.summary || []).filter((x) => x.changed);
-      if (!done.length) {
-        setTidyNotice(always ? { text: 'Already tidy — no point can go without breaking a border or opening a gap.' } : null);
-        return res;
-      }
-      const tFc = asFc(res, baseFc);
-      const touched = changedRegionNames(baseFc, tFc, idProp);
-      commit(tFc); setBaseline(tFc);
-      setMoved((prev) => { const n = new Set(prev); touched.forEach((x) => n.add(x)); return n; });
-      setResampleOpts(null);
-      const left = done.reduce((t, x) => t + (x.bunchedAfter || 0), 0);
-      const parts = done.map((x) => `${x.region} ${x.before} → ${x.after}`);
-      setTidyNotice({ fc: tFc, text: `Tidied${label ? ` after ${label}` : ''}: ${parts.join(', ')} points`
-        + (left ? `. ${left} still sit close together, where borders meet — they can't go without shifting a neighbour.`
-          : ', none bunched together.') });
-      // the red border line and its handles are drawn from the outlines: left
-      // as they were, the next border drag started from the pre-tidy points
-      const picks = borderPicksRef.current;
-      if (modeRef.current === 'border' && picks.length === 2 && touched.some((n) => picks.includes(n))) {
-        try {
-          const sb = await api.sharedBorder(dsId, picks[0], picks[1], tFc, { bridge: false });
-          const arcs = normalizeBorderArcs(sb && sb.arcs);
-          if (fcRef.current === tFc && arcs.length) {
-            setBorderSegments(arcs); setBorderSegmentIndex(0); setBorderArc(borderArcsFc(arcs));
-          }
-        } catch (e) { /* the tidy stands; the line refreshes on the next pick */ }
-      }
-      return res;
-    } catch (e) {
-      if (seq === tidySeq.current) setTidyNotice(null);
-      return null;
-    }
-  }, [dsId, idProp, commit]);
-  // After an operation that leaves new outline (Share borders, Merge, Fix a gap,
-  // Clean up, Build the outline, a drawn region): tidy what it changed. Not after
-  // a drag -- the person is mid-edit -- nor Delete point or Split.
-  const autoTidyAfter = useCallback((prevFc, newFc, label) => {
-    if (uiSettings.autoTidy === false || !prevFc || !newFc) return;
-    const names = changedRegionNames(prevFc, newFc, idProp);
-    if (!names.length || names.length > 8) return;     // a big rebuild: leave it to the button
-    runTidy(names, newFc, label);
-  }, [uiSettings.autoTidy, idProp, runTidy]);
 
-  autoTidyAfterRef.current = autoTidyAfter;
-
-  const tidyResample = useCallback((which) => {
-    const names = which === 'region' ? (selectedName ? [selectedName] : []) : borderPicks;
-    // a slider preview up is not the map: put it away first and tidy what is
-    // really there (it was tidied and recorded, with Keep/Cancel still showing)
-    if (regionResampleRef.current) cancelRegionResample();
-    if (resampleStateRef.current) cancelResample();
-    runTidy(names, fcRef.current, null, true);
-  }, [selectedName, borderPicks, runTidy, cancelRegionResample, cancelResample]);
-
-  // how many of the selected region's points sit right next to another (Edit
-  // points shows them orange; the Tidy points box says how many)
-  const bunchedCount = useMemo(() => {
-    if (mode !== 'modify' || !fc || selected.length !== 1 || !fc.features[selected[0]]) return 0;
-    // every feature of the name: a region in several features is one region
-    // (an exact copy -- a region stored twice -- counted once)
-    const nm = featureName(fc.features[selected[0]], idProp);
-    const seen = new Set();
-    return fc.features.filter((f) => featureName(f, idProp) === nm)
-      .filter((f) => { const k = JSON.stringify(f.geometry); if (seen.has(k)) return false; seen.add(k); return true; })
-      .reduce((t, f) => t + bunchedPoints(f).length, 0);
-  }, [mode, fc, selected, idProp]);
 
 
   // The Resample box showing for a region or a shared border it has no counts
   // for (another region, other picks, the other method): work them out, without
   // previewing until the slider moves.
-  // A border can be tidied once there is one: shared now, or two picks that
+  // A border can be resampled once there is one: shared now, or two picks that
   // already touch ("Shared border detected") -- the box used to wait for Share
   const borderReady = borderShared || (borderPicks.length === 2 && borderSegments.length > 0);
   const resampleWhich = mode === 'modify' && regionScope ? 'region'
@@ -2870,44 +2784,19 @@ export default function App() {
   const resampleBase = resampleWhich === 'region'
     ? (regionResample && regionResample.name === selectedName ? regionResample.baseFc : fc)
     : (resample && resample.baseFc ? resample.baseFc : fc);
-  // Opening Edit points on a region with bunched points tidies it by itself
-  // (below). The counts are for the map Tidy leaves, so they wait for it:
-  // worked out first, they were thrown away when it landed and worked out
-  // again -- every one of the 28 settings twice, 12 s on dft, the map stalled.
-  const tidyWorking = !!(tidyNotice && tidyNotice.working);
-  const tidyPending = uiSettings.autoTidy !== false && mode === 'modify' && !!selectedName
-    && bunchedCount > 0 && !regionResample   // a preview up: no tidy comes, so don't wait for one
-    && !autoTidied.current.has(`${dsId}|region:${selectedName}`);
   useEffect(() => {
     if (!resampleWhich) return;
-    if (resampleWhich === 'region' && (tidyPending || tidyWorking)) return;
     const o = resampleOpts;
     if (o && o.scope === resampleScope && o.dsId === dsId && o.method === resampleMethod
         && o.source === resampleBase) return;
-    loadResampleOptions(resampleWhich, resampleMethod, false);
+    const t = setTimeout(() => loadResampleOptions(resampleWhich, resampleMethod, false), 150);
+    return () => clearTimeout(t);
   }, [resampleWhich, resampleScope, resampleMethod, dsId, resampleOpts, resampleBase,
-    loadResampleOptions, tidyPending, tidyWorking]);
+    loadResampleOptions]);
   const shownResampleOpts = resampleOpts && resampleOpts.scope === resampleScope
     && resampleOpts.dsId === dsId && resampleOpts.method === resampleMethod
     && resampleOpts.source === resampleBase ? resampleOpts : null;
 
-  // Tidy automatically when Edit points opens on a region with points bunched
-  // together -- once per region per session, so an Undo stays undone; never
-  // while a preview is up or something else is landing.
-  useEffect(() => {
-    if (uiSettings.autoTidy === false || mode !== 'modify' || !selectedName) return;
-    const key = `${dsId}|region:${selectedName}`;
-    if (autoTidied.current.has(key)) return;
-    // busy: tried again once it is done (busy is a dependency) -- it used to
-    // be skipped for good
-    if (busy || regionResampleRef.current) return;
-    autoTidied.current.add(key);
-    if (bunchedCount === 0) return;                                  // nothing to tidy
-    runTidy([selectedName], fcRef.current, null);
-  }, [uiSettings.autoTidy, mode, selectedName, dsId, bunchedCount, busy, runTidy]);
-  const toggleAutoTidy = useCallback((on) => {
-    applyUiSettings({ ...uiSettings, autoTidy: !!on });
-  }, [uiSettings, applyUiSettings]);
 
   const applyRegionResample = useCallback(() => {
     const rr = regionResampleRef.current;
@@ -2939,7 +2828,7 @@ export default function App() {
   useEffect(() => {
     const rr = regionResampleRef.current;
     if (rr && (mode !== 'modify' || rr.name !== selectedName)) cancelRegionResample();
-    else if (mode !== 'modify') dropRegionPreview(false);   // a request still on its way
+    else if (!rr) dropRegionPreview(false);   // a request still on its way (debounce or in flight)
   }, [mode, selectedName, cancelRegionResample, dropRegionPreview]);
 
   // ---- Load regions file: add or replace, and the hemi damage question ----------
@@ -3262,9 +3151,7 @@ export default function App() {
         return;
       }
       const newFc = asFc(res, fc);
-      const prevForTidy = fcRef.current;
       commit(newFc); setBaseline(newFc);
-      autoTidyAfterRef.current(prevForTidy, newFc, 'Build the outline');   // tidy what it changed
       setMoved((prev) => new Set(prev).add(res.name));
       setOutlinePreview(null);
       setSnapInfo((s) => ({
@@ -3759,8 +3646,7 @@ export default function App() {
                 onDeleteSelected={deleteSelectedRegions}
                 pointMsg={pointMsg}
                 regionResample={regionResample} onRegionResampleTol={previewRegionResample}
-                resampleOpts={shownResampleOpts} onTidy={tidyResample} bunchedCount={bunchedCount}
-                autoTidy={uiSettings.autoTidy !== false} onAutoTidy={toggleAutoTidy}
+                resampleOpts={shownResampleOpts}
                 onApplyRegionResample={applyRegionResample}
                 onCancelRegionResample={cancelRegionResample}
                 loadAsk={loadAsk} onAnswerLoad={answerLoad} onLoadDamage={answerLoadDamage}
@@ -3788,7 +3674,6 @@ export default function App() {
                 snapTol={snapTol} onSnapTol={setSnapTol} reachGap={gapInfo}
                 fillAll={fillAll} onFillAll={setFillAll}
                 resample={resample} resampleTol={resampleTol}
-                resampleMethod={resampleMethod} onResampleMethod={chooseResampleMethod}
                 onResampleTol={previewResample} onApplyResample={applyResample}
                 onCancelResample={cancelResample}
                 gapFind={gapFind} gapMsg={gapMsg} drawMsg={drawMsg}
@@ -3888,7 +3773,8 @@ export default function App() {
                     stainInfo={stainInfo} stainChannels={stainChannels} onStainChange={onStainChange}
                     morphInfo={(info && info.contrast) || null} morphWin={morphWin} onMorphChange={setMorphWin}
                     layers={layers} onLayerChange={onLayerChange}
-                    geneMode={geneMode} onGeneMode={setGeneMode}
+                    geneMode={geneMode} onGeneMode={onGeneMode}
+                    geneError={geneError} onRetryGenes={retryGenes}
                     geneBin={geneBin} onGeneBin={setGeneBin}
                     genePalette={genePalette} onGenePalette={setGenePalette}
                     uiSettings={uiSettings} onUiSettings={applyUiSettings}
@@ -3996,21 +3882,6 @@ export default function App() {
         );
       })()}
 
-      {tidyNotice && (
-        <div className="tidy-notice">
-          <span>{tidyNotice.text}</span>
-          {!tidyNotice.working && (
-            <>
-              {tidyNotice.fc && tidyNotice.fc === fc && (
-                <button className="btn sm" disabled={busy}
-                  onClick={() => { if (fcRef.current === tidyNotice.fc) undo(); setTidyNotice(null); }}
-                  title="put the points back as they were (Ctrl+Z does the same)">Undo</button>
-              )}
-              <button className="btn sm" onClick={() => setTidyNotice(null)} title="close">✕</button>
-            </>
-          )}
-        </div>
-      )}
 
       {regionMenu && (
         <div className="ctxmenu" ref={regionMenuRef}

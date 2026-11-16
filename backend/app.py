@@ -29,6 +29,30 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
+import asyncio as _asyncio
+import functools as _functools
+
+
+def _off_loop(handler):
+    """Run an `async def` route on a worker thread instead of the server's one
+    event loop. Those routes only `await request.json()` and then do seconds of
+    shape work (Delete point, Share borders, Merge...) or image work (the gene
+    heat map) inline -- and while they did, NO other request was answered: the
+    map's tiles, the heat map, the next click all waited. The body's BYTES are
+    read here, on the loop (Starlette keeps them on the Request); parsing them
+    -- a whole region map -- happens in the handler's own `await
+    request.json()`, on the pool thread, in a fresh event loop. Only for routes
+    whose sole await is request.json()."""
+    @_functools.wraps(handler)
+    async def wrapper(*args, **kwargs):
+        for v in list(args) + list(kwargs.values()):
+            if isinstance(v, Request):
+                try:
+                    await v.body()
+                except Exception:
+                    pass        # a broken body: the handler reports it as before
+        return await run_in_threadpool(lambda: _asyncio.run(handler(*args, **kwargs)))
+    return wrapper
 
 import appversion
 import cachefs
@@ -1701,6 +1725,7 @@ async def snap(ds_id: str, request: Request):
 
 
 @app.post("/api/datasets/{ds_id}/regions/shared-border")
+@_off_loop
 async def shared_border(ds_id: str, request: Request):
     """The shared arc(s) between two explicitly named regions. The client sends
     the two regions the user picked (no fragile auto neighbour detection); we
@@ -1763,6 +1788,7 @@ async def shared_border(ds_id: str, request: Request):
 
 
 @app.post("/api/datasets/{ds_id}/regions/gap")
+@_off_loop
 async def regions_gap(ds_id: str, request: Request):
     """Where the unclaimed gap between the picked regions is, and how wide it is
     at its widest point -- so the Snap reach circle can sit on the gap the user
@@ -1807,6 +1833,7 @@ async def regions_gap(ds_id: str, request: Request):
 
 
 @app.post("/api/datasets/{ds_id}/regions/move-border")
+@_off_loop
 async def move_border(ds_id: str, request: Request):
     """Rebuild BOTH regions around a dragged shared border. Body:
     {fc, regionA, regionB, points:[[x,y]...]}. Returns the updated FC."""
@@ -1836,6 +1863,7 @@ async def move_border(ds_id: str, request: Request):
 
 
 @app.post("/api/datasets/{ds_id}/regions/partition")
+@_off_loop
 async def regions_partition(ds_id: str, request: Request):
     """Make a set of explicitly-picked regions tile cleanly -- fill the small
     gaps between them, remove small overlaps, and give every adjacent pair one
@@ -1902,6 +1930,7 @@ async def regions_partition(ds_id: str, request: Request):
 
 
 @app.post("/api/datasets/{ds_id}/regions/resample")
+@_off_loop
 async def regions_resample(ds_id: str, request: Request):
     """Even out the points of the picked regions without breaking their borders.
     Body: {regions:[names], fc?, tol?}. Returns the updated FC plus the
@@ -1952,6 +1981,7 @@ async def regions_resample(ds_id: str, request: Request):
 
 
 @app.post("/api/datasets/{ds_id}/regions/delete-point")
+@_off_loop
 async def regions_delete_point(ds_id: str, request: Request):
     """Delete one point of a region's outline without opening any border, and
     re-space the rest of that stretch to close the gap. Body: {fc, region,
@@ -1983,6 +2013,7 @@ async def regions_delete_point(ds_id: str, request: Request):
 
 
 @app.post("/api/datasets/{ds_id}/regions/merge")
+@_off_loop
 async def regions_merge(ds_id: str, request: Request):
     """Combine several regions into ONE feature. Body: {regions:[names], fc?, name?}."""
     try:
@@ -2028,6 +2059,7 @@ async def regions_merge(ds_id: str, request: Request):
 
 
 @app.post("/api/datasets/{ds_id}/regions/split")
+@_off_loop
 async def regions_split(ds_id: str, request: Request):
     """Cut one region into two along a drawn line. Body: {region, points, fc?, name?}."""
     try:
@@ -2054,9 +2086,9 @@ async def regions_split(ds_id: str, request: Request):
 
 @app.post("/api/datasets/{ds_id}/regions/tidy")
 async def regions_tidy(ds_id: str, request: Request):
-    """Tidy points on one or more regions -- what happens by itself when Edit
-    points opens and after Share borders, Merge, Fix a gap, Clean up, Build the
-    outline and drawing a region: the gentlest Fewest points setting (outline
+    """Tidy points on one or more regions. NOT USED by the page any more (Tidy
+    was taken out; points are changed by hand and with Resample points): the
+    gentlest Fewest points setting (outline
     moves <= TIDY_MOVE), then every point still bunched up is deleted the way
     right-click Delete point does, each kept only if no gap, overlap or drift
     rule breaks. Body: {regions, fc?} -> the FC plus a summary per region:
@@ -2166,6 +2198,7 @@ async def regions_split_candidates(ds_id: str, request: Request):
 
 
 @app.post("/api/datasets/{ds_id}/regions/delete-part")
+@_off_loop
 async def regions_delete_part(ds_id: str, request: Request):
     """Delete the one separate piece of a region under a right-click, keeping the
     rest of the region. Body: {region, point:[x, y], fc?}."""
@@ -2191,6 +2224,7 @@ async def regions_delete_part(ds_id: str, request: Request):
 
 
 @app.post("/api/datasets/{ds_id}/regions/dissolve-gap")
+@_off_loop
 async def regions_dissolve_gap(ds_id: str, request: Request):
     """Delete the leftover void under a clicked point -- the region(s) around it
     grow to fill it. Body: {point:[x,y], fc?, tol?}. Returns the gap outline for
@@ -2226,6 +2260,7 @@ async def regions_dissolve_gap(ds_id: str, request: Request):
 
 
 @app.post("/api/datasets/{ds_id}/regions/clean-lines")
+@_off_loop
 async def regions_clean_lines(ds_id: str, request: Request):
     """Remove the stray hairlines inside a traced loop -- sliver parts of
     regions and sliver voids between them -- and hand the ground to the healthy
@@ -2691,6 +2726,7 @@ async def regions_outline(ds_id: str, request: Request):
 
 
 @app.post("/api/datasets/{ds_id}/regions/fill-gap")
+@_off_loop
 async def regions_fill_gap(ds_id: str, request: Request):
     """Turn the gap under a clicked point into a NEW region (the alternative to
     dissolve-gap, which hands it to the neighbours). Body: {point:[x,y], fc?,
@@ -3001,6 +3037,7 @@ def genes_contrast(ds_id: str, gene: str):
 
 
 @app.post("/api/datasets/{ds_id}/genes/composite.png")
+@_off_loop
 async def genes_composite(ds_id: str, request: Request):
     try:
         gd = genedensity(ds_id)

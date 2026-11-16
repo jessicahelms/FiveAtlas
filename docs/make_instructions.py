@@ -224,28 +224,17 @@ ITEMS = [
     "and ], or hold Alt and scroll over the image — the ring shows how far "
     "it reaches.",
 
-    "When you open Edit points on a region, its points are tidied "
-    "automatically: you get fewer points with none bunched together, the "
-    "outline barely moves, and every neighbour's side of a shared border is "
-    "re-pointed with it, so no border opens up and no gap appears. Points that "
-    "still sit right next to another are then deleted the way right-click "
-    "Delete point deletes them — from both regions on a shared border — "
-    "except where regions meet. A note over the map says what changed "
-    "(“Tidied: TH 127 → 51 points”); press Undo (or Ctrl+Z) to put the old "
-    "points back. The same tidy happens by itself right after Share borders, "
-    "Merge, Fix a gap, Clean up stray lines, Build the outline and drawing a "
-    "new region, as its own Undo step. Points that still sit right next to "
-    "another are drawn orange. Tidy in the Tidy points box runs it by hand. "
-    "Untick Tidy automatically (under Adjust…) to only ever tidy by hand. "
-    "Adjust… lets you choose the number yourself: drag the slider from more to "
-    "fewer or type a number and press Enter (a number it can't reach goes to "
-    "the closest one), and tick Space points evenly to put the points the same "
-    "distance apart all the way round. The slider goes all the way down to 3 "
-    "points. When a count would change the shape it says “The shape will "
-    "deform” — check the outline, then press Keep to keep it or Cancel to put "
-    "the old points back. Below the fewest points that keep every border "
-    "joined, only that region changes, so its borders no longer meet its "
-    "neighbours' exactly; Share borders joins them again.",
+    "Resample points (in Edit points) changes how many points a region has: "
+    "drag the slider from more to fewer and the outline shows the result, with "
+    "the count beside it (“87 → 21”). Press Keep to keep it or Cancel to put "
+    "the old points back; Ctrl+Z undoes a Keep. Nothing changes until you "
+    "move the slider. Every neighbour's side of a shared border is re-pointed "
+    "with it, so no border opens up and no gap appears — until the slider "
+    "goes so low that it says “Borders with neighbours will break at this "
+    "count”: from there down to 3 points only that region changes, and Share "
+    "borders joins them again afterwards. The first time on a "
+    "big region it takes a few seconds to work out the counts; going back to "
+    "a region, or after Ctrl+Z, they come straight back.",
 
     # -- move region -----------------------------------------------------------------------
     "Move region drags a whole region to a new place without changing its "
@@ -294,10 +283,10 @@ ITEMS = [
     "genuinely do not touch stay as separate parts of the one region; the app "
     "never invents tissue between them.",
 
-    "Once you have shared borders, the border's points are tidied automatically "
-    "the same way (with Undo), and Tidy points appears there too: press Tidy, "
-    "or Adjust… to choose the number, then Keep or Cancel. This is useful when "
-    "a border has far more points on it than you can work with.",
+    "Once two regions share a border, Resample points appears there too: "
+    "drag the slider, then Keep or Cancel. Only the points along that border "
+    "change. This is useful when a border has far more points on it than you "
+    "can work with.",
 
     "Split a region cuts one region into two. Press Split a region, then draw "
     "a line all the way across the region on the image, clicking for each "

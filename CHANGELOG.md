@@ -11,6 +11,42 @@ The first `### ` title of a section is also what the app's update banner
 shows ("FiveAtlas 1.3.2 is out — Faster on laptops"), so lead with the change
 people will care about most and keep that title short.
 
+## v1.5.1
+
+### Simpler point editing: Tidy is gone
+
+- **Tidy** is gone, along with everything it did by itself: points no longer
+  change when you open **Edit points**, or after Share borders, Merge, Fix a
+  gap, Clean up, Build the outline or drawing a region. The app no longer
+  hangs on its own, and Export is never stuck behind it.
+- **Resample points** is back, and simpler: just a slider from more to fewer
+  points, with the count beside it ("87 → 21"). The outline shows the result;
+  **Keep** keeps it, **Cancel** puts it back, Ctrl+Z undoes a Keep. Borders
+  with neighbours stay joined; go low enough and it says "Borders with
+  neighbours will break at this count" (it still goes down to 3 points). The
+  same slider is there on a shared border.
+- Dragging and adding points by hand, and right-click **Delete point**, work
+  as before.
+
+### The heat map no longer gets stuck off
+
+- If the gene layer or heat map fails to load, it now tries again by itself
+  and, if it still can't, says so with a **Try again** link. Clicking the lit
+  Glow / Heat map button loads it again too. Before, it could silently stay
+  blank, so the transcripts looked switched off for good.
+
+### Faster and smoother
+
+- Heavy edits (Delete point, Merge, Split, Share borders, border drags, Fix a
+  gap, Clean up) no longer freeze the rest of the app while they work: the
+  image and the heat map keep answering.
+- The point counts come back straight away after Ctrl+Z, or when you go back
+  to a region.
+- Fixed: moving the slider and quickly clicking another region could leave
+  the first region's preview on the map, and the next Keep saved it too.
+- Fixed: after Ctrl+Z on a shared border, its line and slider disappeared
+  until you picked the two regions again.
+
 ## v1.5.0
 
 ### Predict regions

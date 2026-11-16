@@ -169,7 +169,7 @@ function ChannelPanel({
   morphInfo, morphWin, onMorphChange,
   layers, onLayerChange,
   geneMode, onGeneMode, geneBin, onGeneBin,
-  genePalette, onGenePalette,
+  genePalette, onGenePalette, geneError, onRetryGenes,
   uiSettings, onUiSettings,
 }) {
   const addGene = (input) => {
@@ -289,6 +289,12 @@ function ChannelPanel({
               ))}
             </select>
           </div>
+          {geneError && (
+            <div className="hint warn">
+              {geneError}{' '}
+              <button className="linkbtn" onClick={() => onRetryGenes && onRetryGenes()}>Try again</button>
+            </div>
+          )}
           <input
             className="gene-add"
             list="genelist"

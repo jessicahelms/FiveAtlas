@@ -61,6 +61,39 @@ def _polys(geom):
     return []
 
 
+# Memo for _valid and blankets, keyed on the exact geometry bytes: Tidy tries up
+# to 28 settings on one region and every try re-read and re-repaired every OTHER
+# region of the map, which had not changed -- on a 64-region atlas 4,160
+# make_valid calls (9 of 17 s) and 15 identical whole-map unions (4 s) for one
+# region. Shapely geometries are immutable, so a cached one can be handed out
+# again as it is; the same bytes in always give the same answer out.
+import collections as _collections
+import hashlib as _hashlib
+import threading as _threading
+
+_MEMO_LOCK = _threading.Lock()
+_VALID_MEMO = _collections.OrderedDict()     # md5(wkb) -> valid geometry
+_VALID_MEMO_MAX = 4096
+_BLANKETS_MEMO = _collections.OrderedDict()  # (frac, keep, map digest) -> names
+_BLANKETS_MEMO_MAX = 64
+
+
+def _memo_get(memo, key):
+    with _MEMO_LOCK:
+        if key in memo:
+            memo.move_to_end(key)
+            return True, memo[key]
+    return False, None
+
+
+def _memo_put(memo, key, value, cap):
+    with _MEMO_LOCK:
+        memo[key] = value
+        memo.move_to_end(key)
+        while len(memo) > cap:
+            memo.popitem(last=False)
+
+
 def _valid(geom):
     """`geom` made valid WITHOUT dropping ground. buffer(0) keeps only one lobe
     of a self-crossing outline -- a figure-8 of two 5,000 px2 lobes came back as
@@ -68,6 +101,19 @@ def _valid(geom):
     polygon parts are kept (make_valid can also return the crossing's lines)."""
     if geom is None or geom.is_empty or geom.is_valid:
         return geom
+    try:
+        key = _hashlib.md5(geom.wkb).digest()
+    except Exception:
+        return _valid_uncached(geom)
+    hit, val = _memo_get(_VALID_MEMO, key)
+    if hit:
+        return val
+    val = _valid_uncached(geom)
+    _memo_put(_VALID_MEMO, key, val, _VALID_MEMO_MAX)
+    return val
+
+
+def _valid_uncached(geom):
     try:
         from shapely import make_valid
         parts = _polys(make_valid(geom))
@@ -4507,6 +4553,20 @@ def blankets(features, id_prop, keep=None, frac=0.95):
     if len(geoms) < 2:
         return []
     hold = {str(n) for n in (keep or [])}
+    h = _hashlib.md5()
+    for k, g in geoms.items():
+        h.update(f"{k}\x00{names[k]}\x00".encode())
+        h.update(g.wkb)
+    memo_key = (float(frac), tuple(sorted(hold)), h.digest())
+    hit, val = _memo_get(_BLANKETS_MEMO, memo_key)
+    if hit:
+        return list(val)
+    out = _blankets_uncached(geoms, names, hold, frac)
+    _memo_put(_BLANKETS_MEMO, memo_key, tuple(out), _BLANKETS_MEMO_MAX)
+    return out
+
+
+def _blankets_uncached(geoms, names, hold, frac):
     total = unary_union(list(geoms.values()))
     out = []
     for k, g in geoms.items():
@@ -6414,14 +6474,34 @@ def resample_at(features, id_prop, names, tol, method="shape", digest=None):
     return hit
 
 
+_options_cache = {}          # (features digest, id_prop, names, method) -> result
+
+
 def resample_options(features, id_prop, names, method="shape"):
+    """resample_options, remembered: the counts for an outline already worked
+    out come back at once -- after an Undo, or on picking a region again. The
+    per-setting cache below holds only 48 results, so after two regions' 28
+    settings each, going back to the first worked every setting out again."""
+    import copy as _copy
+    digest = _features_digest(features)
+    key = (digest, str(id_prop), tuple(str(n) for n in names), str(method))
+    with _cache_lock:
+        hit = _options_cache.get(key)
+    if hit is not None:
+        return _copy.deepcopy(hit)
+    res = _resample_options_uncached(features, id_prop, names, method, digest)
+    _cache_put(_options_cache, key, _copy.deepcopy(res))
+    return res
+
+
+def _resample_options_uncached(features, id_prop, names, method="shape", digest=None):
     """Every number of points Resample points can give -- one region's outline,
     or the shared border of several -- most first:
     {before, options: [{points, tol, deform}]}. Each option is the first
     setting that reaches that count, so the counts only go down along the
     slider (even spacing can also go UP from now: a fine spacing adds points).
     `deform` marks Fewest points settings past FEWEST_SAFE (the page asks)."""
-    digest = _features_digest(features)
+    digest = digest or _features_digest(features)
     grid = _FEWEST_GRID if method == "shape" else _EVEN_GRID
     names = [str(n) for n in names]
     if method != "shape" and len(names) == 1:
@@ -6734,7 +6814,9 @@ def resample_to_count(features, id_prop, name, n, method="shape", digest=None):
     with _cache_lock:
         got_ladder = _count_cache.get(key)
     if got_ladder is None:
-        resample_options(features, id_prop, [name], method)
+        # the uncached one: the remembered options would skip rebuilding the
+        # ladder this needs, and the error below would repeat on every try
+        _resample_options_uncached(features, id_prop, [name], method, digest)
         with _cache_lock:
             got_ladder = _count_cache.get(key)
     if got_ladder is None:                        # pushed out meanwhile by other work

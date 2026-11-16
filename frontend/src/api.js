@@ -148,20 +148,6 @@ export async function splitRegion(ds, region, fc, points, name) {
   return r.json(); // { type, features, names:[a,b] }
 }
 
-// Tidy points on these regions (Tidy, then the leftover bunched points deleted
-// the way right-click Delete does): the FC plus a summary per region
-// [{ region, changed, before, after, bunchedBefore, bunchedAfter, stuck }].
-// always: tidy even a region with nothing bunched (the Tidy button).
-export async function tidyRegions(ds, regions, fc, always = false) {
-  const r = await fetch(`${API}/datasets/${ds}/regions/tidy`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ regions, fc, always }),
-  });
-  if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
-  return r.json();
-}
-
 // Every number of points Resample points can give -- one region, or the shared
 // border of several -- most first, each marked if it deforms the shape:
 // { before, options: [{ points, tol, deform }] }. method: 'even' | 'shape'.
@@ -663,9 +649,10 @@ export async function applyUpdate() {
   return r.json(); // { ok, version }
 }
 
-export async function compositeBitmap(ds, spec, { mode = 'glow', binUm = null, palette = null } = {}) {
+export async function compositeBitmap(ds, spec, { mode = 'glow', binUm = null, palette = null, signal } = {}) {
   const r = await fetch(`${API}/datasets/${ds}/genes/composite.png`, {
     method: 'POST',
+    signal,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ channels: spec, mode, binUm, palette }),
   });

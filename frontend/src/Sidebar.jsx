@@ -27,116 +27,53 @@ function sliderToReach(pos) {
   return Math.min(REACH_MAX, Math.round(v / 100) * 100);
 }
 
-// The Tidy points control, in Edit points and in Edit shared borders. One click
-// (Tidy) gives the fewest points that keep the shape -- borders stay joined, no
-// gap opens -- and Adjust holds the rest: a slider over every count the region
-// (or border) can reach, a box to type one, and even spacing. Counts, never px.
-// The slider IS the number of points and goes down to 3; a count that deforms
-// the shape just says so ("it will just give a warning. it should be simple").
-// tol < 0 marks a count past the fewest the guards allow: that region alone
-// changes, so its borders stop meeting its neighbours'.
-function ResampleSlider({ method, tol, onMethod, onTol, busy, scope, counts, label, onTidy,
-  bunched, auto, onAuto, previewing }) {
-  const shape = method === 'shape';
+// The Resample points control, in Edit points and in Edit shared borders: a
+// slider over every number of points the region (or the border) can reach,
+// and the count. Nothing else -- "just the resampler". Borders stay joined, no
+// gap opens; the preview is kept with Keep or put back with Cancel.
+function ResampleSlider({ tol, onTol, busy, counts, label, previewing }) {
   const opts = counts && counts.options ? counts.options : null;
   // With a preview up the slider sits on its notch; without one (after Keep or
-  // Cancel, or a fresh region) at the count the outline has now -- the old notch
-  // kept showing "51 → 3" and "The shape will deform" over an untouched outline
+  // Cancel, or a fresh region) at the count the outline has now
   const optIdx = !opts || !opts.length ? 0 : previewing
     ? opts.reduce((best, o, i) => (Math.abs(o.tol - tol) < Math.abs(opts[best].tol - tol) ? i : best), 0)
     : opts.reduce((best, o, i) => (Math.abs(o.points - counts.before)
       < Math.abs(opts[best].points - counts.before) ? i : best), 0);
-  const [typed, setTyped] = useState('');
-  const [typedNote, setTypedNote] = useState(null);   // "closest it can reach" for a typed count
-  const [adjust, setAdjust] = useState(false);
-  useEffect(() => { setTyped(''); setTypedNote(null); }, [method, scope]);
   const go = (i) => {
     if (!opts || i < 0 || i >= opts.length) return;
     if (onTol) onTol(opts[i].tol);
-  };
-  const goTyped = () => {
-    const want = Number(typed);
-    if (!opts || !opts.length || !Number.isFinite(want) || want <= 0) return;
-    const i = opts.reduce((best, o, k) =>
-      (Math.abs(o.points - want) < Math.abs(opts[best].points - want) ? k : best), 0);
-    const got = opts[i].points;
-    setTypedNote(got === want ? null
-      : `${want} isn't one it can reach — the closest is ${got}.`);
-    go(i);
   };
   const cur = opts && opts.length ? opts[optIdx] : null;
   const loading = !counts || counts.loading;
   return (
     <>
-      {bunched > 0 && (
-        <div className="hint warn">
-          {bunched} points sit right next to another — orange on the map.
+      {loading && (
+        <div className="hint dim">Working out how many points {label} can have…</div>
+      )}
+      {opts && opts.length === 0 && (
+        <div className="hint dim">
+          {label} can't change its number of points without breaking a border or
+          opening a gap.
         </div>
       )}
-      <div className="row">
-        <button className="btn sm primary" disabled={busy}
-          title="fewer points, none bunched together — the outline barely moves, borders stay joined, no gap opens"
-          onClick={() => { setTypedNote(null); if (onTidy) onTidy(); }}>
-          {loading && shape ? 'Tidy (getting ready…)' : 'Tidy'}
-        </button>
-        <button className="btn sm" onClick={() => setAdjust((v) => !v)}
-          title="choose the number of points yourself">
-          {adjust ? 'Adjust ▴' : 'Adjust…'}
-        </button>
-      </div>
-      {adjust && (
+      {cur && (
         <>
-          <label className="chk"
-            title="tidy each region by itself when you open Edit points, and each border after Share borders">
-            <input type="checkbox" checked={!!auto} disabled={busy}
-              onChange={(e) => onAuto && onAuto(e.target.checked)} />
-            Tidy automatically
-          </label>
-          <label className="chk"
-            title="points the same distance apart all the way round, instead of only where the shape needs them">
-            <input type="checkbox" checked={!shape} disabled={busy}
-              onChange={(e) => onMethod && onMethod(e.target.checked ? 'even' : 'shape')} />
-            Space points evenly
-          </label>
-          {loading && (
-            <div className="hint dim">Working out how many points {label} can have…</div>
-          )}
-          {opts && opts.length === 0 && (
-            <div className="hint dim">
-              {label} can't change its number of points this way without breaking a
-              border or opening a gap.
-            </div>
-          )}
-          {cur && (
-            <>
-              <div className="rng">
-                <span>more</span>
-                <input type="range" min="0" max={opts.length - 1} step="1" value={optIdx}
-                  disabled={busy} onChange={(e) => { setTypedNote(null); go(Number(e.target.value)); }} />
-                <span>fewer</span>
-              </div>
-              <div className="prop-readout">
-                <span>points</span>
-                <span className="v">{previewing ? `${counts.before} → ${cur.points}` : counts.before}</span>
-              </div>
-              <div className="row">
-                <input className="ctx-input" type="number" min="1" placeholder="type a number"
-                  value={typed} disabled={busy}
-                  title={`the counts ${label} can have: ${opts.map((o) => o.points).join(', ')}`}
-                  onChange={(e) => setTyped(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === 'Enter') goTyped(); }} />
-                <button className="btn sm" disabled={busy || !typed} onClick={goTyped}>Go</button>
-              </div>
-              {typedNote && <div className="hint dim">{typedNote}</div>}
-            </>
+          <div className="rng">
+            <span>more</span>
+            <input type="range" min="0" max={opts.length - 1} step="1" value={optIdx}
+              disabled={busy} onChange={(e) => go(Number(e.target.value))} />
+            <span>fewer</span>
+          </div>
+          <div className="prop-readout">
+            <span>points</span>
+            <span className="v">{previewing ? `${counts.before} → ${cur.points}` : counts.before}</span>
+          </div>
+          {/* tol < 0: past the fewest that keep every border joined, only this
+              region changes -- the one warning the box keeps */}
+          {previewing && cur.tol < 0 && (
+            <div className="hint warn">Borders with neighbours will break at this count.</div>
           )}
         </>
-      )}
-      {previewing && cur && cur.deform && (
-        <div className="hint warn">
-          The shape will deform — check it before you press Keep.
-          {cur.tol < 0 && ' Only this region changes, so its borders won\'t meet its neighbours\' exactly (Share borders joins them again).'}
-        </div>
       )}
     </>
   );
@@ -151,7 +88,7 @@ function displayName(feature, idProp) {
 function Sidebar({
   info, fc, selected, onSelectName, onRegionMenu, onDeleteSelected, pointMsg,
   regionResample, onRegionResampleTol, onApplyRegionResample, onCancelRegionResample,
-  resampleOpts, onTidy, bunchedCount, autoTidy, onAutoTidy,
+  resampleOpts,
   loadAsk, onAnswerLoad, onLoadDamage,
   overlapAsk, onAnswerOverlap, onToggleTranslate,
   mode, onToggleModify, onToggleBorder, onToggleSplit, onToggleDissolve, onToggleDraw,
@@ -160,7 +97,6 @@ function Sidebar({
   snapTol, onSnapTol, reachGap, fillAll, onFillAll,
   splitMsg, splitAsk, onSplitPick, onSplitCancel, drawMsg, drawKind, onDrawKind, designations, damageAsk, onAnswerDamage,
   resample, resampleTol, onResampleTol, onApplyResample, onCancelResample,
-  resampleMethod, onResampleMethod,
   gapFind, gapMsg, onDissolve, onFillGap, onClearGap,
   selectedName,
   moved, onSave, onReset,
@@ -567,38 +503,16 @@ function Sidebar({
             neighbour's side of a shared border is re-pointed with it. */}
         {mode === 'modify' && selectedName && (
           <div className="prop">
-            <div className="pts-head">Tidy points</div>
-            <ResampleSlider method={resampleMethod} tol={resampleTol} busy={busy}
-              scope={`region:${selectedName}`} counts={resampleOpts} label={selectedName}
-              onTidy={() => onTidy && onTidy('region')} bunched={bunchedCount}
-              auto={autoTidy} onAuto={onAutoTidy}
+            <div className="pts-head">Resample points</div>
+            <ResampleSlider tol={resampleTol} busy={busy}
+              counts={resampleOpts} label={selectedName}
               previewing={!!(regionResample && regionResample.name === selectedName)}
-              onMethod={(m) => onResampleMethod && onResampleMethod(m, 'region')}
               onTol={onRegionResampleTol} />
             {regionResample && regionResample.handles && (
-              <>
-                <div className="pts-head">
-                  points on {regionResample.name}:{' '}
-                  <b>{regionResample.handles.before} → {regionResample.handles.after}</b>
-                </div>
-                {(() => {
-                  const nb = (regionResample.counts || []).filter((c) => c.shared).map((c) => c.region);
-                  return nb.length > 0 && (
-                    <div className="hint dim">
-                      Its borders with {nb.join(', ')} are re-pointed too, so none of them opens.
-                    </div>
-                  );
-                })()}
-                {(regionResample.kept || []).length > 0 && (
-                  <div className="hint dim">
-                    Part of it is too small for this spacing and was left as it was.
-                  </div>
-                )}
-                <div className="row">
-                  <button className="btn sm primary" onClick={onApplyRegionResample} disabled={busy}>Keep</button>
-                  <button className="btn sm" onClick={onCancelRegionResample} disabled={busy}>Cancel</button>
-                </div>
-              </>
+              <div className="row">
+                <button className="btn sm primary" onClick={onApplyRegionResample} disabled={busy}>Keep</button>
+                <button className="btn sm" onClick={onCancelRegionResample} disabled={busy}>Cancel</button>
+              </div>
             )}
           </div>
         )}
@@ -807,47 +721,17 @@ function Sidebar({
             )}
             {picks.length >= 2 && (borderShared || borderReady) && (
               <div className="prop">
-                <div className="pts-head">Tidy points</div>
-                <ResampleSlider method={resampleMethod} tol={resampleTol} busy={busy}
-                  scope={`border:${picks.join('|')}`} counts={resampleOpts}
-                  label={`the ${picks.join(' | ')} border`}
-                  onTidy={() => onTidy && onTidy('border')}
-                  auto={autoTidy} onAuto={onAutoTidy}
+                <div className="pts-head">Resample points</div>
+                <ResampleSlider tol={resampleTol} busy={busy}
+                  counts={resampleOpts} label={`the ${picks.join(' | ')} border`}
                   previewing={!!(resample && resample.counts)}
-                  onMethod={(m) => onResampleMethod && onResampleMethod(m, 'border')}
                   onTol={onResampleTol} />
                 {resample && resample.counts && (
-                  <>
-                    {resample.handles && (
-                      <div className="pts-head">
-                        drag points on the border:{' '}
-                        <b>{resample.handles.before} → {resample.handles.after}</b>
-                      </div>
-                    )}
-                    <ul className="notes">
-                      {resample.counts.map((c) => (
-                        <li key={c.region} className="dim">
-                          {c.region} outline {c.before.toLocaleString()} → {c.after.toLocaleString()} pts
-                        </li>
-                      ))}
-                    </ul>
-                    {(resample.kept || []).length > 0 && (
-                      <div className="hint dim" title={resample.kept.join('\n')}>
-                        {resample.kept.length === 1 ? 'One stretch' : `${resample.kept.length} stretches`}
-                        {' '}of this border kept {resample.kept.length === 1 ? 'its' : 'their'} old
-                        points — at this spacing they would have cut into a neighbour.
-                      </div>
-                    )}
-                    <div className="row">
-                      <button className="btn sm primary" onClick={onApplyResample} disabled={busy}>Keep</button>
-                      <button className="btn sm" onClick={onCancelResample} disabled={busy}>Cancel</button>
-                    </div>
-                  </>
+                  <div className="row">
+                    <button className="btn sm primary" onClick={onApplyResample} disabled={busy}>Keep</button>
+                    <button className="btn sm" onClick={onCancelResample} disabled={busy}>Cancel</button>
+                  </div>
                 )}
-                <div className="hint dim">
-                  Only the shared border changes; points where another region touches
-                  it stay put.
-                </div>
               </div>
             )}
             {borderMsg && <div className="hint">{borderMsg}</div>}
