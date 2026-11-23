@@ -120,6 +120,14 @@ ITEMS = [
     "other fiber tract, dft and lft together, for you to cut in two with "
     "Split. It is a starting point to check and edit, not a finished map.",
 
+    "Predictions made with older versions have outlines in pixel stairs. When "
+    "one is opened (a file with _prediction in its name), the regions that "
+    "nobody has edited are smoothed straight away; any region that has been "
+    "edited stays exactly as it is, and so do hemi, damage and ROIs. A note "
+    "at the top says what changed. Unsmooth (original boxy outlines) puts the "
+    "stairs back and the file is then never smoothed again; Ctrl+Z also undoes "
+    "it. The map opens as unsaved: Save to keep the smoothing.",
+
     "If a region file uses one name for more than one shape, FiveAtlas asks "
     "about it as soon as the dataset opens (and after Replace the map or "
     "Reset): it lists each such name, with whether the shapes are identical or "

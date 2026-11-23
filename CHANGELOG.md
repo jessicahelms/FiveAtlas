@@ -11,6 +11,36 @@ The first `### ` title of a section is also what the app's update banner
 shows ("FiveAtlas 1.3.2 is out — Faster on laptops"), so lead with the change
 people will care about most and keep that title short.
 
+## v1.5.2
+
+### Old boxy predictions are smoothed when you open them
+
+- Predictions made before v1.5.1 have outlines in pixel stairs. When you open
+  one (a file with **_prediction** in its name), FiveAtlas now smooths those
+  stairs by itself, the same way new predictions are smoothed.
+- **Only untouched regions change.** A region anyone has edited (points moved,
+  split, merged, redrawn) stays exactly as it is, and the smoothed regions
+  fit around it so shared borders stay joined. Hemi, damage, ROIs and drawn
+  boxes are never changed, and the ground under damage stays as it was.
+- A note at the top says how many regions were smoothed. **Unsmooth
+  (original boxy outlines)** puts the stairs back, and that file is never
+  smoothed again for anyone; Ctrl+Z also undoes it.
+- The map opens as unsaved: **Save** to keep the smoothing. Closing without
+  saving loses nothing — it is smoothed the same way next time.
+- No ground inside hemi is left without a region, so every cell stays in the
+  region it was in.
+
+### Predictions are always smooth
+
+- The **Smooth edges** box in Predict regions is gone: predicted outlines are
+  always smoothed. Boxy outlines made **Resample points** take minutes on
+  some regions.
+
+### Faster point counts
+
+- Moving the **Resample points** slider stops the count it no longer needs,
+  so it keeps up on slower computers.
+
 ## v1.5.1
 
 ### Simpler point editing: Tidy is gone
