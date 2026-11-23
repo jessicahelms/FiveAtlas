@@ -16,6 +16,7 @@ import math
 import os
 import re
 
+import shapely
 from shapely import set_precision
 from shapely.geometry import shape, mapping, LineString, Polygon, Point, MultiPoint
 from shapely.ops import (linemerge, nearest_points, polygonize, split, unary_union,
@@ -5670,9 +5671,14 @@ def resample_region(features, id_prop, name, tol=20.0, eps=0.5, max_drift=0.05,
     # everything and do not count.
     from shapely.geometry import box as _box
     containers = section_containers(features, id_prop)
+    # the reach is buffered ONCE: it was buffered again for every other region,
+    # and on a pixel-stair outline (a prediction with Smooth edges off) that
+    # alone was half the time Resample points' counts took
+    reach = body_before.buffer(tol + 4)
+    shapely.prepare(reach)
     near_bodies = {o: g for o, g in ((o, _body(features, idx[o])) for o in idx
                                      if o != name and o not in containers)
-                   if not g.is_empty and g.intersects(body_before.buffer(tol + 4))}
+                   if not g.is_empty and reach.intersects(g)}
     # Layered atlases: most regions lie inside another (Caudoputamen_672 99.9%
     # inside CP, SSp inside ISO, VL.2 inside dft), and section_containers finds
     # none of those. The PARENT's ground was counted as a third region's, so
@@ -6477,7 +6483,12 @@ def resample_at(features, id_prop, names, tol, method="shape", digest=None):
 _options_cache = {}          # (features digest, id_prop, names, method) -> result
 
 
-def resample_options(features, id_prop, names, method="shape"):
+class Cancelled(Exception):
+    """resample_options stopped because `should_stop` said so: the page asked
+    for another region's counts (or the outline changed) meanwhile."""
+
+
+def resample_options(features, id_prop, names, method="shape", should_stop=None):
     """resample_options, remembered: the counts for an outline already worked
     out come back at once -- after an Undo, or on picking a region again. The
     per-setting cache below holds only 48 results, so after two regions' 28
@@ -6489,18 +6500,21 @@ def resample_options(features, id_prop, names, method="shape"):
         hit = _options_cache.get(key)
     if hit is not None:
         return _copy.deepcopy(hit)
-    res = _resample_options_uncached(features, id_prop, names, method, digest)
+    res = _resample_options_uncached(features, id_prop, names, method, digest, should_stop)
     _cache_put(_options_cache, key, _copy.deepcopy(res))
     return res
 
 
-def _resample_options_uncached(features, id_prop, names, method="shape", digest=None):
+def _resample_options_uncached(features, id_prop, names, method="shape", digest=None,
+                               should_stop=None):
     """Every number of points Resample points can give -- one region's outline,
     or the shared border of several -- most first:
     {before, options: [{points, tol, deform}]}. Each option is the first
     setting that reaches that count, so the counts only go down along the
     slider (even spacing can also go UP from now: a fine spacing adds points).
-    `deform` marks Fewest points settings past FEWEST_SAFE (the page asks)."""
+    `deform` marks Fewest points settings past FEWEST_SAFE (the page asks).
+    `should_stop()`, asked between settings, ends the work early (Cancelled):
+    each setting already worked out stays remembered (resample_at)."""
     digest = digest or _features_digest(features)
     grid = _FEWEST_GRID if method == "shape" else _EVEN_GRID
     names = [str(n) for n in names]
@@ -6514,6 +6528,8 @@ def _resample_options_uncached(features, id_prop, names, method="shape", digest=
     old = {n: _body(features, idx[n]) for n in names if n in idx}
     before, best, options = None, None, []
     for t in grid:
+        if should_stop is not None and should_stop():
+            raise Cancelled("another region's point counts were asked for")
         r = resample_at(features, id_prop, names, t, method, digest)
         h = r.get("handles") or {}
         if "after" not in h:
@@ -6539,6 +6555,8 @@ def _resample_options_uncached(features, id_prop, names, method="shape", digest=
             # fewest points that move it no more than TIDY_MOVE
             options.append({"points": n, "tol": float(t), "deform": deform,
                             "moved": round(moved, 1)})
+    if should_stop is not None and should_stop():
+        raise Cancelled("another region's point counts were asked for")
     if len(names) == 1 and names[0] in idx:
         # past the fewest the guards allow, every count down to COUNT_FLOOR
         # (this region alone; the page warns). tol = -count marks them.

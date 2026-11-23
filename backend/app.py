@@ -67,6 +67,7 @@ import tilecache
 import damage as DMG
 import notes
 import predict as PRED
+import boxy as BOXY
 import provenance
 import topology
 from transcripts import GeneDensity
@@ -2148,6 +2149,10 @@ def _tidy_work(feats, idp, names, always):
     return feats, summary
 
 
+_resample_opts_gen = {}       # dataset id -> number of the latest counts request
+_resample_opts_lock = __import__("threading").Lock()
+
+
 @app.post("/api/datasets/{ds_id}/regions/resample-options")
 async def regions_resample_options(ds_id: str, request: Request):
     """Every number of points Resample points can give -- one region's outline,
@@ -2166,11 +2171,21 @@ async def regions_resample_options(ds_id: str, request: Request):
     if method not in topology.RESAMPLE_METHODS:
         raise HTTPException(422, f"unknown resample method {method!r}")
     fc = body.get("fc") or geo.load_regions(ds_id)[0]
+    # The page only ever waits for its LATEST counts: picking another region
+    # (or an Undo) asks again and drops the answer to the old question. The
+    # old work used to run on to the end anyway -- on a laptop, clicking
+    # through three big regions left three of these running at once, and the
+    # one wanted took three times as long. Now a newer request stops it.
+    with _resample_opts_lock:
+        gen = _resample_opts_gen[ds_id] = _resample_opts_gen.get(ds_id, 0) + 1
     try:
         # on a worker thread: every one of the settings, seconds on a big
         # region, and nothing else (the map's tiles) was answered meanwhile
         return await run_in_threadpool(topology.resample_options, fc["features"],
-                                       d["id_prop"], [str(n) for n in names], method)
+                                       d["id_prop"], [str(n) for n in names], method,
+                                       lambda: _resample_opts_gen.get(ds_id) != gen)
+    except topology.Cancelled as e:
+        raise HTTPException(409, str(e))
     except ValueError as e:
         raise HTTPException(422, str(e))
     except Exception as e:
@@ -2402,7 +2417,7 @@ def predict_status():               # a plain def: FastAPI already runs it on a 
 @app.post("/api/datasets/{ds_id}/regions/predict")
 async def regions_predict_start(ds_id: str, request: Request):
     """Predict regions from the transcripts (the production rules; model idx=22 by default).
-    Body: {roiName, roiGeometries, medial: right|left, dorsal: up|down, trim, pieces, model, smooth}.
+    Body: {roiName, roiGeometries, medial: right|left, dorsal: up|down, trim, pieces, model} (outlines always smoothed).
 
     Takes a while, so it runs on a worker thread and the client polls. It changes
     NOTHING: the result is handed back like a file that was just read, and the
@@ -2444,7 +2459,10 @@ async def regions_predict_start(ds_id: str, request: Request):
         except Exception as e:
             raise HTTPException(422, f"This dataset is turned, and its image size could not be read: {e}")
     trim, pieces = bool(body.get("trim")), bool(body.get("pieces"))
-    model, smooth = body.get("model") or None, body.get("smooth", True) is not False
+    # always smoothed: the pixel-stair outlines (one step per ~10 um model pixel)
+    # were the "boxy" ones, with 400-2,000 points a region -- which also made
+    # Resample points' counts take minutes. The option was taken out on request.
+    model, smooth = body.get("model") or None, True
     try:
         await run_in_threadpool(PRED._load, model)
     except PRED.PredictError as e:
@@ -2546,6 +2564,109 @@ async def regions_load_multi(ds_id: str, request: Request):
     provenance.stamp(out, "load-regions", detail)
     geo.save_edited(ds_id, out)
     return JSONResponse(out)
+
+
+# Trail entries that do not change any region's outline. Every OTHER entry that
+# names a region means somebody edited it (a merge, a move, a drag, a cut ...), and
+# boxy.py must leave it alone even if it is still all stairs.
+_NOT_AN_EDIT = {"load-regions", "add-regions-file", "predict-regions", "smooth-boxy",
+                "keep-boxy", "save", "save-as", "export", "rename", "recolor", "colour", "restack",
+                "color", "resolve-duplicates"}
+
+
+def _prediction_indexes(ds_id, d, fc, source):
+    """Which features boxy.py may smooth: the ones that came from a `*_prediction*`
+    file, minus every region an edit on the trail names, and none at all once
+    someone chose to keep the stairs. `source` is the file just read (Load regions
+    file -- `fc` is then that file alone), or "dataset" for the map the dataset
+    opened with."""
+    feats = fc.get("features") or []
+
+    def nm(f):
+        return str(((f.get("properties") if isinstance(f, dict) else None) or {}).get(d["id_prop"]) or "")
+    trail = provenance.trail(fc)
+    edited = set()
+    for e in trail:
+        if str(e.get("action")) not in _NOT_AN_EDIT:
+            edited.update(str(r) for r in (e.get("regions") or []))
+    # "Keep the stairs" after the last load: never asked again for this map
+    for e in reversed(trail):
+        if e.get("action") == "keep-boxy":
+            return []
+        if e.get("action") in ("load-regions", "predict-regions"):
+            break
+    every = [i for i in range(len(feats)) if nm(feats[i]) not in edited]
+    if source != "dataset":
+        return every if BOXY.is_prediction_file(Path(str(source)).name) else []
+    # the pre-load checklist tags each feature with the file it came from
+    tags = [((f.get("properties") if isinstance(f, dict) else None) or {}).get(topology.SRC_PROP)
+            for f in feats]
+    if any(tags):
+        return [i for i in every if BOXY.is_prediction_file(tags[i])]
+    # the working copy: what its trail says was loaded into it (a load replaces the
+    # map, an Add puts its regions beside the others)
+    if ds.edited_regions_path(ds_id).exists():
+        allowed, seen = set(), False
+        for e in trail:
+            act, detail = e.get("action"), str(e.get("detail") or "")
+            if act == "load-regions":
+                seen = True
+                allowed = {"*"} if BOXY.is_prediction_file(detail) else set()
+            elif act == "add-regions-file":
+                names = {str(r) for r in (e.get("regions") or [])}
+                if BOXY.is_prediction_file(detail):
+                    allowed |= names
+                elif "*" in allowed:
+
+                    edited |= names            # not from a prediction: never smoothed
+        if seen or allowed:
+            return [i for i in every if nm(feats[i]) not in edited
+                    and ("*" in allowed or nm(feats[i]) in allowed)]
+    rp = ds.regions_path(d)
+    return every if rp is not None and BOXY.is_prediction_file(rp.name) else []
+
+
+@app.post("/api/datasets/{ds_id}/regions/smooth-boxy")
+async def regions_smooth_boxy(ds_id: str, request: Request):
+    """Smooth the pixel stairs of an old, unsmoothed prediction (see boxy.py).
+    Body: {fc, source: "dataset" | the file name just read}.
+
+    Changes NOTHING on disk and hands back only the outlines of the regions it
+    smoothed, by index: {smoothed: [{index, name, geometry}], kept: [{name, why}],
+    seconds}. The client swaps those outlines in as one undoable edit. A region the
+    trail says was edited, or that is no longer exact stairs on the prediction's
+    pixel grid, is never in the answer."""
+    try:
+        d = ds.get_dataset(ds_id)
+    except KeyError:
+        raise HTTPException(404, "unknown dataset")
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "the body must be JSON")
+    if not isinstance(body, dict) or not isinstance(body.get("fc"), dict):
+        raise HTTPException(400, "need {fc, source}")
+    fc = body["fc"]
+    feats = fc.get("features") or []
+    if not isinstance(feats, list):
+        raise HTTPException(400, "fc.features must be a list")
+
+    def nm(i):
+        f = feats[i]
+        return str(((f.get("properties") if isinstance(f, dict) else None) or {}).get(d["id_prop"]) or "")
+    idx = _prediction_indexes(ds_id, d, fc, body.get("source") or "dataset")
+    if not idx:
+        return {"smoothed": [], "kept": [], "seconds": 0, "eligible": 0}
+    # damage lies ON its host: never a neighbour to fit to, never smoothed
+    overlays = [i for i in range(len(feats)) if DMG.parse_name(nm(i))[0]]
+    try:
+        res = await run_in_threadpool(BOXY.smooth, feats, idx, PRED._smooth_regions, overlays)
+    except Exception as e:
+        raise HTTPException(500, f"smoothing failed: {e}")
+    return {"smoothed": [{"index": i, "name": nm(i), "geometry": g}
+                         for i, g in sorted(res["smoothed"].items())],
+            "kept": [{"name": nm(i), "why": w} for i, w in sorted(res["kept"].items())],
+            "seconds": res["seconds"], "grids": res["grids"], "eligible": len(idx)}
 
 
 @app.post("/api/datasets/{ds_id}/regions/add")

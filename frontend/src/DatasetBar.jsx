@@ -8,7 +8,7 @@ export default function DatasetBar({
   working, error, onDismissError,
   saveResult, onDismissSave, onRevealSave, onSaveAs, saveTarget,
   version, installedVersion, canRestart, onRestart, restartState,
-  updateReady, onApplyUpdate, updateApplyState, predict,
+  updateReady, onApplyUpdate, updateApplyState, predict, notice, onDismissNotice,
 }) {
   const shown = saveResult && (saveResult.exported || saveResult.path);
   const warn = saveResult && (saveResult.refused || saveResult.failed || saveResult.exportError);
@@ -97,6 +97,25 @@ export default function DatasetBar({
           you are already looking. It stays until you close it or edit again. */}
       {/* A refusal or a failure shows even with unsaved edits -- those are
           exactly the moments the answer matters. */}
+      {/* What the app did by itself on load (old boxy predictions smoothed). Not
+          over the save answer: that one matters more, and this waits under it. */}
+      {notice && !(saveResult && (saveResult.refused || saveResult.failed || !dirty)) && (
+        <div className={notice.warn ? 'savetoast warn' : 'savetoast'} role="status">
+          <div className="savetoast-head">
+            <b>{notice.title}</b>
+            <button className="savetoast-x" onClick={onDismissNotice} title="close">×</button>
+          </div>
+          {notice.lines.map((l, i) => <div key={i} className="savetoast-note">{l}</div>)}
+          {notice.onKeep && (
+            <div className="row">
+              <button className="btn sm" onClick={notice.onKeep}
+                title="undo the smoothing: the outlines go back to the prediction's original pixel stairs, and this map is never smoothed again (the file's trail remembers)">
+                Unsmooth (original boxy outlines)
+              </button>
+            </div>
+          )}
+        </div>
+      )}
       {saveResult && (saveResult.refused || saveResult.failed || !dirty) && (
         <div className={warn ? 'savetoast warn' : 'savetoast'} role="status">
           <div className="savetoast-head">

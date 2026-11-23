@@ -271,6 +271,21 @@ export async function predictState(ds) {
   return r.json();
 }
 
+// Smooth the pixel stairs of an old, unsmoothed prediction just loaded. Changes
+// nothing on disk; returns only the smoothed outlines, by index into `fc`:
+// { smoothed: [{index, name, geometry}], kept: [names], seconds, eligible }.
+// `source`: the file just read, or 'dataset' for the map the dataset opened with.
+// Regions anybody edited are never boxy, so never in the answer.
+export async function smoothBoxy(ds, fc, source, names = null) {
+  const r = await fetch(`${API}/datasets/${ds}/regions/smooth-boxy`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fc, source, names }),
+  });
+  if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+  return r.json();
+}
+
 // One or several region files combined into the working copy (the pre-load
 // checklist's region rows).
 export async function loadRegionsMulti(ds, paths) {

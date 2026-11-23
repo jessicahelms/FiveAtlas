@@ -798,6 +798,11 @@ export default function App() {
   const commit = useCallback((nextFc) => {
     fcRef.current = nextFc; setFc(nextFc); record(nextFc);
   }, [record]);
+  // Old boxy predictions smoothed on load (set further down, where everything they
+  // use exists): boxyAskRef asks the server, boxyApplyRef places the answer.
+  const boxyAskRef = useRef(null);
+  const boxyApplyRef = useRef(null);
+  const [boxyNotice, setBoxyNotice] = useState(null);
   const initHistory = useCallback((fc0) => {
     setDirty(false);                     // freshly loaded == saved
     setSaveResult(null);                 // and it is a different file now
@@ -1047,7 +1052,7 @@ export default function App() {
     if (!dsId) return;
     let cancel = false;
     (async () => {
-      setInfo(null); setFc(null); setError(null); setDupAsk(null);
+      setInfo(null); setFc(null); setError(null); setDupAsk(null); setBoxyNotice(null);
       setGeneInfo(null); setChannels(null); setGeneBitmap(null); setGeneBounds(null);
       setGeneError(null);
       setStainInfo(null); setStainChannels(null);
@@ -1068,6 +1073,14 @@ export default function App() {
         let s = null;
         try { s = await api.getSources(dsId); } catch (e) { /* optional */ }
         if (cancel) return;
+        // An old, unsmoothed prediction: its pixel stairs are smoothed BEFORE the
+        // map can be touched, so the answer can never land on top of an edit, an
+        // undo or a preview (the server decides which regions may change).
+        let boxy = null;
+        if (r.features && r.features.length && boxyAskRef.current) {
+          boxy = await boxyAskRef.current(r, 'dataset');
+          if (cancel) return;
+        }
         fcRef.current = r;
         setInfo(i); setFc(r); setBaseline(r); setSources(s); initHistory(r);
         setSelected([]); setMoved(new Set()); setSnapInfo(null); setMode('view');
@@ -1084,8 +1097,10 @@ export default function App() {
         // Two features under one name: ask now, before anything is edited.
         // (Edited as one region they shredded under Share borders.)
         // Not awaited: genes and stains load meanwhile.
-        api.resolveDuplicates(dsId, r).then((d) => {
-          if (!cancel && fcRef.current === r && d.groups && d.groups.length) {
+        // the smoothing is its own step on top of the map as loaded (Ctrl+Z: stairs)
+        const shown = boxy && boxyApplyRef.current ? boxyApplyRef.current(r, boxy) : r;
+        api.resolveDuplicates(dsId, shown).then((d) => {
+          if (!cancel && fcRef.current === shown && d.groups && d.groups.length) {
             setDupAsk({ groups: d.groups });
           }
         }).catch(() => { /* the check is a courtesy; the map is loaded either way */ });
@@ -2755,6 +2770,12 @@ export default function App() {
         else previewResample(pick.tol, method);
       }
     } catch (e) {
+      if (seq === resampleOptsSeq.current && String(e && e.message).startsWith('409')) {
+        // stopped by a newer request for counts (another tab on this dataset):
+        // ask again -- the settings already worked out are remembered
+        setResampleOpts(null);
+        return;
+      }
       if (seq === resampleOptsSeq.current) {
         // kept (with no counts) so the effect doesn't ask again in a loop
         setResampleOpts({ scope, dsId, method, source, before: null, options: [], failed: true });
@@ -2905,6 +2926,18 @@ export default function App() {
       }
     }
     commit(next); setBaseline(next);
+    // a *_prediction* file whose stairs were smoothed when it was read: placed now,
+    // as one more step, before anything else can happen (Ctrl+Z: the stairs)
+    const loaded = next;
+    if (ask.boxy && boxyApplyRef.current) {
+      const off = choice === 'replace' ? 0 : cur.features.length;
+      const srcIdx = new Map((ask.fc.features || []).map((f, k) => [f, k]));
+      next = boxyApplyRef.current(next, ask.boxy, (j) => {
+        const f = j >= off ? incoming[j - off] : undefined;
+        return f !== undefined && srcIdx.has(f) ? srcIdx.get(f) : -1;
+      });
+    }
+    const smoothedToo = next !== loaded;
     setSelected([]); selAnchorRef.current = null;
     if (choice === 'replace') { setMoved(new Set()); setMode('view'); clearBorder(); }
     if (choice === 'replace') {
@@ -2918,8 +2951,8 @@ export default function App() {
     if (ask.quiet) return { added: addedFeats, renamed };
     const dmgNote = damageQuestion ? (ask.withDamage ? ', damage included' : ', damage left out') : '';
     setLoadAsk({ done: choice === 'replace'
-      ? `The map now holds the ${incoming.length} regions from ${ask.name}${dmgNote}. Ctrl+Z brings back what was there; Save to keep it.`
-      : `Added ${incoming.length} regions from ${ask.name}${dmgNote}${renamed ? ` (${renamed} renamed so no name is used twice)` : ''}. Ctrl+Z undoes it; Save to keep it.` });
+      ? `The map now holds the ${incoming.length} regions from ${ask.name}${dmgNote}. ${smoothedToo ? 'Ctrl+Z once puts the stairs back, twice brings back what was there' : 'Ctrl+Z brings back what was there'}; Save to keep it.`
+      : `Added ${incoming.length} regions from ${ask.name}${dmgNote}${renamed ? ` (${renamed} renamed so no name is used twice)` : ''}. ${smoothedToo ? 'Ctrl+Z once puts the stairs back, twice takes the regions out again' : 'Ctrl+Z undoes it'}; Save to keep it.` });
   }, [loadAsk, designations, idProp, commit, clearBorder, uiSettings, dsId,
       dropRegionPreview, cancelResample]);
 
@@ -2935,6 +2968,7 @@ export default function App() {
       const res = await api.restoreOriginal(dsId);
       const newFc = asFc(res, fc);
       commit(newFc); setBaseline(newFc);
+      setBoxyNotice(null);
       setSelected([]); setMoved(new Set()); setMode('view');
       clearBorder(); clearSplit(); clearGap(); clearDraw(); clearClean();
       const kept = res.backup ? String(res.backup).split(/[\\/]/).pop() : null;
@@ -3012,6 +3046,86 @@ export default function App() {
   // read by client-side stamps, which must not re-create themselves on every
   // identity change
   const identityRef = useRef(null);
+
+  // ---- Old boxy predictions, smoothed on load (backend boxy.py) -----------------
+  // A region that came from a *_prediction* file and is still exact pixel stairs on
+  // the prediction's grid is smoothed; a region anybody has edited is never in the
+  // answer. The answer is asked for while the map is still loading and placed the
+  // moment it opens -- one undoable step on top of the load -- so it can never land
+  // on top of an edit, an undo or a preview. Only the smoothed outlines change.
+  boxyAskRef.current = async (fcIn, source) => {
+    const ds0 = dsId;
+    const slow = setTimeout(() => {
+      if (dsIdLiveRef.current === ds0) {
+        setBoxyNotice({ busy: true, title: 'Smoothing the boxy prediction…',
+          lines: ['Its outlines are pixel stairs; they are smoothed before the map opens. A few seconds on a slow computer.'] });
+      }
+    }, 600);
+    try {
+      const r = await api.smoothBoxy(ds0, { type: 'FeatureCollection', features: fcIn.features || [],
+        _provenance: fcIn._provenance }, source);
+      if (dsIdLiveRef.current !== ds0) return null;
+      setBoxyNotice((n) => (n && n.busy ? null : n));
+      return r;
+    } catch (e) {
+      if (dsIdLiveRef.current === ds0) {
+        setBoxyNotice({ warn: true, title: 'The boxy prediction could not be smoothed',
+          lines: [apiDetail(e), 'The regions are exactly as they are in the file.'] });
+      }
+      return null;
+    } finally { clearTimeout(slow); }
+  };
+  // `sent` is already on the map (committed); `from(j)` is the index in the server's
+  // answer of feature j of `sent`. Returns the map now shown.
+  boxyApplyRef.current = (sent, r, from = (j) => j) => {
+    if (!r || !sent || !Array.isArray(sent.features)) return sent;
+    const kept = Array.isArray(r.kept) ? r.kept : [];
+    const keptLines = kept.length
+      ? [`Left as pixel stairs: ${kept.slice(0, 6).map((k) => `${k.name} (${k.why})`).join('; ')}${kept.length > 6 ? ` and ${kept.length - 6} more` : ''}.`]
+      : [];
+    const by = new Map((r.smoothed || []).map((x) => [x.index, x]));
+    const feats = sent.features.map((f, j) => {
+      const x = by.get(from(j));
+      return x && x.geometry ? { ...f, geometry: x.geometry } : f;
+    });
+    const done = sent.features.filter((f, j) => by.has(from(j))).map((f) => featureName(f, idProp));
+    if (!done.length) {
+      if (kept.length) {
+        setBoxyNotice({ warn: true, title: 'This prediction is boxy, but it was not smoothed',
+          lines: [...keptLines, 'The regions are exactly as they are in the file.'] });
+      }
+      return sent;
+    }
+    // no `regions` on the trail entry, on purpose: the notes panel counts every
+    // region named there as the annotator's own work
+    const next = stampFc({ ...sent, features: feats }, identityRef.current, 'smooth-boxy',
+      `${done.length} region(s) of an unsmoothed prediction smoothed on load: ${done.join(', ')}`);
+    commit(next); setBaseline(next);
+    const n = done.length;
+    setBoxyNotice({
+      idx: histIdxRef.current, fc: next, base: sent,
+      title: `Smoothed ${n} boxy region${n === 1 ? '' : 's'} from the prediction`,
+      lines: [
+        'Their outlines were pixel stairs from an older, unsmoothed prediction. Only regions that were still exact stairs on the prediction’s pixel grid changed; any region that has been edited is exactly as it was, and so is the ground under damage and other shapes lying on the regions.',
+        ...keptLines,
+        'Unsmooth puts the original boxy outlines back. Save to keep the smoothing — the saved file will not be identical to the prediction file it came from.',
+      ],
+    });
+    return next;
+  };
+  // "Unsmooth": back to the map as loaded, and the trail says so -- this map
+  // is then never smoothed again, here or for whoever opens it next
+  const keepBoxyStairs = useCallback(() => {
+    const nt = boxyNotice;
+    if (!nt || !nt.base || fcRef.current !== nt.fc) return;
+    commit(stampFc(nt.base, identityRef.current, 'keep-boxy',
+      'unsmoothed: original boxy outlines kept'));
+    setBoxyNotice(null);
+  }, [boxyNotice, commit]);
+  // once saved, "Ctrl+Z puts the stairs back / Save to keep it" is no longer the news
+  useEffect(() => {
+    if (saveResult && !saveResult.refused && !saveResult.failed) setBoxyNotice(null);
+  }, [saveResult]);
   identityRef.current = identity;
 
   useEffect(() => {
@@ -3189,6 +3303,7 @@ export default function App() {
     try {
       const r = await api.getRegions(dsId);
       commit(r); setBaseline(r);
+      setBoxyNotice(null);              // the saved regions, exactly as on disk
       // set after commit(): record() drops a stash whose Reset step it replaces
       resetMovedRef.current = { idx: histIdxRef.current - 1, moved: [...moved] };
       // the map is now exactly what is on disk
@@ -3214,6 +3329,11 @@ export default function App() {
       const { path } = await api.browseFile();
       if (!path) return;
       const r = await api.readRegionsFile(dsId, path);
+      const fname = path.split(/[\\/]/).pop();
+      // a *_prediction* file: which of its regions are still stairs, and how they
+      // smooth -- worked out now, placed when Add or Replace is chosen
+      const boxy = /_prediction/i.test(fname) && boxyAskRef.current
+        ? await boxyAskRef.current(r, fname) : null;
       const aliases = designations && designations.aliases;
       const feats = r.features || [];
       const beside = r._damageBeside || { files: [], features: [] };
@@ -3222,7 +3342,7 @@ export default function App() {
         hasHemi: !!r._hasHemi,
         damageInFile: feats.filter((f) => isDamage(featureName(f, idProp), aliases)).length,
         damageBeside: beside.features || [], besideFiles: beside.files || [],
-        withDamage: null,
+        withDamage: null, boxy,
       });
     } catch (e) {
       setLoadAsk({ error: `Could not read that file: ${apiDetail(e)}` });
@@ -3491,6 +3611,10 @@ export default function App() {
         onOpenPath={(p) => { if (confirmDiscard()) loadOpened(p); }} busy={dsBusy}
         canSave={!!(dsId && fc)} dirty={dirty} busySave={busy}
         working={busy} error={error} onDismissError={() => setError(null)}
+        notice={boxyNotice && (boxyNotice.idx == null || histIdxRef.current >= boxyNotice.idx)
+          ? { ...boxyNotice, onKeep: boxyNotice.fc && fc === boxyNotice.fc ? keepBoxyStairs : null }
+          : null}
+        onDismissNotice={() => setBoxyNotice(null)}
         onSave={doSavePrimary} onReset={doReset}
         onSaveAs={doSaveAs} saveTarget={saveTarget}
         saveResult={saveResult} onDismissSave={() => setSaveResult(null)}

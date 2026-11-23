@@ -46,7 +46,6 @@ export default function PredictPanel({ dsId, fc, idProp, aliases, busy, onResult
   const [roi, setRoi] = useState(null);                 // null = not yet chosen
   const [medial, setMedial] = useState(saved.medial === 'left' ? 'left' : 'right');
   const [dorsal, setDorsal] = useState(saved.dorsal === 'down' ? 'down' : 'up');
-  const [smooth, setSmooth] = useState(saved.smooth !== false);
   const [trim, setTrim] = useState(false);
   const [pieces, setPieces] = useState(false);
   const [job, setJob] = useState(null);                 // {stage, elapsed, retrying} while running
@@ -82,9 +81,9 @@ export default function PredictPanel({ dsId, fc, idProp, aliases, busy, onResult
 
   useEffect(() => {
     try {
-      localStorage.setItem(SAVED, JSON.stringify({ model, medial, dorsal, smooth }));
+      localStorage.setItem(SAVED, JSON.stringify({ model, medial, dorsal }));
     } catch { /* only a convenience */ }
-  }, [model, medial, dorsal, smooth]);
+  }, [model, medial, dorsal]);
 
   const outlines = useMemo(() => {
     const seen = new Set();
@@ -213,7 +212,7 @@ export default function PredictPanel({ dsId, fc, idProp, aliases, busy, onResult
         ? fc.features.filter((f) => nameOf(f, idProp) === chosen && f.geometry).map((f) => f.geometry)
         : null;
       await api.startPredict(dsId, {
-        roiName: chosen || null, roiGeometries: geoms, medial, dorsal, trim, pieces, smooth, model: chosenModel,
+        roiName: chosen || null, roiGeometries: geoms, medial, dorsal, trim, pieces, model: chosenModel,
       });
     } catch (e) {
       if (!live.current) return;
@@ -310,9 +309,6 @@ export default function PredictPanel({ dsId, fc, idProp, aliases, busy, onResult
             ))}
           </div>
           <div className="hint dim">If the section lies on its side, rotate the view first.</div>
-          <label className="hint predict-check" title="Off: the exact pixel outlines, as in the files on Box">
-            <input type="checkbox" checked={smooth} onChange={(e) => setSmooth(e.target.checked)} /> Smooth edges
-          </label>
           <label className="hint predict-check">
             <input type="checkbox" checked={pieces} onChange={(e) => setPieces(e.target.checked)} /> Section is in separate pieces
           </label>

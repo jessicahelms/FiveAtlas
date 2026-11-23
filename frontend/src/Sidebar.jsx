@@ -45,10 +45,22 @@ function ResampleSlider({ tol, onTol, busy, counts, label, previewing }) {
   };
   const cur = opts && opts.length ? opts[optIdx] : null;
   const loading = !counts || counts.loading;
+  // seconds since the counts were asked for: a big region takes a while, and a
+  // line that never changed looked stuck ("I've never seen it active")
+  const [waited, setWaited] = useState(0);
+  useEffect(() => {
+    setWaited(0);
+    if (!loading) return undefined;
+    const t0 = Date.now();
+    const t = setInterval(() => setWaited(Math.floor((Date.now() - t0) / 1000)), 1000);
+    return () => clearInterval(t);
+  }, [loading, label]);
   return (
     <>
       {loading && (
-        <div className="hint dim">Working out how many points {label} can have…</div>
+        <div className="hint dim">
+          Working out how many points {label} can have…{waited >= 2 ? ` ${waited} s` : ''}
+        </div>
       )}
       {opts && opts.length === 0 && (
         <div className="hint dim">

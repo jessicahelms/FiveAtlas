@@ -690,16 +690,28 @@ def _absorb_specks(lab):
     from scipy import ndimage
 
     lab = np.asarray(lab).copy()
+    H, W = lab.shape
     for cls in np.unique(lab):
         comps, n = ndimage.label(lab == cls)
         if not n:
             continue
         sizes = np.bincount(comps.ravel())
-        for i in np.flatnonzero(sizes[1:] < MIN_AREA_PX) + 1:
-            m = comps == i
+        small = np.flatnonzero(sizes[1:] < MIN_AREA_PX) + 1
+        if not len(small):
+            continue
+        # each speck in its own small window (one pixel of margin, for its ring),
+        # not the whole picture: same result, but a 2000 x 2000 boxy map that
+        # took 80 s here (smoothed on load, see boxy.py) now takes 1-2 s
+        boxes = ndimage.find_objects(comps)
+        for i in small:
+            sl = boxes[i - 1]
+            r0, r1 = max(sl[0].start - 1, 0), min(sl[0].stop + 1, H)
+            c0, c1 = max(sl[1].start - 1, 0), min(sl[1].stop + 1, W)
+            m = comps[r0:r1, c0:c1] == i
             ring = ndimage.binary_dilation(m) & ~m
             if ring.any():
-                lab[m] = np.bincount(lab[ring]).argmax()
+                win = lab[r0:r1, c0:c1]
+                win[m] = np.bincount(win[ring]).argmax()
     return lab
 
 
@@ -772,19 +784,20 @@ def _smooth_regions(lab):
     from shapely.ops import polygonize, unary_union
 
     clean = _absorb_specks(lab)
+    H, W = clean.shape                                 # the canvas; any size for boxy.py
     lines = [LineString(_smooth_chain(pts, closed)).simplify(SMOOTH_SIMPLIFY_PX, preserve_topology=True)
              for pts, closed in _border_chains(clean)]
     by_region: dict = {}
     for face in polygonize(unary_union(lines)):        # the union nodes any two curves that cross
         x0, y0, x1, y1 = face.bounds
-        rr, cc = np.mgrid[max(int(y0), 0):min(int(np.ceil(y1)), CANVAS), max(int(x0), 0):min(int(np.ceil(x1)), CANVAS)]
+        rr, cc = np.mgrid[max(int(y0), 0):min(int(np.ceil(y1)), H), max(int(x0), 0):min(int(np.ceil(x1)), W)]
         shapely.prepare(face)
         inside = shapely.contains_xy(face, cc.ravel() + 0.5, rr.ravel() + 0.5)
         if inside.any():
             cls = int(np.bincount(clean[rr.ravel()[inside], cc.ravel()[inside]]).argmax())
         else:
             q = face.representative_point()
-            cls = int(clean[min(int(q.y), CANVAS - 1), min(int(q.x), CANVAS - 1)])
+            cls = int(clean[min(max(int(q.y), 0), H - 1), min(max(int(q.x), 0), W - 1)])
         if cls:
             by_region.setdefault(cls, []).append(face)
     return {c: unary_union(v) for c, v in by_region.items()}
