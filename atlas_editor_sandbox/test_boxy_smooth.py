@@ -252,6 +252,20 @@ check("hemi untouched, the 5 regions smoothed", 5 not in res["smoothed"] and out
 check("smoothed regions stay inside hemi",
       shapely.union_all(geoms(out)[:5]).difference(hemi).area < 1.0)
 
+print("a hand-drawn (smooth) hemi hugging the tissue edge: no ground inside it is left to no region")
+for pad in (0.0, STEP * 0.5, STEP * 3):
+    F = boxy_map()
+    u = shapely.union_all(geoms(F))
+    hemi = u.buffer(pad + 1.0, quad_segs=16) if pad else u.convex_hull.intersection(u.buffer(STEP * 0.6))
+    F.append({"type": "Feature", "properties": {"name": "hemi"}, "geometry": mapping(hemi)})
+    res = B.smooth(F, range(5), P._smooth_regions)
+    out = geoms(apply(F, res))
+    lost = u.intersection(hemi).difference(shapely.union_all(out[:5]))
+    over = [out[i].intersection(out[j]).area for i in range(5) for j in range(i + 1, 5)]
+    check(f"hemi {pad:.0f} px out: all 5 smoothed, nothing uncovered, no overlap",
+          sorted(res["smoothed"]) == list(range(5)) and lost.area < 1.0 and max(over) < 1.0,
+          f"smoothed {sorted(res['smoothed'])} lost {lost.area:.1f} px2 overlap {max(over):.1f}")
+
 print("two predictions on different grids (left + right files) are each smoothed")
 L = boxy_map()
 R = [{**f, "properties": {"name": f["properties"]["name"] + "_R"},

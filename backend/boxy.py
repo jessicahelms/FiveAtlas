@@ -296,6 +296,7 @@ def smooth(features, eligible, smooth_lab, overlays=()):
             on_top.append(gv)                           # an ROI, a drawn box, a moved region
     # under a shape lying on the regions nothing changes: the stairs stay there, so
     # what it covers (cells, damage hosts, overlaps) is exactly what it covered
+    containers_u = unary_union(containers) if containers else None
     on_top_u = unary_union(on_top) if on_top else Polygon()
     if not on_top_u.is_empty:
         shapely.prepare(on_top_u)
@@ -363,6 +364,16 @@ def smooth(features, eligible, smooth_lab, overlays=()):
                 for i, g in list(new.items()):
                     if geoms[i].difference(c).area < 0.01 * geoms[i].area:
                         new[i] = g.intersection(c)
+            if containers_u is not None:
+                # inside hemi, ground a region covered that smoothing left to no region
+                # (rounded-off stair corners along the tissue edge) goes back to it:
+                # cells there stay in the region they were in, never "unassigned"
+                taken = unary_union(list(new.values()) + ([fixed_u] if not fixed_u.is_empty else []))
+                for i, g in list(new.items()):
+                    back = valid(geoms[i]).intersection(containers_u).difference(taken)
+                    if not back.is_empty and back.area > 0:
+                        new[i] = unary_union([g, back])
+                        taken = unary_union([taken, back])
             if not on_top_u.is_empty:
                 for i, g in list(new.items()):
                     if g.intersects(on_top_u) or geoms[i].intersects(on_top_u):
